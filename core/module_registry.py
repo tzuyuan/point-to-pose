@@ -2,7 +2,7 @@
 from typing import Callable, Dict, Type
 
 
-class Registry:
+class ModuleRegistry:
     def __init__(self, name: str):
         self.name = name
         self._items: Dict[str, Callable] = {}
@@ -22,8 +22,9 @@ class Registry:
         return self._items[key]
 
 
-REGISTER = Registry("register")
-TRACKER = Registry("tracker")
-STATE = Registry("state")
-SAMPLER = Registry("sampler")
-OPTIM = Registry("optimizer")
+REGISTER = ModuleRegistry("register")
+TRACKER = ModuleRegistry("tracker")
+STATE = ModuleRegistry("state")
+SAMPLER = ModuleRegistry("sampler")
+CRITERION = ModuleRegistry("criterion")
+OPTIM = ModuleRegistry("optimizer")

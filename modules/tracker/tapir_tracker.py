@@ -14,8 +14,8 @@ from tapnet.torch import tapir_model
 from tapnet.utils import transforms
 from tapnet.utils import viz_utils
 
-from point2pose.src.core.base_tracker import Tracker
-from point2pose.src.core.registry import TRACKER
+from core.base_tracker import Tracker
+from core.module_registry import TRACKER
 
 
 @TRACKER.register_module("tapir")
@@ -138,18 +138,6 @@ class TapirTracker(Tracker):
         frames = frames.float()
         frames = frames / 255 * 2 - 1
         return frames
-
-    def _sample_query_points(self, click_point):
-        if not self._use_multi_points:
-            return click_point
-        else:
-            # Sample random points around the clicked point
-
-            points = self._sample_random_points_in_box_around_pt(
-                click_point, self._num_sample_points, box_size=self._sample_box_size
-            )
-            points = np.concatenate((points, click_point), axis=0)
-            return points
 
     def _convert_select_points_to_query_points(self, frame_id, points):
         """Convert select points to query points.
