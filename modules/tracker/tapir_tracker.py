@@ -20,6 +20,11 @@ from core.module_registry import TRACKER
 
 @TRACKER.register_module("tapir")
 class TapirTracker(Tracker):
+    """
+    TAPIR tracker implementation.
+    TAPIR performs 2D point tracking in RGB image streams.
+    """
+
     def __init__(self, config):
         super().__init__(config)
         self.name = "tapir"
