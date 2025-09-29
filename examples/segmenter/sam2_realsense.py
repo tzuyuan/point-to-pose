@@ -257,6 +257,8 @@ class SAM2RealSenseRealTimeSegmenter:
             # Cleanup
             self.pipeline.stop()
             cv2.destroyAllWindows()
+            if torch.cuda.is_available():
+                torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
 
 
 def main():
