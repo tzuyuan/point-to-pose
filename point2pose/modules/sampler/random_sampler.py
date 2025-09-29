@@ -1,4 +1,4 @@
-from core.base_sampler import Sampler
+from point2pose.core.base_sampler import Sampler
 
 
 class RandomSampler:

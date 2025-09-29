@@ -1,6 +1,6 @@
 # src/point2pose/core/build.py
 from typing import Mapping, Any
-from .registry import REGISTER, TRACKER, STATE, SAMPLER, OPTIM
+from point2pose.core.module_registry import REGISTER, TRACKER, STATE, SAMPLER, OPTIM
 
 
 def build_from_cfg(cfg: Mapping[str, Any], registry):

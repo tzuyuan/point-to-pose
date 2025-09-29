@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from data_types.criterion_context import CriterionContext
+
+from point2pose.data_types.criterion_context import CriterionContext
 
 
 class SampleCriterion(ABC):

@@ -1,21 +1,27 @@
+import sys
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).resolve().parents[2]))
+
 import cv2
 import numpy as np
 import torch
 import pyrealsense2 as rs
-from sam2.build_sam import build_sam2_camera_predictor
-from pathlib import Path
+from types import SimpleNamespace
+
+from point2pose.modules.segmenter.sam2_real_time_segmenter import Sam2RealTimeSegmenter
 
 
-# use bfloat16 for the entire script
-torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+# use bfloat16 for the entire script (if CUDA available)
+if torch.cuda.is_available():
+    torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+    if torch.cuda.get_device_properties(0).major >= 8:
+        # turn on tfloat32 for Ampere GPUs
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
-if torch.cuda.get_device_properties(0).major >= 8:
-    # turn on tfloat32 for Ampere GPUs
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
 
-
-class RealSenseSegmentationTracker:
+class SAM2RealSenseRealTimeSegmenter:
     """
     RealSense tracker for SAM2 segmentation.
     The tracker segments objects in real-time using a RealSense camera.
@@ -35,12 +41,17 @@ class RealSenseSegmentationTracker:
                              [Note] This path is relative to the segment-anything-2-real-time/ directory.
             rs_serial (int): Serial number of the RealSense camera.
         """
-        project_root = Path(__file__).resolve().parents[2]
-        sam2_checkpoint = project_root / sam2_checkpoint
-        # Initialize SAM2 predictor
-        self.predictor = build_sam2_camera_predictor(
-            model_cfg,
-            sam2_checkpoint,
+        # Build a minimal config object for the segmenter
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # The segmenter expects config.get(...) and config.device
+        self.segmenter = Sam2RealTimeSegmenter(
+            SimpleNamespace(
+                device=device,
+                get=lambda key, default=None: {
+                    "model_cfg": model_cfg,
+                    "sam2_checkpoint": sam2_checkpoint,
+                }.get(key, default),
+            )
         )
 
         # Initialize RealSense pipeline
@@ -70,7 +81,7 @@ class RealSenseSegmentationTracker:
         print("- Press 'q': Quit")
         print("- Press 'r': Reset points")
 
-    def mouse_callback(self, event, x, y, flags, param):  # noqa: ARG002, ARG002
+    def mouse_callback(self, event, x, y, _flags, _param):
         """Handle mouse clicks for point collection"""
         if event == cv2.EVENT_LBUTTONDOWN:
             # Left click - positive point
@@ -93,7 +104,7 @@ class RealSenseSegmentationTracker:
         print("Points reset. Click to add new points.")
 
     def start_tracking(self):
-        """Initialize SAM2 tracking with collected points"""
+        """Initialize SAM2 tracking with collected points using the segmenter"""
         if len(self.click_points) == 0:
             print("No points collected! Please click on objects first.")
             return False
@@ -112,45 +123,16 @@ class RealSenseSegmentationTracker:
         frame = np.asanyarray(color_frame.get_data())
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # Initialize SAM2 with first frame
-        self.predictor.load_first_frame(frame_rgb)
+        # Add points into the segmenter and initialize
+        self.segmenter.add_input_points(points.tolist(), labels.tolist())
+        self.segmenter.initialize(frame_rgb)
 
-        # Add points for each object (grouping points by consecutive positive labels)
-        obj_id = 1
-        current_points = []
-        current_labels = []
-
-        for point, label in zip(points, labels):
-            if label == 1:  # Positive point - start new object
-                if current_points:  # Save previous object if exists
-                    self.predictor.add_new_prompt(
-                        frame_idx=0,
-                        obj_id=obj_id,
-                        points=np.array(current_points, dtype=np.float32),
-                        labels=np.array(current_labels, dtype=np.int32),
-                    )
-                    obj_id += 1
-                    current_points = []
-                    current_labels = []
-
-                current_points.append(point)
-                current_labels.append(label)
-            else:  # Negative point - add to current object
-                current_points.append(point)
-                current_labels.append(label)
-
-        # Add the last object
-        if current_points:
-            self.predictor.add_new_prompt(
-                frame_idx=0,
-                obj_id=obj_id,
-                points=np.array(current_points, dtype=np.float32),
-                labels=np.array(current_labels, dtype=np.int32),
-            )
-
-        self.tracking_started = True
-        print(f"Started tracking {obj_id} object(s) with {len(points)} points")
-        return True
+        self.tracking_started = self.segmenter.tracking_started
+        if self.tracking_started:
+            print(f"Started tracking with {len(points)} points")
+        else:
+            print("No objects added. Add positive points before starting.")
+        return self.tracking_started
 
     def run(self):
         """Main tracking loop"""
@@ -213,8 +195,8 @@ class RealSenseSegmentationTracker:
                     )
 
                 else:
-                    # Perform tracking
-                    out_obj_ids, out_mask_logits = self.predictor.track(frame_rgb)
+                    # Perform tracking via segmenter
+                    out_obj_ids, out_mask_logits = self.segmenter.segment(frame_rgb)
                     self.frame_count += 1
 
                     # Create mask visualization
@@ -225,7 +207,6 @@ class RealSenseSegmentationTracker:
                         out_mask = (out_mask_logits[i] > 0.0).permute(
                             1, 2, 0
                         ).cpu().numpy().astype(np.uint8) * 255
-
                         # Color each object differently
                         hue = (i + 3) / (len(out_obj_ids) + 3) * 255
                         all_mask[out_mask[..., 0] == 255, 0] = hue
@@ -279,10 +260,10 @@ class RealSenseSegmentationTracker:
 
 
 def main():
-    """Main function to run the RealSense tracker"""
+    """Main function to run the SAM2 RealSense segmentation tracker"""
     try:
-        tracker = RealSenseSegmentationTracker()
-        tracker.run()
+        segmenter = SAM2RealSenseRealTimeSegmenter()
+        segmenter.run()
     except (RuntimeError, OSError, ImportError) as e:
         print(f"Error: {e}")
         print("Make sure you have:")

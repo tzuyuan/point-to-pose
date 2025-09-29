@@ -14,8 +14,8 @@ from tapnet.torch import tapir_model
 from tapnet.utils import transforms
 from tapnet.utils import viz_utils
 
-from core.base_tracker import Tracker
-from core.module_registry import TRACKER
+from point2pose.core.base_tracker import Tracker
+from point2pose.core.module_registry import TRACKER
 
 
 @TRACKER.register_module("tapir")
@@ -84,7 +84,7 @@ class TapirTracker(Tracker):
                 for k, v in self._causal_state[i].items():
                     self._causal_state[i][k] = v.to(self._device)
 
-        print(f"[Tracker] Initialized with {self._query_points.shape[0]} points.")
+        print(f"[TAPIR] Initialized with {self._query_points.shape[0]} points.")
         return True
 
     def track_once(self, rgb_image):

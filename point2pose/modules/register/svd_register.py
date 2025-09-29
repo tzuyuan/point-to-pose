@@ -1,9 +1,9 @@
 import numpy as np
 
 
-from core.base_register import Register
-from core.module_registry import REGISTER
-from utils.transform import transform_pts
+from point2pose.core.base_register import Register
+from point2pose.core.module_registry import REGISTER
+from point2pose.utils.transform import transform_pts
 
 
 @REGISTER.register_module("svd")

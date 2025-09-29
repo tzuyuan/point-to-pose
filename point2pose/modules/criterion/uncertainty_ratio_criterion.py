@@ -1,8 +1,8 @@
 import numpy as np
 
-from core.base_criterion import SampleCriterion
-from core.module_registry import CRITERION
-from data_types.criterion_context import CriterionContext
+from point2pose.core.base_criterion import SampleCriterion
+from point2pose.core.module_registry import CRITERION
+from point2pose.data_types.criterion_context import CriterionContext
 
 
 @CRITERION.register_module("uncertainty_ratio")
