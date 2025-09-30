@@ -8,7 +8,7 @@ from point2pose.utils.transform import transform_pts
 
 @REGISTER.register_module("svd")
 class SVDRegister(Register):
-    def __init__(self):
+    def __init__(self, config=None):
         super().__init__()
 
     def register(self, src_pcd, tgt_pcd, init_pose=None):
@@ -44,7 +44,7 @@ class SVDRegister(Register):
         # compute the covariance matrix
         H = P.T @ Q
         # compute the SVD
-        U, S, Vt = np.linalg.svd(H)
+        U, _S, Vt = np.linalg.svd(H)
         # rotation
         R = Vt.T @ U.T
         if np.linalg.det(R) < 0:

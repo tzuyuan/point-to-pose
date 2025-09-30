@@ -10,12 +10,17 @@ class Frame:
     depth: Optional[np.ndarray] = None  # HxW float32 (meters) or uint16 raw
     mask: Optional[np.ndarray] = None  # HxW uint8/bool
 
+    # camera related
     intrinsics: Optional[np.ndarray] = None  # 3x3 float64
+    depth_factor: Optional[float] = None
+
+    timestamp: Optional[float] = None
+
+    # dataset related
     gt_pose: Optional[np.ndarray] = (
         None  # 4x4 float64 (world_T_cam or cam_T_obj—document it)
     )
     occ_mask: Optional[np.ndarray] = None  # HxW uint8/bool
     xyz_map: Optional[np.ndarray] = None  # HxWx3 float32 (if provided)
 
-    timestamp: Optional[float] = None
     meta: Dict[str, Any] = field(default_factory=dict)  # arbitrary extras

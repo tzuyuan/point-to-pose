@@ -6,20 +6,21 @@ from point2pose.core.base_segmenter import Segmenter
 from point2pose.core.module_registry import SEGMENTER
 
 
+@SEGMENTER.register_module("sam2")
 class Sam2RealTimeSegmenter(Segmenter):
     def __init__(self, config):
         super().__init__(config)
         self.name = "sam2_real_time"
-        self.device = config.device
+        self.device = config.get("device", "cpu")
 
         model_cfg = config.get("model_cfg", "configs/sam2.1/sam2.1_hiera_l.yaml")
-        sam2_checkpoint = config.get(
-            "sam2_checkpoint", "checkpoints/sam2.1/sam2.1_hiera_large.pt"
+        checkpoint = config.get(
+            "checkpoint", "checkpoints/sam2.1/sam2.1_hiera_large.pt"
         )
 
         self.predictor = build_sam2_camera_predictor(
             model_cfg,
-            sam2_checkpoint,
+            checkpoint,
         )
 
         self.input_points = []

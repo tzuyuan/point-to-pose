@@ -1,0 +1,25 @@
+
+
+register:
+  type: svd
+
+segmenter:
+  type: sam2
+  model_cfg: configs/sam2.1/sam2.1_hiera_l.yaml
+  checkpoint: checkpoints/sam2.1/sam2.1_hiera_large.pt
+  device: cuda
+
+tracker:
+  type: tapir
+  resize_height: 256
+  resize_width: 256
+  device: cuda
+  checkpoint_path: checkpoints/tapir/causal_bootstapir_checkpoint.pt
+
+sampler: 
+  type: random
+  num_points: 30
+  
+
+criterion:
+  type: iteration

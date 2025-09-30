@@ -6,8 +6,8 @@ class Object:
     Object class that keeps tracks of the 3D points belonging to the object.
     """
 
-    def __init__(self, name: str):
-        self.name = name
+    def __init__(self, id: int):
+        self.id = id
 
         # 3D points belonging to the object, represented in the initial object frame
         self.key_points = np.empty((0, 3))  # Nx3

@@ -6,7 +6,6 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
-import jax
 
 import cv2
 
@@ -87,11 +86,19 @@ class TapirTracker(Tracker):
         print(f"[TAPIR] Initialized with {self._query_points.shape[0]} points.")
         return True
 
-    def track_once(self, rgb_image):
+    def track_once(self, frame):
         """
         Track the points in the frame once.
+        Args:
+            frame: Frame object. Must contain rgb [H,W,3].
+
+        Returns:
+            tracks: tracked points in the original image coordinates.
+                    np.ndarray, shape (num_points, 2), [y, x]
+            uncertainties: np.ndarray, shape (num_points, 1), [uncertainty]
+            visibles: np.ndarray, shape (num_points, 1), [visible]
         """
-        rgb_resize = cv2.resize(rgb_image, (self._resize_width, self._resize_height))
+        rgb_resize = cv2.resize(frame.rgb, (self._resize_width, self._resize_height))
         frame = torch.tensor(rgb_resize).to(self._device)
 
         if not self._initialized:
@@ -117,7 +124,17 @@ class TapirTracker(Tracker):
                 return tracks, uncertainty.cpu().numpy(), visibles.cpu().numpy()
 
     def add_query_points(self, frame_id, new_points):
-        """ """
+        """
+        Add new query points to the tracker.
+        Args:
+            frame_id: int
+            new_points: np.ndarray, shape (num_new_points, 2), [y, x]
+        Returns:
+            newly added indices
+        """
+        # get old length
+        old_len = self._query_points.shape[0]
+
         new_query_points = self._convert_select_points_to_query_points(
             frame_id, new_points
         )  # [num_new_points, 3], [t, y, x]
@@ -130,6 +147,12 @@ class TapirTracker(Tracker):
             self._query_points = torch.cat(
                 (self._query_points, new_query_points), axis=0
             )
+
+        # get new length
+        new_len = self._query_points.shape[0]
+
+        # indices of the newly added points
+        return np.arange(old_len, new_len)
 
     def _preprocess_frames(self, frames):
         """Preprocess frames to model inputs.
