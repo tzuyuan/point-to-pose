@@ -61,6 +61,8 @@ class TapirTracker(Tracker):
         Args:
             frame: [height, width, 3], np.uint8
         """
+        rgb_resize = cv2.resize(frame.rgb, (self._resize_width, self._resize_height))
+        rgb_resize_tensor = torch.tensor(rgb_resize).to(self._device)
 
         # if no query points, return False
         if self._query_points is None:
@@ -69,7 +71,7 @@ class TapirTracker(Tracker):
         # Initialize query features
         self._query_features = self._online_model_init(
             self._model,
-            frame.unsqueeze(0).unsqueeze(0),
+            rgb_resize_tensor.unsqueeze(0).unsqueeze(0),
             self._query_points[None],
         )
         # Initialize causal state
@@ -101,27 +103,32 @@ class TapirTracker(Tracker):
         rgb_resize = cv2.resize(frame.rgb, (self._resize_width, self._resize_height))
         frame = torch.tensor(rgb_resize).to(self._device)
 
-        if not self._initialized:
-            self._initialized = self.initialize(frame)
-            return None, None, None
-        else:
-            with torch.no_grad():
-                # Predict trajectories and occlusions
-                tracks_resized, uncertainty, visibles, self._causal_state = (
-                    self._online_model_predict(
-                        self._model,
-                        frame[None, None],
-                        self._query_features,
-                        self._causal_state,
-                    )
+        # if not self._initialized:
+        #     self._initialized = self.initialize(frame)
+        #     out_point = self._query_points.clone().cpu().numpy()
+        #     return (
+        #         out_point,
+        #         np.ones(out_point.shape[0]),
+        #         np.ones(out_point.shape[0]),
+        #     )
+        # else:
+        with torch.no_grad():
+            # Predict trajectories and occlusions
+            tracks_resized, uncertainty, visibles, self._causal_state = (
+                self._online_model_predict(
+                    self._model,
+                    frame[None, None],
+                    self._query_features,
+                    self._causal_state,
                 )
-                tracks = transforms.convert_grid_coordinates(
-                    tracks_resized.cpu(),
-                    (self._resize_width, self._resize_height),
-                    (self._img_width, self._img_height),
-                ).view(-1, 2)
+            )
+            tracks = transforms.convert_grid_coordinates(
+                tracks_resized.cpu(),
+                (self._resize_width, self._resize_height),
+                (self._img_width, self._img_height),
+            ).view(-1, 2)
 
-                return tracks, uncertainty.cpu().numpy(), visibles.cpu().numpy()
+            return tracks, uncertainty.cpu().numpy(), visibles.cpu().numpy()
 
     def add_query_points(self, frame_id, new_points):
         """
@@ -132,27 +139,55 @@ class TapirTracker(Tracker):
         Returns:
             newly added indices
         """
-        # get old length
-        old_len = self._query_points.shape[0]
-
         new_query_points = self._convert_select_points_to_query_points(
             frame_id, new_points
         )  # [num_new_points, 3], [t, y, x]
+        new_query_points = torch.tensor(
+            new_query_points, dtype=torch.float32, device=self._device
+        )
 
         if self._query_points is None:
-            self._query_points = torch.tensor(
-                new_query_points, dtype=torch.float32, device=self._device
-            )
+            old_len = 0
+            self._query_points = new_query_points
         else:
+            print(f"[TAPIR] Adding {new_query_points.shape[0]} new points.")
+            print(f"[TAPIR] Total points before adding: {self._query_points.shape[0]}")
+            old_len = self._query_points.shape[0]
             self._query_points = torch.cat(
                 (self._query_points, new_query_points), axis=0
             )
+
+            # expand causal state
+            self._expand_causal_state(new_query_points.shape[0] - old_len)
+            print(f"[TAPIR] Total points after adding: {self._query_points.shape[0]}")
 
         # get new length
         new_len = self._query_points.shape[0]
 
         # indices of the newly added points
         return np.arange(old_len, new_len)
+
+    def _expand_causal_state(self, n_new: int, point_axis: int = 1):
+        """
+        Grow every per-point tensor in your causal_state list-of-dicts by n_new along point_axis.
+        Leaves non-tensors untouched. Returns a structure with the same nesting.
+        """
+        if self._causal_state is None or n_new <= 0:
+            return self._causal_state
+
+        out = []
+        for level_dict in self._causal_state:
+            new_level = {}
+            for k, v in level_dict.items():
+                if torch.is_tensor(v) and v.dim() > point_axis:
+                    shape = list(v.shape)
+                    shape[point_axis] = n_new
+                    pad = torch.zeros(shape, dtype=v.dtype, device=v.device)
+                    new_level[k] = torch.cat([v, pad], dim=point_axis)
+                else:
+                    new_level[k] = v
+            out.append(new_level)
+        return out
 
     def _preprocess_frames(self, frames):
         """Preprocess frames to model inputs.

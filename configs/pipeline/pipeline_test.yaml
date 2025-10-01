@@ -1,25 +1,35 @@
 
+pipeline:
+  params:
+    estimate_init_pose: true
+
 
 register:
   type: svd
 
 segmenter:
   type: sam2
-  model_cfg: configs/sam2.1/sam2.1_hiera_l.yaml
-  checkpoint: checkpoints/sam2.1/sam2.1_hiera_large.pt
-  device: cuda
+  params:
+    model_cfg: configs/sam2.1/sam2.1_hiera_l.yaml
+    checkpoint: /home/justin/code/point-to-pose/checkpoints/sam2.1/sam2.1_hiera_large.pt
+    device: cuda
 
 tracker:
   type: tapir
-  resize_height: 256
-  resize_width: 256
-  device: cuda
-  checkpoint_path: checkpoints/tapir/causal_bootstapir_checkpoint.pt
+  params:
+    resize_height: 256
+    resize_width: 256
+    device: cuda
+    checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
 
 sampler: 
   type: random
-  num_points: 30
-  
+  params:
+    num_points: 30
+    debug_level: 2
+    debug_dir: /home/justin/code/point-to-pose/debug/sampler
 
 criterion:
   type: iteration
+  params:
+    update_per_iter: 1

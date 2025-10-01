@@ -6,6 +6,7 @@ import numpy as np
 
 @dataclass(slots=True)
 class Frame:
+    id: int
     rgb: np.ndarray  # HxWx3 uint8 (BGR or RGB—pick one convention)
     depth: Optional[np.ndarray] = None  # HxW float32 (meters) or uint16 raw
     mask: Optional[np.ndarray] = None  # HxW uint8/bool

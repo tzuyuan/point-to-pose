@@ -9,10 +9,10 @@ class IterationCriterion(SampleCriterion):
     Iteration criterion checks for every N iterations and returns true.
     """
 
-    def __init__(self, return_every_n_iterations=1):
+    def __init__(self, config):
         super().__init__()
         self._cur_iter = 0
-        self._return_every_n_iterations = return_every_n_iterations
+        self._return_every_n_iterations = config.get("update_per_iter", 5)
 
     def check_sample_criterion(self, context: CriterionContext) -> bool:
         """
@@ -24,6 +24,10 @@ class IterationCriterion(SampleCriterion):
         Returns:
             bool: True if the current iteration is a multiple of the return every n iterations, False otherwise.
         """
+        # Always return true for the first iteration
+        if context.cur_iter == 0:
+            return True
+
         if context.cur_iter is not None:
             self._cur_iter = context.cur_iter
         else:

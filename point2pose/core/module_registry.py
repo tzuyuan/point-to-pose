@@ -1,4 +1,3 @@
-# src/point2pose/core/registry.py
 from typing import Callable, Dict, Type
 
 

@@ -13,6 +13,7 @@ from point2pose.core.module_registry import (
     OPTIM,
 )
 from point2pose.data_types.criterion_context import CriterionContext
+from point2pose.data_types.point_track_table import PointTrackTable
 from point2pose.modules.object.object import Object
 from point2pose.utils.camera import convert_pixel_to_world
 
@@ -20,20 +21,7 @@ from point2pose.utils.camera import convert_pixel_to_world
 class Pipeline:
     def __init__(self, cfg):
         self.cfg = cfg
-        # reference to ensure the imported module is considered used
-        print("REGISTER items:")
-
-        print(REGISTER._items)
-        print("TRACKER items:")
-        print(TRACKER._items)
-        print("SAMPLER items:")
-        print(SAMPLER._items)
-        print("CRITERION items:")
-        print(CRITERION._items)
-        print("SEGMENTER items:")
-        print(SEGMENTER._items)
-        print("OPTIM items:")
-        print(OPTIM._items)
+        self.pipeline_cfg = cfg.pipeline.params
 
         self.register = build_from_cfg(cfg.register, REGISTER)
         self.segmenter = build_from_cfg(cfg.segmenter, SEGMENTER)
@@ -46,6 +34,7 @@ class Pipeline:
         self.frame_id = 0
 
         self.crit_ctx = CriterionContext()
+        self.track_table = PointTrackTable.new(n0=0)
 
         self.num_obj = 0
         self.objects = []
@@ -54,55 +43,110 @@ class Pipeline:
         self.track2obj_map = {}  # index -> obj_id. (int -> int)
         self.obj2track_map = {}  # obj_id -> indices. (int -> np.ndarray)
 
-        self.initialized = False
+        self._prev_track_3d = None
+        self._prev_track_valid = None
+
+        self._seg_initialized = False
+        self._track_initialized = False
+
+        self._estimate_init_pose = self.pipeline_cfg.get("estimate_init_pose", False)
 
     # -------- one-time init with user clicks ----------
-    def add_user_points(
-        self, obj_points: dict[int, list[tuple[int, int]]], labels: dict[int, list[int]]
-    ):
+    def add_user_points(self, obj_points: list[list[int]], labels: list[int]):
+        """
+        points (List[List[int]]): List of points, each defined by [x, y].
+            labels (List[int]): List of labels, each defined by 1 or 0.
+                                1 means positive point, 0 means negative point.
+        """
         # forward to segmenter; it will start tracking objects internally
-        for obj_id, pts in obj_points.items():
-            self.segmenter.add_input_points(pts, labels[obj_id])
+
+        self.segmenter.add_input_points(obj_points, labels)
 
     # -------- main loop per frame ----------
     def step(self, frame):
+        # initialize objects
+        if not self._seg_initialized:
+            self.segmenter.initialize(frame.rgb)
+            # obj_ids, _ = self.segmenter.segment(frame.rgb)
+
+            # find out number of 1 in labels, which is a list
+            self.num_obj = np.sum(np.asarray(self.segmenter.input_labels) == 1)
+            for obj_id in range(self.num_obj):
+                self.objects.append(Object(obj_id))
+
+            self._seg_initialized = True
+
         # Segmentation -> masks per object
         obj_ids, mask_logits = self.segmenter.segment(frame.rgb)
         frame.mask = mask_logits.cpu().numpy()
 
-        # initialize objects
-        if not self.initialized:
-            self.initialized = True
-            self.num_obj = len(obj_ids)
-            for obj_id in obj_ids:
-                self.objects.append(Object(obj_id))
-
+        # set frame id in criterion context
+        self.crit_ctx.cur_iter = self.frame_id
+        new_indices_all = []
         # Check sample criteria
         for obj_id in range(self.num_obj):
             ## TODO: make crit_ctx to be object-specific?
             if self.criterion.check_sample_criterion(self.crit_ctx):
                 # Sample points
-                new_sampled_points = self.sampler.sample(frame)
+                new_sampled_points = self.sampler.sample(frame, obj_id)
 
                 # add new sampled points to the tracker
                 new_indices = self.tracker.add_query_points(
                     frame.id, new_sampled_points
                 )
 
+                new_indices_all.extend(new_indices.tolist())
+
                 # update track2obj_map and obj2track_map
-                self.track2obj_map[new_indices] = obj_id
-                self.obj2track_map[obj_id] = np.concatenate(
-                    (self.obj2track_map[obj_id], new_indices)
+                self.track2obj_map.update(
+                    {int(idx): obj_id for idx in new_indices.tolist()}
                 )
+                # update obj2track_map
+                if obj_id in self.obj2track_map:
+                    self.obj2track_map[obj_id] = np.concatenate(
+                        (self.obj2track_map[obj_id], new_indices)
+                    )
+                else:
+                    self.obj2track_map[obj_id] = new_indices
 
-        # Track points
-        tracks, uncertainties, visibles = self.tracker.track_once(frame)
+                # update track_table
+                self.track_table.append(len(new_indices), obj_id, frame.id)
+        print(len(self.track_table))
+        # Track points using 2d tracker
+        if not self._track_initialized:
+            self.tracker.initialize(frame)
+            self._track_initialized = True
 
-        tracks_3d, valid_idx = convert_pixel_to_world(
-            tracks,
-            frame.depth,
-            frame.intrinsics,
-            frame.depth_factor,
+        else:
+            tracks, uncertainties, visibles = self.tracker.track_once(frame)
+            print(f"[Pipeline] Tracked {tracks.shape[0]} points.")
+            N = len(self.track_table)
+            print(N, len(uncertainties), len(visibles))
+            self.track_table.visible[:N] = visibles  # or scatter by returned ids
+            self.track_table.last_seen[visibles] = self.frame_id
+            self.track_table.uncertainty[:N] = uncertainties
+
+        # convert tracks into 3D points using depth and intrinsics
+        track_3d, track_valid = convert_pixel_to_world(
+            pixel=tracks,
+            depth_image=frame.depth,
+            cam_intrinsics=frame.intrinsics,
+            depth_factor=frame.depth_factor,
         )
 
+        if self.frame_id == 0:
+            self._prev_track_3d = track_3d
+            self._prev_track_valid = track_valid
+
+            self.frame_id += 1
+
+            if self._estimate_init_pose:
+                # estimate initial pose
+                # for obj_id in range(self.num_obj):
+                pass
+
+            # return np.eye(4)
+
         self.frame_id += 1
+
+        return track_3d, track_valid
