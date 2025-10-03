@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from point2pose.modules.segmenter.sam2_real_time_segmenter import Sam2RealTimeSegmenter
 
+import time
 
 # use bfloat16 for the entire script (if CUDA available)
 if torch.cuda.is_available():
@@ -49,7 +50,7 @@ class SAM2RealSenseRealTimeSegmenter:
                 device=device,
                 get=lambda key, default=None: {
                     "model_cfg": model_cfg,
-                    "sam2_checkpoint": sam2_checkpoint,
+                    "checkpoint": sam2_checkpoint,
                 }.get(key, default),
             )
         )
@@ -197,6 +198,7 @@ class SAM2RealSenseRealTimeSegmenter:
                 else:
                     # Perform tracking via segmenter
                     out_obj_ids, out_mask_logits = self.segmenter.segment(frame_rgb)
+
                     self.frame_count += 1
 
                     # Create mask visualization
