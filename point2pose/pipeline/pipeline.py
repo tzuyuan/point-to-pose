@@ -91,9 +91,7 @@ class Pipeline:
                 new_sampled_points = self.sampler.sample(frame, obj_id)
 
                 # add new sampled points to the tracker
-                new_indices = self.tracker.add_query_points(
-                    frame.id, new_sampled_points
-                )
+                new_indices = self.tracker.add_query_points(frame, new_sampled_points)
 
                 new_indices_all.extend(new_indices.tolist())
 
@@ -111,20 +109,22 @@ class Pipeline:
 
                 # update track_table
                 self.track_table.append(len(new_indices), obj_id, frame.id)
-        print(len(self.track_table))
+
         # Track points using 2d tracker
         if not self._track_initialized:
+            # if first frame,initialize 2d tracker, and return current query
             self.tracker.initialize(frame)
             self._track_initialized = True
-
+            tracks = self.tracker.query_points.clone().cpu().numpy()
         else:
+            # track points using 2d tracker
             tracks, uncertainties, visibles = self.tracker.track_once(frame)
-            print(f"[Pipeline] Tracked {tracks.shape[0]} points.")
+
+            # update track_table
             N = len(self.track_table)
-            print(N, len(uncertainties), len(visibles))
-            self.track_table.visible[:N] = visibles  # or scatter by returned ids
-            self.track_table.last_seen[visibles] = self.frame_id
-            self.track_table.uncertainty[:N] = uncertainties
+            self.track_table.visible[:N] = visibles.reshape(-1)
+            self.track_table.last_seen[visibles.reshape(-1)] = self.frame_id
+            self.track_table.uncertainty[:N] = uncertainties.reshape(-1)
 
         # convert tracks into 3D points using depth and intrinsics
         track_3d, track_valid = convert_pixel_to_world(
