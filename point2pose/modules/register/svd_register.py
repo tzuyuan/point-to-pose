@@ -9,7 +9,7 @@ from point2pose.utils.transform import transform_pts
 @REGISTER.register_module("svd")
 class SVDRegister(Register):
     def __init__(self, config=None):
-        super().__init__()
+        super().__init__(config)
 
     def register(self, src_pcd, tgt_pcd, init_pose=None):
         """

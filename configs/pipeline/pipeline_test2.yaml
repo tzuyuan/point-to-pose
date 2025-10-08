@@ -34,4 +34,4 @@ sampler:
 criterion:
   type: iteration
   params:
-    update_per_iter: 20
+    update_per_iter: 5

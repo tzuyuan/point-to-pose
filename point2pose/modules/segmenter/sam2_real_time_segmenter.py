@@ -1,9 +1,18 @@
 import numpy as np
+import torch
 
 from sam2.build_sam import build_sam2_camera_predictor
 
 from point2pose.core.base_segmenter import Segmenter
 from point2pose.core.module_registry import SEGMENTER
+
+# use bfloat16 for the entire script (if CUDA available)
+if torch.cuda.is_available():
+    torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+    if torch.cuda.get_device_properties(0).major >= 8:
+        # turn on tfloat32 for Ampere GPUs
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
 
 @SEGMENTER.register_module("sam2")

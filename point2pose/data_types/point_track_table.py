@@ -11,20 +11,29 @@ class PointTrackTable:
     """
 
     # size == current number of tracker points
-    obj_id: np.ndarray  # (N,) int, -1 if unassigned
-    created_at: np.ndarray  # (N,) int frame id
-    last_seen: np.ndarray  # (N,) int frame id
+    track_3d: np.ndarray  # (N, 3) float  3d tracked points
     visible: np.ndarray  # (N,) bool (from tracker)
-    valid2d: np.ndarray  # (N,) bool (bounds etc.)
-    valid3d: np.ndarray  # (N,) bool (depth projection valid)
-    outlier_keep: np.ndarray  # (N,) bool (your composed outlier filter)
-    active: np.ndarray  # (N,) bool (final “use in register” flag)
-
-    # Optional: confidences/uncertainty per point
+    valid: np.ndarray  # (N,) bool (depth projection valid)
     uncertainty: np.ndarray  # (N,) float
+    # outlier_keep: np.ndarray  # (N,) bool (your composed outlier filter)
+    # active: np.ndarray  # (N,) bool (final “use in register” flag)
+
+    # created_at: np.ndarray  # (N,) int frame id
+    # last_seen: np.ndarray  # (N,) int frame id
+    # track is the 2d tracked points in tracker
+    # obj is the object id in the pipeline
+    track2obj_map: Dict[int, int] = field(
+        default_factory=dict
+    )  # index -> obj_id. (int -> int)
+    obj2track_map: Dict[int, np.ndarray] = field(
+        default_factory=dict
+    )  # obj_id -> indices. (int -> np.ndarray)
 
     def __len__(self):
-        return self.obj_id.shape[0]
+        """
+        Return the number of points being tracked in the tracker.
+        """
+        return self.track_3d.shape[0]
 
     @classmethod
     def new(cls, n0=0):
@@ -34,30 +43,63 @@ class PointTrackTable:
             return a
 
         return cls(
-            obj_id=arr(n0, np.int32, -1),
-            created_at=arr(n0, np.int32, -1),
-            last_seen=arr(n0, np.int32, -1),
+            track_3d=arr(n0, np.float32, np.nan),
             visible=arr(n0, np.bool_, False),
-            valid2d=arr(n0, np.bool_, False),
-            valid3d=arr(n0, np.bool_, False),
-            outlier_keep=arr(n0, np.bool_, False),
-            active=arr(n0, np.bool_, True),
+            valid=arr(n0, np.bool_, False),
             uncertainty=arr(n0, np.float32, np.nan),
+            # outlier_keep=arr(n0, np.bool_, False),
+            # active=arr(n0, np.bool_, True),
+            # created_at=arr(n0, np.int32, -1),
+            # last_seen=arr(n0, np.int32, -1),
         )
 
-    def append(self, k: int, obj: int, frame_id: int):
-        """Grow arrays by k and initialize newly added rows."""
-        N = len(self)
-        newN = N + k
-        for name, arr in self.__dict__.items():
-            self.__dict__[name] = np.resize(arr, newN)
-        self.obj_id[N:newN] = obj
-        self.created_at[N:newN] = frame_id
-        self.last_seen[N:newN] = frame_id
-        self.visible[N:newN] = False
-        self.valid2d[N:newN] = False
-        self.valid3d[N:newN] = False
-        self.outlier_keep[N:newN] = True
-        self.active[N:newN] = True
-        self.uncertainty[N:newN] = np.nan
-        return np.arange(N, newN, dtype=np.int32)  # tracker indices
+    # def append(
+    #     self,
+    #     k: int,
+    #     obj_id: int,
+    #     frame_id: int,
+    #     track_3d: np.ndarray,
+    #     visible: np.ndarray,
+    #     valid: np.ndarray,
+    #     uncertainty: np.ndarray,
+    # ):
+    #     """Grow arrays by k and initialize newly added rows."""
+    #     N = len(self)
+    #     newN = N + k
+
+    #     # Efficiently resize arrays using np.concatenate (much faster than np.resize)
+    #     self.track_3d = np.concatenate([self.track_3d, track_3d])
+    #     self.visible = np.concatenate([self.visible, visible])
+    #     self.valid = np.concatenate([self.valid, valid])
+    #     self.uncertainty = np.concatenate([self.uncertainty, uncertainty])
+
+    #     # Create new arrays for the new points with appropriate defaults
+    #     new_outlier_keep = np.full(k, True, dtype=np.bool_)
+    #     new_active = np.full(k, True, dtype=np.bool_)
+    #     new_created_at = np.full(k, frame_id, dtype=np.int32)
+    #     new_last_seen = np.full(k, frame_id, dtype=np.int32)
+
+    #     self.outlier_keep = np.concatenate([self.outlier_keep, new_outlier_keep])
+    #     self.active = np.concatenate([self.active, new_active])
+    #     self.created_at = np.concatenate([self.created_at, new_created_at])
+    #     self.last_seen = np.concatenate([self.last_seen, new_last_seen])
+
+    #     return np.arange(N, newN, dtype=np.int32)  # tracker indices
+
+    def add_new_points_to_track_obj_maps(self, new_indices: np.ndarray, obj_id: int):
+        # update track2obj_map and obj2track_map
+        self.track2obj_map.update({int(idx): obj_id for idx in new_indices.tolist()})
+
+        # update obj2track_map
+        if obj_id in self.obj2track_map:
+            self.obj2track_map[obj_id] = np.concatenate(
+                (self.obj2track_map[obj_id], new_indices)
+            )
+        else:
+            self.obj2track_map[obj_id] = new_indices
+
+    def update_track_table(self, track_3d, valid, uncertainties, visibles):
+        self.track_3d = track_3d
+        self.valid = valid.reshape(-1)
+        self.visible = visibles.reshape(-1)
+        self.uncertainty = uncertainties.reshape(-1)

@@ -1,4 +1,5 @@
 import numpy as np
+import cv2 as cv
 
 from point2pose.data_types.frame import Frame
 from point2pose.core.base_sampler import Sampler
@@ -36,7 +37,6 @@ class RandomSampler(Sampler):
         if self.debug_level >= 1:
             # use opencv to plot the points on the mask, as well as the rgb image and save them sperately
             # please save them under self.debug_dir
-            import cv2 as cv
 
             mask_img = cv.cvtColor(mask, cv.COLOR_GRAY2BGR)
             rgb_img = cv.cvtColor(frame.rgb, cv.COLOR_RGB2BGR)

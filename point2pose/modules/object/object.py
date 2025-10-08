@@ -18,6 +18,7 @@ class Object:
             4
         )  # 4x4 transformation matrix from object frame to world frame
 
+        self.init_bbox = None
         self.bbox = (
             None  # 3D bounding box of the object, represented in the object frame
         )

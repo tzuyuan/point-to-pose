@@ -17,6 +17,13 @@ from point2pose.data_types.query_feature import QueryFeatures
 from point2pose.core.base_tracker import Tracker
 from point2pose.core.module_registry import TRACKER
 
+# if torch.cuda.is_available():
+#     torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+#     if torch.cuda.get_device_properties(0).major >= 8:
+#         # turn on tfloat32 for Ampere GPUs
+#         torch.backends.cuda.matmul.allow_tf32 = True
+#         torch.backends.cudnn.allow_tf32 = True
+
 
 @TRACKER.register_module("tapir")
 class TapirTracker(Tracker):
@@ -129,7 +136,11 @@ class TapirTracker(Tracker):
                 (self._img_width, self._img_height),
             ).view(-1, 2)
 
-            return tracks.numpy(), uncertainty.cpu().numpy(), visibles.cpu().numpy()
+            return (
+                tracks.float().numpy(),
+                uncertainty.cpu().float().numpy(),
+                visibles.cpu().float().numpy().reshape(-1),
+            )
 
     def add_query_points(self, frame, new_points):
         """
