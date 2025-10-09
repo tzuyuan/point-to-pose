@@ -2,7 +2,8 @@
 pipeline:
   params:
     estimate_init_pose: true
-    debug_level: 0
+    frame_to_map_reg: true
+    debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/
 
 
@@ -28,10 +29,10 @@ sampler:
   type: random
   params:
     num_points: 30
-    debug_level: 0
+    debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/sampler
 
 criterion:
   type: iteration
   params:
-    update_per_iter: 20
+    update_per_iter: 5

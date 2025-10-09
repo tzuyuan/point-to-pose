@@ -21,6 +21,7 @@ from point2pose.data_types.point_track_table import PointTrackTable
 from point2pose.modules.object.object import Object
 from point2pose.utils.camera import convert_pixel_to_world
 from point2pose.utils.point_cloud_io import save_reg_pcd
+from point2pose.utils.transform import transform_pts
 
 
 class Pipeline:
@@ -50,11 +51,11 @@ class Pipeline:
         self.num_obj = 0
         self.objects = []
 
-        self.prev3d_way_before = None
-        self.prev3d_before = None
-        self.curr3d_before = None
-        self.prev3d_after = None
-        self.curr3d_after = None
+        # self.prev3d_way_before = None
+        # self.prev3d_before = None
+        # self.curr3d_before = None
+        self.prev3d = None
+        self.curr3d = None
 
         self._estimate_init_pose = self.pipeline_cfg.get("estimate_init_pose", False)
         self._frame2map_reg = self.pipeline_cfg.get("frame_to_map_reg", False)
@@ -80,10 +81,6 @@ class Pipeline:
         # get number of objects
         self.num_obj = np.sum(np.asarray(self.segmenter.input_labels) == 1)
 
-        # initialize objects
-        for obj_id in range(self.num_obj):
-            self.objects.append(Object(obj_id))
-
         # get segmentation mask
         obj_ids, mask_logits = self.segmenter.segment(frame.rgb)
         frame.mask = mask_logits.cpu().numpy()
@@ -102,7 +99,21 @@ class Pipeline:
             cam_intrinsics=frame.intrinsics,
             depth_factor=frame.depth_factor,
         )
-        self.prev3d_way_before = track_3d
+
+        # initialize objects
+        for obj_id in range(self.num_obj):
+            self.objects.append(Object(obj_id))
+            self.objects[obj_id].pose = np.eye(4)
+            # assign the key points to the object
+            self.objects[obj_id].key_points = track_3d[
+                self.track_table.obj2track_map[obj_id]
+            ]
+            self.objects[obj_id].valid = track_valid[
+                self.track_table.obj2track_map[obj_id]
+            ]
+
+        # update track table
+        # self.prev3d_way_before = track_3d
         # self.track_table.append(
         #     k=len(tracks),
         #     frame_id=frame.id,
@@ -173,19 +184,72 @@ class Pipeline:
         for obj_id in range(self.num_obj):
             # frame to map registration
             if self._frame2map_reg:
-                pass
+
+                idx, key_points, curr3d = self.extract_valid_key_points(
+                    self.objects[obj_id],
+                    self.track_table.obj2track_map[obj_id],
+                    track_3d,
+                    visibles,
+                    track_valid,
+                )
+
+                # if self.debug_level > 1:
+                #     reg_debug_dir = os.path.join(self.debug_dir, "register")
+                #     if not os.path.exists(reg_debug_dir):
+                #         os.makedirs(reg_debug_dir, exist_ok=True)
+                #     save_reg_pcd(
+                #         key_points,
+                #         curr3d,
+                #         np.eye(4),
+                #         reg_debug_dir,
+                #         f"obj_{obj_id}_frame_{self.frame_id}",
+                #     )
+                print(f"key_points shape: {key_points.shape}")
+                print(f"curr3d shape: {curr3d.shape}")
+                if key_points.shape[0] < 3 or curr3d.shape[0] < 3:
+                    continue
+
+                # pose_to_key = self.register.register(key_points, curr3d)
+
+                pose_to_key = self.solve_reg_svd_refine(
+                    key_points, curr3d, return_inliers=False
+                )
+
+                print(f"pose_to_key shape: {pose_to_key.shape}")
+                print(
+                    f"self.objects[obj_id].init_pose shape: {self.objects[obj_id].init_pose.shape}"
+                )
+                pose = pose_to_key @ self.objects[obj_id].init_pose
+                self.objects[obj_id].pose = pose
+
+                self.prev3d = key_points
+                self.curr3d = curr3d
+                print(f"pose at frame {self.frame_id}: {pose}")
+
+                if self.debug_level > 1:
+                    reg_debug_dir = os.path.join(self.debug_dir, "register")
+                    if not os.path.exists(reg_debug_dir):
+                        os.makedirs(reg_debug_dir, exist_ok=True)
+                    save_reg_pcd(
+                        key_points,
+                        curr3d,
+                        pose_to_key,
+                        reg_debug_dir,
+                        f"obj_{obj_id}_frame_{self.frame_id}",
+                    )
+
             # frame to frame registration
             else:
                 idx, prev3d, curr3d = self.extract_valid_idx_points_for_obj(
                     obj_id, self.track_table, track_3d, track_valid, visibles
                 )
-                self.prev3d_before = self.track_table.track_3d
-                self.curr3d_before = track_3d
-                self.prev3d_after = prev3d
-                self.curr3d_after = curr3d
+                # self.prev3d_before = self.track_table.track_3d
+                # self.curr3d_before = track_3d
+                # self.prev3d_after = prev3d
+                # self.curr3d_after = curr3d
 
                 pose = self.register.register(prev3d, curr3d)
-                self.objects[obj_id].pose = pose
+                self.objects[obj_id].pose = pose @ self.objects[obj_id].pose
                 print(f"pose at frame {self.frame_id}: {pose}")
                 if self.debug_level > 1:
                     reg_debug_dir = os.path.join(self.debug_dir, "register")
@@ -262,6 +326,31 @@ class Pipeline:
                 # update track2obj_map and obj2track_map
                 self.track_table.add_new_points_to_track_obj_maps(new_indices, obj_id)
 
+                # update the key points of the objects
+                new_points_3d, valid_new_points_3d = convert_pixel_to_world(
+                    pixel=new_sampled_points,
+                    depth_image=frame.depth,
+                    cam_intrinsics=frame.intrinsics,
+                    depth_factor=frame.depth_factor,
+                )
+
+                new_points_3d_obj_frame = transform_pts(
+                    np.linalg.inv(
+                        self.objects[obj_id].pose
+                        @ np.linalg.inv(self.objects[obj_id].init_pose)
+                    ),
+                    new_points_3d,
+                )
+                self.objects[obj_id].key_points = np.concatenate(
+                    (self.objects[obj_id].key_points, new_points_3d_obj_frame)
+                )
+                self.objects[obj_id].valid = np.concatenate(
+                    (
+                        self.objects[obj_id].valid,
+                        valid_new_points_3d,
+                    )
+                )
+
     def _estimate_init_pose_and_bbox_for_all_obj(self, frame):
         out_pose = np.tile(np.eye(4), (self.num_obj, 1, 1))
         # estimate initial pose
@@ -270,6 +359,10 @@ class Pipeline:
             mask = frame.mask[obj_id, 0]
             y_coords, x_coords = np.where(mask > 0)
             valid_pxl_in_mask = np.stack([x_coords, y_coords], axis=1)
+
+            ## TODO: remove this potentially
+            mean_mask_pixel = np.mean(np.stack([x_coords, y_coords], axis=1), axis=0)
+
             ## TODO: Add outlier removal
             initial_3d_points, _ = convert_pixel_to_world(
                 pixel=valid_pxl_in_mask,
@@ -281,12 +374,61 @@ class Pipeline:
             # estimate initial bbox
             pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(initial_3d_points)
-            self.objects[obj_id].init_bbox = pcd.get_oriented_bounding_box()
+
+            ## Temporary outlier removal
+            ## TODO: Make this a class
+            pcd_stat_outlier_removal = False
+            pcd_stat_outlier_removal_nb_neighbors = 20
+            pcd_stat_outlier_removal_std_ratio = 2.0
+            pcd_radius_outlier_removal = True
+            pcd_radius_outlier_removal_radius = 0.1
+
+            if pcd_stat_outlier_removal:
+                _, ind_stat = pcd.remove_statistical_outlier(
+                    nb_neighbors=pcd_stat_outlier_removal_nb_neighbors,
+                    std_ratio=pcd_stat_outlier_removal_std_ratio,
+                )
+            if pcd_radius_outlier_removal:
+                # Distance-based outlier removal if clicked point is provided
+                mean_mask_pixel_world, _ = convert_pixel_to_world(
+                    pixel=mean_mask_pixel,
+                    depth_image=frame.depth,
+                    cam_intrinsics=frame.intrinsics,
+                    cam2world=np.eye(4),
+                    depth_factor=frame.depth_factor,
+                )
+                # Calculate distances from clicked point to all points
+                points_array = initial_3d_points
+                distances = np.linalg.norm(points_array - mean_mask_pixel_world, axis=1)
+
+                # Keep points within a reasonable distance (e.g., 0.2 meters)
+                max_distance = pcd_radius_outlier_removal_radius
+                close_indices = np.where(distances <= max_distance)[0]
+
+            ind_union = None
+            if pcd_stat_outlier_removal and pcd_radius_outlier_removal:
+                ind_union = np.intersect1d(ind_stat, close_indices)
+            elif pcd_stat_outlier_removal:
+                ind_union = ind_stat
+            elif pcd_radius_outlier_removal:
+                ind_union = close_indices
+
+            if ind_union is not None:
+                pcd_world_clean = pcd.select_by_index(ind_union)
+            else:
+                pcd_world_clean = pcd
+
+            self.objects[obj_id].init_bbox = pcd_world_clean.get_oriented_bounding_box()
+            # self.objects[obj_id].init_bbox = pcd.get_axis_aligned_bounding_box()
             self.objects[obj_id].bbox = self.objects[obj_id].init_bbox
             # set the initial pose
             out_pose[obj_id, :3, :3] = self.objects[obj_id].init_bbox.R
             out_pose[obj_id, :3, 3] = self.objects[obj_id].init_bbox.center
             self.objects[obj_id].pose = out_pose[obj_id]
+            self.objects[obj_id].init_pose = out_pose[obj_id]
+            # self.objects[obj_id].pose = np.eye(4)
+            # out_pose[obj_id] = np.eye(4)
+            # -----------------------------------------
 
             if self.debug_level > 1:
 
@@ -314,6 +456,39 @@ class Pipeline:
                     obb_ls,
                 )
         return out_pose
+
+    def extract_valid_key_points(
+        self, obj, obj_idx, cur_pts_3d, cur_visible, cur_valid
+    ):
+        """
+        Args:
+            obj_idx:     (M,) global indices for this object's points
+            cur_pts_3d:  (N,3) global 3D point array
+            cur_visible: (N,) bool visibility mask for all points
+            cur_valid:   (N,) bool validity mask for all points
+            obj.key_points: (M,3) per-object key points (aligned with obj_idx)
+        Returns:
+            idx:        (K,) global indices of valid & visible points
+            key_points: (K,3) subset from obj.key_points
+            curr3d:     (K,3) subset from cur_pts_3d
+        """
+        obj_idx = np.asarray(obj_idx)
+
+        valid_kp_bool = np.asarray(obj.valid, dtype=bool)  # M bool
+
+        # object-local visibility mask (aligned with obj_idx)
+        vis_obj = np.asarray(cur_visible, dtype=bool)[obj_idx]
+        val_obj = np.asarray(cur_valid, dtype=bool)[obj_idx]
+        both_mask = vis_obj & val_obj & valid_kp_bool  # (M,)
+
+        # global indices for valid+visible points
+        idx = obj_idx[both_mask]  # (K,)
+
+        # per-object arrays use local mask; global arrays use global idx
+        key_points = obj.key_points[both_mask].copy()
+        curr3d = cur_pts_3d[idx].copy()
+
+        return idx, key_points, curr3d
 
     def extract_valid_idx_points_for_obj(
         self,
@@ -351,3 +526,110 @@ class Pipeline:
         prev3d = track_table.track_3d[idx].copy()
         curr3d = curr_pts_3d[idx].copy()
         return idx, prev3d, curr3d
+
+    def solve_reg_svd_refine(
+        self,
+        p: np.ndarray,
+        q: np.ndarray,
+        init_pose: np.ndarray | None = None,
+        max_iters: int = 2,
+        inlier_thresh: (
+            float | None
+        ) = None,  # e.g., 0.02 meters; if None, use MAD-based auto threshold
+        mad_scale: float = 2.5,  # larger -> keep more points (auto mode only)
+        min_inliers: int = 3,
+        return_inliers: bool = True,
+    ):
+        """
+        Robust rigid registration (SVD/Procrustes) with one or more outlier-removal refinements.
+
+        Args:
+            p, q: (N,3) source/target with known correspondence (row-wise).
+            init_pose: optional (4,4) prior; applied to p before fitting.
+            max_iters: total SVD->cull->SVD cycles (>=1).
+            inlier_thresh: absolute distance threshold. If None, an automatic MAD-based threshold is used.
+            mad_scale: threshold = median(res) + mad_scale * MAD (if inlier_thresh is None).
+            min_inliers: minimum inliers required to continue.
+            return_inliers: if True, also return the final boolean inlier mask.
+
+        Returns:
+            T: (4,4) src->trg transform
+            (optional) inliers: (N,) bool mask of points used in the final fit
+            (optional) stats: dict with residual stats
+        """
+        assert p.shape == q.shape and p.shape[1] == 3
+        N = p.shape[0]
+        if N < 3:
+            raise ValueError("Need at least 3 correspondences.")
+
+        def _svd_fit(pa, qa):
+            # Pa, Qa: (M,3) centered fit
+            cp = pa.mean(axis=0)
+            cq = qa.mean(axis=0)
+            P = pa - cp
+            Q = qa - cq
+            H = P.T @ Q
+            U, S, Vt = np.linalg.svd(H)
+            R = Vt.T @ U.T
+            if np.linalg.det(R) < 0:
+                Vt[-1, :] *= -1
+                R = Vt.T @ U.T
+            t = cq - R @ cp
+            T = np.eye(4)
+            T[:3, :3] = R
+            T[:3, 3] = t
+            return T
+
+        def _apply(T, pts):
+            pts_h = np.c_[pts, np.ones((pts.shape[0], 1))]
+            out = (T @ pts_h.T).T
+            return out[:, :3]
+
+        # start with optional prior
+        p0 = _apply(init_pose, p) if init_pose is not None else p.copy()
+
+        # initial fit (all points)
+        T = _svd_fit(p0, q)
+
+        # iterate: compute residuals, cull, refit
+        inliers = np.ones(N, dtype=bool)
+        stats = {}
+        for it in range(max_iters):
+            p_T = _apply(T, p0)
+            residuals = np.linalg.norm(p_T - q, axis=1)
+
+            # choose threshold
+            if inlier_thresh is None:
+                med = np.median(residuals)
+                mad = np.median(np.abs(residuals - med)) + 1e-12
+                thr = (
+                    med + mad_scale * 1.4826 * mad
+                )  # 1.4826 makes MAD ~ std for Gaussian
+            else:
+                thr = float(inlier_thresh)
+
+            new_inliers = residuals <= thr
+
+            stats[f"iter_{it}"] = {
+                "thr": float(thr),
+                "res_median": float(np.median(residuals)),
+                "res_mean": float(np.mean(residuals)),
+                "res_max": float(np.max(residuals)),
+                "num_inliers": int(np.count_nonzero(new_inliers)),
+            }
+
+            # stop if no change or too few inliers
+            if np.array_equal(new_inliers, inliers) or new_inliers.sum() < min_inliers:
+                break
+
+            inliers = new_inliers
+            # refit on inliers
+            T = _svd_fit(p0[inliers], q[inliers])
+
+        # compose with init_pose to map original p -> q
+        if init_pose is not None:
+            T = T @ init_pose
+
+        if return_inliers:
+            return T, inliers, stats
+        return T

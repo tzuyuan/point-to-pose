@@ -10,10 +10,12 @@ class Object:
         self.id = id
 
         # 3D points belonging to the object, represented in the initial object frame
-        self.key_points = np.empty((0, 3))  # Nx3
+        self.key_points = np.empty((0, 3))  # Mx3
         self.uncertainties = np.empty((0,))
+        self.valid = np.empty((0,))  # M, bool
 
         # pose of the object
+        self.init_pose = np.eye(4)
         self.pose = np.eye(
             4
         )  # 4x4 transformation matrix from object frame to world frame

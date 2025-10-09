@@ -10,7 +10,7 @@ def main(args):
 
     # Determine file paths based on whether object number is provided
     if args.object_number is not None:
-        # Construct paths using object number
+        # get root directory of the project
         project_root = os.path.dirname(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         )
@@ -86,7 +86,9 @@ if __name__ == "__main__":
     )
 
     # get project root
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    project_root = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
 
     # set default to /home/justin/code/point-to-pose/debug/pipeline/initial_bbx/initial_pcd_0.ply
     parser.add_argument(

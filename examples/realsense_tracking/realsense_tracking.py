@@ -12,6 +12,9 @@ from omegaconf import OmegaConf
 from point2pose.pipeline.pipeline import Pipeline
 from point2pose.data_types.frame import Frame
 
+# from point2pose.data_types.object import Object
+from point2pose.utils.visualization import draw_xyz_axis, draw_posed_3d_box
+
 
 class RealSensePipelineTracker:
     """
@@ -20,7 +23,10 @@ class RealSensePipelineTracker:
     """
 
     def __init__(
-        self, config_path="configs/pipeline/pipeline_test2.yaml", rs_serial=242422304947
+        self,
+        config_path="configs/pipeline/pipeline_test2.yaml",
+        # rs_serial=242422304947
+        # rs_serial=941322070969,
     ):
         """
         Args:
@@ -30,6 +36,7 @@ class RealSensePipelineTracker:
         # Load configuration using OmegaConf
         self.cfg = OmegaConf.load(config_path)
 
+        rs_serial = self.cfg.rs_serial
         # Initialize pipeline
         self.pipeline = Pipeline(self.cfg)
 
@@ -61,6 +68,9 @@ class RealSensePipelineTracker:
         config.enable_device(str(rs_serial))
         config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
         config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+
+        align_to = rs.stream.color
+        self._rs_align = rs.align(align_to)
 
         # Start streaming
         profile = self.rs_pipeline.start(config)
@@ -124,14 +134,22 @@ class RealSensePipelineTracker:
         color_frame = frames.get_color_frame()
         depth_frame = frames.get_depth_frame()
 
-        if not color_frame or not depth_frame:
+        # Align the depth frame to color frame
+        aligned_frames = self._rs_align.process(frames)
+        # Get aligned frames
+        aligned_depth_frame = (
+            aligned_frames.get_depth_frame()
+        )  # aligned_depth_frame is a 640x480 depth image
+        color_frame = aligned_frames.get_color_frame()
+
+        if not color_frame or not aligned_depth_frame:
             print("Failed to get frames for initialization")
             return False
 
         # Convert frames to numpy arrays
         frame_rgb = np.asanyarray(color_frame.get_data())
         frame_rgb = cv2.cvtColor(frame_rgb, cv2.COLOR_BGR2RGB)
-        frame_depth = np.asanyarray(depth_frame.get_data()).astype(np.float32)
+        frame_depth = np.asanyarray(aligned_depth_frame.get_data()).astype(np.float32)
 
         # Create Frame object for pipeline
         frame = Frame(
@@ -159,17 +177,27 @@ class RealSensePipelineTracker:
 
     def create_frame_from_realsense(self, frame_id):
         """Create Frame object from RealSense data"""
+        # Get current frame for initialization
         frames = self.rs_pipeline.wait_for_frames()
         color_frame = frames.get_color_frame()
         depth_frame = frames.get_depth_frame()
 
-        if not color_frame or not depth_frame:
-            return None
+        # Align the depth frame to color frame
+        aligned_frames = self._rs_align.process(frames)
+        # Get aligned frames
+        aligned_depth_frame = (
+            aligned_frames.get_depth_frame()
+        )  # aligned_depth_frame is a 640x480 depth image
+        color_frame = aligned_frames.get_color_frame()
+
+        if not color_frame or not aligned_depth_frame:
+            print("Failed to get frames for initialization")
+            return False
 
         # Convert frames to numpy arrays
         frame_rgb = np.asanyarray(color_frame.get_data())
         frame_rgb = cv2.cvtColor(frame_rgb, cv2.COLOR_BGR2RGB)
-        frame_depth = np.asanyarray(depth_frame.get_data()).astype(np.float32)
+        frame_depth = np.asanyarray(aligned_depth_frame.get_data()).astype(np.float32)
 
         # Create Frame object
         frame = Frame(
@@ -200,7 +228,7 @@ class RealSensePipelineTracker:
 
         return np.array([x, y, z]) * 180 / np.pi  # Convert to degrees
 
-    def visualize_tracking_results(self, frame, poses):
+    def visualize_tracking_results(self, frame, objects):
         """Visualize tracking results on the frame"""
         display_frame = frame.rgb.copy()
         display_frame = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
@@ -224,30 +252,18 @@ class RealSensePipelineTracker:
             display_frame = cv2.addWeighted(display_frame, 1, mask_overlay, 0.5, 0)
 
         # Draw pose information
-        for i, pose in enumerate(poses):
-            if pose is not None:
-                # Draw object ID and pose info
-                cv2.putText(
-                    display_frame,
-                    f"Obj {i}: t=({pose[0,3]:.2f}, {pose[1,3]:.2f}, {pose[2,3]:.2f})",
-                    (10, 30 + i * 25),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (255, 255, 255),
-                    1,
-                )
+        for i, obj in enumerate(objects):
+            if obj.pose is not None:
+                half = 0.5 * np.asarray(obj.bbox.extent, dtype=float)
+                bbox_min_max_local = np.vstack([-half, +half])  # (2,3)
 
-                # Draw rotation info
-                euler = self.rotation_matrix_to_euler(pose[:3, :3])
-                cv2.putText(
+                display_frame = draw_posed_3d_box(
+                    self.camera_intrinsics,
                     display_frame,
-                    f"  r=({euler[0]:.1f}, {euler[1]:.1f}, {euler[2]:.1f})",
-                    (10, 45 + i * 25),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
-                    (200, 200, 200),
-                    1,
+                    obj.pose,
+                    bbox_min_max_local,
                 )
+                display_frame = draw_xyz_axis(image=display_frame, ob_in_cam=obj.pose)
 
         return display_frame
 
@@ -314,11 +330,11 @@ class RealSensePipelineTracker:
                         continue
 
                     # Run pipeline step
-                    self.current_poses = self.pipeline.step(frame)
+                    self.pipeline.step(frame)
 
                     # Visualize results
                     display_frame = self.visualize_tracking_results(
-                        frame, self.current_poses
+                        frame, self.pipeline.objects
                     )
 
                     # Show tracking info
