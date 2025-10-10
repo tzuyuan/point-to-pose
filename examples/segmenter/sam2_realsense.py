@@ -32,7 +32,7 @@ class SAM2RealSenseRealTimeSegmenter:
         self,
         sam2_checkpoint="checkpoints/sam2.1/sam2.1_hiera_large.pt",
         model_cfg="configs/sam2.1/sam2.1_hiera_l.yaml",
-        rs_serial=242422304947,
+        rs_serial=941322070969,
     ):
         """
         Args:
@@ -197,7 +197,9 @@ class SAM2RealSenseRealTimeSegmenter:
 
                 else:
                     # Perform tracking via segmenter
+                    t = time.time()
                     out_obj_ids, out_mask_logits = self.segmenter.segment(frame_rgb)
+                    print(f"Segmentation time: {time.time() - t}")
 
                     self.frame_count += 1
 

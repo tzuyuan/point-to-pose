@@ -6,6 +6,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 import cv2
 import numpy as np
+import torch
 import pyrealsense2 as rs
 from omegaconf import OmegaConf
 
@@ -242,11 +243,48 @@ class RealSensePipelineTracker:
 
             for i in range(len(frame.mask)):
                 obj_mask = frame.mask[i, 0] > 0.0
+                ## TODO: optimize this by removing the cpu().numpy()
+                obj_mask = obj_mask.cpu().numpy()
                 if np.any(obj_mask):
                     # Color each object differently
                     hue = (i + 3) / (len(frame.mask) + 3) * 255
                     mask_overlay[obj_mask, 0] = hue
                     mask_overlay[obj_mask, 2] = 255
+            # masks: [K,1,H,W] -> [K,H,W] bool on CUDA
+            # masks = frame.mask[:, 0] > 0
+
+            # K, H, W = masks.shape
+
+            # # For pixels with multiple objects, take the first object's index.
+            # # (With 0/1 masks, argmax returns the first True along dim=0.)
+            # idx_first = torch.argmax(masks.int(), dim=0)  # [H,W]
+            # has_any = masks.any(dim=0)  # [H,W] bool
+
+            # # Precompute hues per object on GPU
+            # hues = (
+            #     (
+            #         (
+            #             (torch.arange(K, device=masks.device, dtype=torch.float32) + 3)
+            #             / (K + 3)
+            #         )
+            #         * 255.0
+            #     )
+            #     .round()
+            #     .to(torch.uint8)
+            # )  # [K]
+
+            # # Build overlay on GPU: [H,W,3] uint8
+            # overlay = torch.zeros((H, W, 3), dtype=torch.uint8, device=masks.device)
+
+            # # Write hue to channel 0 and set channel 2 = 255 where masked
+            # overlay[..., 0] = torch.where(has_any, hues[idx_first], overlay[..., 0])
+            # overlay[..., 2] = torch.where(
+            #     has_any,
+            #     torch.tensor(255, dtype=torch.uint8, device=masks.device),
+            #     overlay[..., 2],
+            # )
+
+            # mask_overlay = overlay.cpu().numpy()
 
             mask_overlay = cv2.cvtColor(mask_overlay, cv2.COLOR_HSV2BGR)
             display_frame = cv2.addWeighted(display_frame, 1, mask_overlay, 0.5, 0)

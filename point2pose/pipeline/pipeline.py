@@ -5,6 +5,8 @@ import time
 import numpy as np
 import open3d as o3d
 
+import torch
+
 from point2pose.core.build import build_from_cfg
 
 import point2pose.modules as _modules  # trigger registrations
@@ -83,7 +85,7 @@ class Pipeline:
 
         # get segmentation mask
         obj_ids, mask_logits = self.segmenter.segment(frame.rgb)
-        frame.mask = mask_logits.cpu().numpy()
+        frame.mask = mask_logits
 
         # ------------- sampler -------------
         tracks = self._sample_for_all_obj(frame)
@@ -153,7 +155,7 @@ class Pipeline:
         # ------------- segmenter -------------
         segmenter_start = time.time()
         obj_ids, mask_logits = self.segmenter.segment(frame.rgb)
-        frame.mask = mask_logits.cpu().numpy()
+        frame.mask = mask_logits  # mask is a torch tensor on gpu
         segmenter_time = time.time() - segmenter_start
         print(f"Frame {self.frame_id} - Segmentation: {segmenter_time:.4f}s")
 
@@ -280,6 +282,7 @@ class Pipeline:
             # Sample points
             new_sampled_points = self.sampler.sample(frame, obj_id)
             all_sampled_points = np.vstack((all_sampled_points, new_sampled_points))
+            print(f"new_sampled_points shape: {new_sampled_points.shape}")
             # add new sampled points to the tracker
             new_indices = self.tracker.add_query_points(frame, new_sampled_points)
 
@@ -335,12 +338,21 @@ class Pipeline:
         # estimate initial pose
         for obj_id in range(self.num_obj):
             # get the initial 3d points from frame.mask
-            mask = frame.mask[obj_id, 0]
-            y_coords, x_coords = np.where(mask > 0)
-            valid_pxl_in_mask = np.stack([x_coords, y_coords], axis=1)
+            # mask = frame.mask[obj_id, 0]
+            # y_coords, x_coords = np.where(mask > 0)
+            # valid_pxl_in_mask = np.stack([x_coords, y_coords], axis=1)
+            # Keep masks on GPU
+            mask = frame.mask[obj_id, 0]  # [H, W] on cuda, dtype=bool/uint8
 
+            # Get (y,x) indices on GPU; switch to (x,y) like your NumPy code
+            coords_yx = torch.nonzero(mask > 0, as_tuple=False)  # [N, 2], (y,x)
+            valid_pxl_in_mask_g = coords_yx[
+                :, [1, 0]
+            ].contiguous()  # [N, 2], (x,y), still on GPU
+
+            valid_pxl_in_mask = valid_pxl_in_mask_g.cpu().numpy()
             ## TODO: remove this potentially
-            mean_mask_pixel = np.mean(np.stack([x_coords, y_coords], axis=1), axis=0)
+            mean_mask_pixel = np.mean(valid_pxl_in_mask, axis=0)
 
             ## TODO: Add outlier removal
             initial_3d_points, _ = convert_pixel_to_world(
@@ -416,7 +428,8 @@ class Pipeline:
                 os.makedirs(debug_bbx_dir, exist_ok=True)
 
                 # get color from frame.rgb
-                color = frame.rgb[y_coords, x_coords]
+                # color = frame.rgb[y_coords, x_coords]
+                color = frame.rgb[valid_pxl_in_mask[:, 1], valid_pxl_in_mask[:, 0]]
                 pcd.colors = o3d.utility.Vector3dVector(color / 255.0)
                 o3d.io.write_point_cloud(
                     os.path.join(debug_bbx_dir, f"initial_pcd_{obj_id}.ply"),

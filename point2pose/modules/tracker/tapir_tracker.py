@@ -69,29 +69,9 @@ class TapirTracker(Tracker):
         Args:
             frame: [height, width, 3], np.uint8
         """
-        rgb_resize = cv2.resize(frame.rgb, (self._resize_width, self._resize_height))
-        rgb_resize_tensor = torch.tensor(rgb_resize).to(self._device)
-
         # if no query points, return False
         if self.query_points is None:
             return False
-
-        # Initialize query features
-        self.query_features = self._online_model_init(
-            self._model,
-            rgb_resize_tensor.unsqueeze(0).unsqueeze(0),
-            self.query_points[None],
-        )
-        # Initialize causal state
-        self._causal_state = self._model.construct_initial_causal_state(
-            self.query_points.shape[0],
-            len(self.query_features.resolutions) - 1,
-        )
-        # self._causal_state = tree.map_structure(lambda x: x.to(self._device), self._causal_state)
-        with torch.no_grad():
-            for i in range(len(self._causal_state)):
-                for k, v in self._causal_state[i].items():
-                    self._causal_state[i][k] = v.to(self._device)
 
         print(f"[TAPIR] Initialized with {self.query_points.shape[0]} points.")
         return True
@@ -159,18 +139,31 @@ class TapirTracker(Tracker):
             new_query_points, dtype=torch.float32, device=self._device
         )
 
+        rgb_resize = cv2.resize(frame.rgb, (self._resize_width, self._resize_height))
+        rgb_resize_tensor = torch.tensor(rgb_resize).to(self._device)
+
         if self.query_points is None:
             old_len = 0
             self.query_points = new_query_points
+            # Initialize query features
+            self.query_features = self._online_model_init(
+                self._model,
+                rgb_resize_tensor.unsqueeze(0).unsqueeze(0),
+                self.query_points[None],
+            )
+            # Initialize causal state
+            self._causal_state = self._model.construct_initial_causal_state(
+                self.query_points.shape[0],
+                len(self.query_features.resolutions) - 1,
+            )
+            # self._causal_state = tree.map_structure(lambda x: x.to(self._device), self._causal_state)
+            with torch.no_grad():
+                for i in range(len(self._causal_state)):
+                    for k, v in self._causal_state[i].items():
+                        self._causal_state[i][k] = v.to(self._device)
         else:
             old_len = self.query_points.shape[0]
             self.query_points = torch.cat((self.query_points, new_query_points), axis=0)
-
-            # update query features
-            rgb_resize = cv2.resize(
-                frame.rgb, (self._resize_width, self._resize_height)
-            )
-            rgb_resize_tensor = torch.tensor(rgb_resize).to(self._device)
 
             new_qf = self._online_model_init(
                 self._model, rgb_resize_tensor[None, None], new_query_points[None]
