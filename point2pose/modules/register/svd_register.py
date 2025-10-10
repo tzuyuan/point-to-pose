@@ -42,8 +42,6 @@ class SVDRegister(Register):
         P = pa - cp
         Q = qa - cq
         # compute the covariance matrix
-        print(pa)
-        print("num nan in P: ", np.isnan(P).sum(), "num nan in Q: ", np.isnan(Q).sum())
         H = P.T @ Q
         # compute the SVD
         U, _S, Vt = np.linalg.svd(H)

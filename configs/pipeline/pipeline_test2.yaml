@@ -10,7 +10,14 @@ pipeline:
 
 
 register:
-  type: svd
+  type: svd_residual_outlier
+  params:
+    debug_level: 2
+    max_iter: 5
+    threshold_method: mad
+    inlier_thres: 0.1
+    mad_scale: 2.5
+    min_inliers: 3
 
 segmenter:
   type: sam2

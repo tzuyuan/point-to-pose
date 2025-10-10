@@ -193,32 +193,11 @@ class Pipeline:
                     track_valid,
                 )
 
-                # if self.debug_level > 1:
-                #     reg_debug_dir = os.path.join(self.debug_dir, "register")
-                #     if not os.path.exists(reg_debug_dir):
-                #         os.makedirs(reg_debug_dir, exist_ok=True)
-                #     save_reg_pcd(
-                #         key_points,
-                #         curr3d,
-                #         np.eye(4),
-                #         reg_debug_dir,
-                #         f"obj_{obj_id}_frame_{self.frame_id}",
-                #     )
-                print(f"key_points shape: {key_points.shape}")
-                print(f"curr3d shape: {curr3d.shape}")
                 if key_points.shape[0] < 3 or curr3d.shape[0] < 3:
                     continue
 
-                # pose_to_key = self.register.register(key_points, curr3d)
+                pose_to_key = self.register.register(key_points, curr3d)
 
-                pose_to_key = self.solve_reg_svd_refine(
-                    key_points, curr3d, return_inliers=False
-                )
-
-                print(f"pose_to_key shape: {pose_to_key.shape}")
-                print(
-                    f"self.objects[obj_id].init_pose shape: {self.objects[obj_id].init_pose.shape}"
-                )
                 pose = pose_to_key @ self.objects[obj_id].init_pose
                 self.objects[obj_id].pose = pose
 
@@ -526,110 +505,3 @@ class Pipeline:
         prev3d = track_table.track_3d[idx].copy()
         curr3d = curr_pts_3d[idx].copy()
         return idx, prev3d, curr3d
-
-    def solve_reg_svd_refine(
-        self,
-        p: np.ndarray,
-        q: np.ndarray,
-        init_pose: np.ndarray | None = None,
-        max_iters: int = 2,
-        inlier_thresh: (
-            float | None
-        ) = None,  # e.g., 0.02 meters; if None, use MAD-based auto threshold
-        mad_scale: float = 2.5,  # larger -> keep more points (auto mode only)
-        min_inliers: int = 3,
-        return_inliers: bool = True,
-    ):
-        """
-        Robust rigid registration (SVD/Procrustes) with one or more outlier-removal refinements.
-
-        Args:
-            p, q: (N,3) source/target with known correspondence (row-wise).
-            init_pose: optional (4,4) prior; applied to p before fitting.
-            max_iters: total SVD->cull->SVD cycles (>=1).
-            inlier_thresh: absolute distance threshold. If None, an automatic MAD-based threshold is used.
-            mad_scale: threshold = median(res) + mad_scale * MAD (if inlier_thresh is None).
-            min_inliers: minimum inliers required to continue.
-            return_inliers: if True, also return the final boolean inlier mask.
-
-        Returns:
-            T: (4,4) src->trg transform
-            (optional) inliers: (N,) bool mask of points used in the final fit
-            (optional) stats: dict with residual stats
-        """
-        assert p.shape == q.shape and p.shape[1] == 3
-        N = p.shape[0]
-        if N < 3:
-            raise ValueError("Need at least 3 correspondences.")
-
-        def _svd_fit(pa, qa):
-            # Pa, Qa: (M,3) centered fit
-            cp = pa.mean(axis=0)
-            cq = qa.mean(axis=0)
-            P = pa - cp
-            Q = qa - cq
-            H = P.T @ Q
-            U, S, Vt = np.linalg.svd(H)
-            R = Vt.T @ U.T
-            if np.linalg.det(R) < 0:
-                Vt[-1, :] *= -1
-                R = Vt.T @ U.T
-            t = cq - R @ cp
-            T = np.eye(4)
-            T[:3, :3] = R
-            T[:3, 3] = t
-            return T
-
-        def _apply(T, pts):
-            pts_h = np.c_[pts, np.ones((pts.shape[0], 1))]
-            out = (T @ pts_h.T).T
-            return out[:, :3]
-
-        # start with optional prior
-        p0 = _apply(init_pose, p) if init_pose is not None else p.copy()
-
-        # initial fit (all points)
-        T = _svd_fit(p0, q)
-
-        # iterate: compute residuals, cull, refit
-        inliers = np.ones(N, dtype=bool)
-        stats = {}
-        for it in range(max_iters):
-            p_T = _apply(T, p0)
-            residuals = np.linalg.norm(p_T - q, axis=1)
-
-            # choose threshold
-            if inlier_thresh is None:
-                med = np.median(residuals)
-                mad = np.median(np.abs(residuals - med)) + 1e-12
-                thr = (
-                    med + mad_scale * 1.4826 * mad
-                )  # 1.4826 makes MAD ~ std for Gaussian
-            else:
-                thr = float(inlier_thresh)
-
-            new_inliers = residuals <= thr
-
-            stats[f"iter_{it}"] = {
-                "thr": float(thr),
-                "res_median": float(np.median(residuals)),
-                "res_mean": float(np.mean(residuals)),
-                "res_max": float(np.max(residuals)),
-                "num_inliers": int(np.count_nonzero(new_inliers)),
-            }
-
-            # stop if no change or too few inliers
-            if np.array_equal(new_inliers, inliers) or new_inliers.sum() < min_inliers:
-                break
-
-            inliers = new_inliers
-            # refit on inliers
-            T = _svd_fit(p0[inliers], q[inliers])
-
-        # compose with init_pose to map original p -> q
-        if init_pose is not None:
-            T = T @ init_pose
-
-        if return_inliers:
-            return T, inliers, stats
-        return T
