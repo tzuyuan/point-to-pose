@@ -69,4 +69,6 @@ class RandomSampler(Sampler):
             cv.imwrite(f"{self.debug_dir}/{frame.id}_rgb_{obj_id}.png", rgb_img)
             print(f"[Random Sampler] Saved debug images to {self.debug_dir}")
 
+        print(f"[Random Sampler] Sampled {len(idx)} points for object {obj_id}")
+
         return valid_pixels[idx]

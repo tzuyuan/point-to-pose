@@ -88,49 +88,22 @@ class Pipeline:
         frame.mask = mask_logits
 
         # ------------- sampler -------------
-        tracks = self._sample_for_all_obj(frame)
+        self._sample_for_all_obj(frame)
 
         # ------------- tracker -------------
         self.tracker.initialize(frame)
-        # tracks = self.tracker.query_points.clone().cpu().numpy()
-
-        # convert tracks into 3D points using depth and intrinsics
-        track_3d, track_valid = convert_pixel_to_world(
-            pixel=tracks,
-            depth_image=frame.depth,
-            cam_intrinsics=frame.intrinsics,
-            depth_factor=frame.depth_factor,
-        )
 
         # initialize objects
         for obj_id in range(self.num_obj):
             self.objects.append(Object(obj_id))
             self.objects[obj_id].pose = np.eye(4)
             # assign the key points to the object
-            self.objects[obj_id].key_points = track_3d[
+            self.objects[obj_id].key_points = self.track_table.track_3d[
                 self.track_table.obj2track_map[obj_id]
             ]
-            self.objects[obj_id].valid = track_valid[
+            self.objects[obj_id].valid = self.track_table.valid[
                 self.track_table.obj2track_map[obj_id]
             ]
-
-        # update track table
-        # self.prev3d_way_before = track_3d
-        # self.track_table.append(
-        #     k=len(tracks),
-        #     frame_id=frame.id,
-        #     track_3d=track_3d,
-        #     visible=np.ones(len(tracks), dtype=bool),
-        #     valid=track_valid,
-        #     uncertainty=0.5 * np.ones(len(tracks), dtype=float),
-        # )
-
-        self.track_table.update_track_table(
-            track_3d=track_3d,
-            valid=track_valid,
-            uncertainties=0.5 * np.ones(len(tracks), dtype=float),
-            visibles=np.ones(len(tracks), dtype=bool),
-        )
 
         # estimate initial pose
         out_pose = np.tile(np.eye(4), (self.num_obj, 1, 1))
@@ -231,7 +204,7 @@ class Pipeline:
 
                 pose = self.register.register(prev3d, curr3d)
                 self.objects[obj_id].pose = pose @ self.objects[obj_id].pose
-                print(f"pose at frame {self.frame_id}: {pose}")
+                print(f"Frame {self.frame_id} - Object {obj_id} - Pose: {pose}")
                 if self.debug_level > 1:
                     reg_debug_dir = os.path.join(self.debug_dir, "register")
                     if not os.path.exists(reg_debug_dir):
@@ -244,30 +217,31 @@ class Pipeline:
                         f"obj_{obj_id}_frame_{self.frame_id}",
                     )
         register_time = time.time() - register_start
-        print(f"Frame {self.frame_id} - Registration: {register_time:.4f}s")
+        # print(f"Frame {self.frame_id} - Registration: {register_time:.4f}s")
 
         # update track table to the current frame info
         table_update_start = time.time()
         self.track_table.update_track_table(
-            track_3d, track_valid, uncertainties, visibles
+            tracks, track_3d, track_valid, uncertainties, visibles
         )
         table_update_time = time.time() - table_update_start
-        print(f"Frame {self.frame_id} - Track table update: {table_update_time:.4f}s")
+        # print(f"Frame {self.frame_id} - Track table update: {table_update_time:.4f}s")
 
         # ------------- criterion and sample -------------
         sampling_start = time.time()
-        self.crit_ctx.cur_iter = self.frame_id
+        self.crit_ctx.update_criterion_context(
+            cur_iter=self.frame_id, uncertainty=uncertainties
+        )
         self._check_and_sample_for_all_obj(frame)
         sampling_time = time.time() - sampling_start
-        print(f"Frame {self.frame_id} - Criterion and sampling: {sampling_time:.4f}s")
+        # print(f"Frame {self.frame_id} - Criterion and sampling: {sampling_time:.4f}s")
 
         self.frame_id += 1
 
         # Print total step time
         total_step_time = time.time() - step_start_time
-        print(f"Frame {self.frame_id-1} - Total step time: {total_step_time:.4f}s")
         print(
-            f"Frame {self.frame_id-1} - Breakdown: seg={segmenter_time:.3f}s, track={tracker_time:.3f}s, conv={conversion_time:.3f}s, reg={register_time:.3f}s, table={table_update_time:.3f}s, sample={sampling_time:.3f}s"
+            f"Frame {self.frame_id-1} - Total step time: {total_step_time:.4f}s - Breakdown: seg={segmenter_time:.3f}s, track={tracker_time:.3f}s, conv={conversion_time:.3f}s, reg={register_time:.3f}s, table={table_update_time:.3f}s, sample={sampling_time:.3f}s"
         )
         print("-" * 60)
 
@@ -289,7 +263,21 @@ class Pipeline:
             # update track2obj_map and obj2track_map
             self.track_table.add_new_points_to_track_obj_maps(new_indices, obj_id)
 
-        return all_sampled_points
+        # convert tracks into 3D points using depth and intrinsics
+        track_3d, track_valid = convert_pixel_to_world(
+            pixel=all_sampled_points,
+            depth_image=frame.depth,
+            cam_intrinsics=frame.intrinsics,
+            depth_factor=frame.depth_factor,
+        )
+
+        self.track_table.update_track_table(
+            track_2d=all_sampled_points,
+            track_3d=track_3d,
+            valid=track_valid,
+            uncertainties=0.5 * np.ones(len(all_sampled_points), dtype=float),
+            visibles=np.ones(len(all_sampled_points), dtype=bool),
+        )
 
     def _check_and_sample_for_all_obj(self, frame):
         """
@@ -331,6 +319,14 @@ class Pipeline:
                         self.objects[obj_id].valid,
                         valid_new_points_3d,
                     )
+                )
+
+                self.track_table.append_track_table(
+                    track_2d=new_sampled_points,
+                    track_3d=new_points_3d,
+                    valid=valid_new_points_3d,
+                    uncertainties=0.5 * np.ones(len(new_sampled_points), dtype=float),
+                    visibles=np.ones(len(new_sampled_points), dtype=bool),
                 )
 
     def _estimate_init_pose_and_bbox_for_all_obj(self, frame):

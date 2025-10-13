@@ -1,18 +1,20 @@
-rs_serial: 941322070969
+realsense:
+  params:
+    rs_serial: 941322070969
 
 
 pipeline:
   params:
     estimate_init_pose: true
     frame_to_map_reg: true
-    debug_level: 2
+    debug_level: 0
     debug_dir: /home/justin/code/point-to-pose/debug/
 
 
 register:
   type: svd_residual_outlier
   params:
-    debug_level: 2
+    debug_level: 0
     max_iter: 5
     threshold_method: mad
     inlier_thres: 0.1
@@ -37,11 +39,17 @@ tracker:
 sampler: 
   type: random
   params:
-    num_points: 30
-    debug_level: 2
+    num_points: 10
+    debug_level: 0
     debug_dir: /home/justin/code/point-to-pose/debug/sampler
 
 criterion:
-  type: iteration
+  type: uncertainty_ratio
   params:
-    update_per_iter: 10000
+    uncer_thres: 0.3
+    ratio_thres: 0.3
+
+visualization:
+  params:
+    visualize_points: true
+    points_vis_method: uncertainty

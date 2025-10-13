@@ -11,6 +11,7 @@ class PointTrackTable:
     """
 
     # size == current number of tracker points
+    track_2d: np.ndarray  # (N, 2) float  2d tracked points
     track_3d: np.ndarray  # (N, 3) float  3d tracked points
     visible: np.ndarray  # (N,) bool (from tracker)
     valid: np.ndarray  # (N,) bool (depth projection valid)
@@ -43,6 +44,7 @@ class PointTrackTable:
             return a
 
         return cls(
+            track_2d=arr(n0, np.float32, np.nan),
             track_3d=arr(n0, np.float32, np.nan),
             visible=arr(n0, np.bool_, False),
             valid=arr(n0, np.bool_, False),
@@ -98,8 +100,16 @@ class PointTrackTable:
         else:
             self.obj2track_map[obj_id] = new_indices
 
-    def update_track_table(self, track_3d, valid, uncertainties, visibles):
+    def update_track_table(self, track_2d, track_3d, valid, uncertainties, visibles):
+        self.track_2d = track_2d
         self.track_3d = track_3d
         self.valid = valid.reshape(-1)
         self.visible = visibles.reshape(-1)
         self.uncertainty = uncertainties.reshape(-1)
+
+    def append_track_table(self, track_2d, track_3d, valid, uncertainties, visibles):
+        self.track_2d = np.concatenate([self.track_2d, track_2d])
+        self.track_3d = np.concatenate([self.track_3d, track_3d])
+        self.valid = np.concatenate([self.valid, valid])
+        self.visible = np.concatenate([self.visible, visibles])
+        self.uncertainty = np.concatenate([self.uncertainty, uncertainties])

@@ -1,4 +1,5 @@
 import os
+import time
 import numpy as np
 import copy
 from typing import Optional
@@ -89,7 +90,8 @@ class TapirTracker(Tracker):
             visibles: np.ndarray, shape (num_points, 1), [visible]
         """
         rgb_resize = cv2.resize(frame.rgb, (self._resize_width, self._resize_height))
-        rgb_resize_tensor = torch.tensor(rgb_resize).to(self._device)
+        rgb_resize_pinned = torch.from_numpy(rgb_resize).pin_memory()
+        rgb_resize_tensor = rgb_resize_pinned.to(self._device, non_blocking=True)
 
         # if not self._initialized:
         #     self._initialized = self.initialize(frame)
@@ -118,7 +120,7 @@ class TapirTracker(Tracker):
 
             return (
                 tracks.float().numpy(),
-                uncertainty.cpu().float().numpy(),
+                uncertainty.cpu().float().numpy().reshape(-1),
                 visibles.cpu().float().numpy().reshape(-1),
             )
 

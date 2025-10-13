@@ -10,6 +10,9 @@ def draw_points_on_image(image, points, colors):
     if isinstance(points, torch.Tensor):
         points = points.cpu().numpy()
 
+    if isinstance(colors, np.ndarray):
+        colors = colors.tolist()
+
     for i in range(points.shape[0]):
         cv2.circle(
             image,
@@ -18,6 +21,34 @@ def draw_points_on_image(image, points, colors):
             color=colors[i],
             thickness=-1,
         )
+
+
+def get_n_uncertainty_colors(uncertainties, u_min=0.0, u_max=1.0, inverse=False):
+    """
+    Map uncertainties to BGR colors using OpenCV colormap (e.g., COLORMAP_JET).
+
+    Args:
+        uncertainties (np.ndarray): (N,) array of uncertainty values.
+        u_min (float): minimum value for normalization.
+        u_max (float): maximum value for normalization.
+        inverse (bool): if True, invert the normalized scale.
+
+    Returns:
+        np.ndarray: (N, 3) array of colors in BGR (uint8).
+    """
+    # Normalize to [0,1]
+    norm = np.clip((uncertainties - u_min) / (u_max - u_min + 1e-8), 0, 1)
+    if inverse:
+        norm = 1 - norm
+
+    # Convert to 0–255 uint8 for colormap lookup
+    norm_uint8 = (norm * 255).astype(np.uint8)
+
+    # Apply OpenCV colormap (e.g., COLORMAP_JET)
+    colors_bgr = cv2.applyColorMap(norm_uint8, cv2.COLORMAP_JET)
+
+    # Convert to plain array (N, 3)
+    return colors_bgr.reshape(-1, 3)
 
 
 def draw_posed_3d_box(K, img, ob_in_cam, bbox, line_color=(0, 255, 0), linewidth=2):

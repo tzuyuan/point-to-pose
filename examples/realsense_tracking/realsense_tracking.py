@@ -14,7 +14,12 @@ from point2pose.pipeline.pipeline import Pipeline
 from point2pose.data_types.frame import Frame
 
 # from point2pose.data_types.object import Object
-from point2pose.utils.visualization import draw_xyz_axis, draw_posed_3d_box
+from point2pose.utils.visualization import (
+    draw_xyz_axis,
+    draw_posed_3d_box,
+    draw_points_on_image,
+    get_n_uncertainty_colors,
+)
 
 
 class RealSensePipelineTracker:
@@ -37,7 +42,11 @@ class RealSensePipelineTracker:
         # Load configuration using OmegaConf
         self.cfg = OmegaConf.load(config_path)
 
-        rs_serial = self.cfg.rs_serial
+        rs_serial = self.cfg.realsense.params.rs_serial
+
+        self._visualize_points = self.cfg.visualization.params.visualize_points
+        self._points_vis_method = self.cfg.visualization.params.points_vis_method
+
         # Initialize pipeline
         self.pipeline = Pipeline(self.cfg)
 
@@ -181,7 +190,7 @@ class RealSensePipelineTracker:
         # Get current frame for initialization
         frames = self.rs_pipeline.wait_for_frames()
         color_frame = frames.get_color_frame()
-        depth_frame = frames.get_depth_frame()
+        # depth_frame = frames.get_depth_frame()
 
         # Align the depth frame to color frame
         aligned_frames = self._rs_align.process(frames)
@@ -211,23 +220,6 @@ class RealSensePipelineTracker:
         )
 
         return frame
-
-    @staticmethod
-    def rotation_matrix_to_euler(R):
-        """Convert rotation matrix to Euler angles (ZYX convention)"""
-        sy = np.sqrt(R[0, 0] * R[0, 0] + R[1, 0] * R[1, 0])
-        singular = sy < 1e-6
-
-        if not singular:
-            x = np.arctan2(R[2, 1], R[2, 2])
-            y = np.arctan2(-R[2, 0], sy)
-            z = np.arctan2(R[1, 0], R[0, 0])
-        else:
-            x = np.arctan2(-R[1, 2], R[1, 1])
-            y = np.arctan2(-R[2, 0], sy)
-            z = 0
-
-        return np.array([x, y, z]) * 180 / np.pi  # Convert to degrees
 
     def visualize_tracking_results(self, frame, objects):
         """Visualize tracking results on the frame"""
@@ -288,6 +280,47 @@ class RealSensePipelineTracker:
 
             mask_overlay = cv2.cvtColor(mask_overlay, cv2.COLOR_HSV2BGR)
             display_frame = cv2.addWeighted(display_frame, 1, mask_overlay, 0.5, 0)
+
+        if self._visualize_points:
+            if self._points_vis_method == "uncertainty":
+
+                for i, obj in enumerate(objects):
+                    if i not in self.pipeline.track_table.obj2track_map:
+                        continue
+
+                    uncertainty_color = get_n_uncertainty_colors(
+                        self.pipeline.track_table.uncertainty[
+                            self.pipeline.track_table.obj2track_map[i]
+                        ]
+                    )
+                    draw_points_on_image(
+                        display_frame,
+                        self.pipeline.track_table.track_2d[
+                            self.pipeline.track_table.obj2track_map[i]
+                        ],
+                        uncertainty_color,
+                    )
+            elif self._points_vis_method == "visible":
+                for i, obj in enumerate(objects):
+                    if i not in self.pipeline.track_table.obj2track_map:
+                        continue
+
+                    # Generate N by 3 array with (0,255,0) for each row
+                    track_2d_points = self.pipeline.track_table.track_2d[
+                        self.pipeline.track_table.obj2track_map[i]
+                    ]
+                    N = len(track_2d_points)
+                    visible_color = np.full((N, 3), (0, 0, 255), dtype=np.uint8)
+                    visible_color[
+                        self.pipeline.track_table.visible[
+                            self.pipeline.track_table.obj2track_map[i]
+                        ]
+                    ] = (0, 255, 0)
+                    draw_points_on_image(
+                        display_frame,
+                        track_2d_points,
+                        visible_color,
+                    )
 
         # Draw pose information
         for i, obj in enumerate(objects):

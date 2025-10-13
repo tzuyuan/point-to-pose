@@ -12,14 +12,14 @@ class UncertaintyRatioCriterion(SampleCriterion):
     exceeds a specified threshold.
     """
 
-    def __init__(self, uncer_thres=0.5, ratio_thres=0.5):
+    def __init__(self, config):
         super().__init__()
-        self._uncer_thres = uncer_thres
-        self._ratio_thres = ratio_thres
+        self._uncer_thres = config.get("uncer_thres", 0.5)
+        self._ratio_thres = config.get("ratio_thres", 0.5)
 
     def check_sample_criterion(self, context: CriterionContext) -> bool:
         """
-        Check the ratio of (number of points with uncertainty < threshold) to (total number of points).
+        Check the ratio of (number of points with uncertainty > threshold) to (total number of points).
         If the ratio falls below a specified threshold, return True to indicate that resampling is needed.
 
         Args:
@@ -39,10 +39,14 @@ class UncertaintyRatioCriterion(SampleCriterion):
             return False
 
         # count number of points with uncertainty less than threshold
-        valid = context.uncertainty < self._uncer_thres
+        valid = context.uncertainty > self._uncer_thres
         valid_count = np.sum(valid)
 
         ratio = valid_count / num_pts
+
+        print(
+            f"[Uncertainty Ratio Criterion] Valid count: {valid_count}, Total points: {num_pts}, Ratio: {ratio}, Threshold: {self._ratio_thres}"
+        )
 
         # Ensure native Python bool is returned (not numpy.bool_)
         return bool(ratio > self._ratio_thres)

@@ -1,4 +1,6 @@
-rs_serial: 941322070969
+realsense:
+  params:
+    rs_serial: 941322070969
 
 pipeline:
   params:
