@@ -11,6 +11,8 @@ pipeline:
     debug_dir: /home/justin/code/point-to-pose/debug/
     save_pose: true
     pose_save_path: /home/justin/code/point-to-pose/debug/poses
+    save_key_points: true
+    key_points_save_path: /home/justin/code/point-to-pose/debug/key_points
 
 
 register:
@@ -39,17 +41,18 @@ tracker:
     checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
 
 sampler: 
-  type: random
+  type: uniform_fps
   params:
     num_points: 15
+    edge_margin_px: 8
     debug_level: 0
     debug_dir: /home/justin/code/point-to-pose/debug/sampler
 
 criterion:
-  type: iteration
+  type: registration_residual
   params:
     update_per_iter: 1000000
-    residual_thres: 0.01
+    residual_thres: 0.006
     uncer_thres: 0.3
     min_num_pts: 8
 

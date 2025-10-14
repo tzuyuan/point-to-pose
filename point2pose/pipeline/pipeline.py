@@ -58,6 +58,16 @@ class Pipeline:
                     "timestamp\tframe_id\tobj_id\tnum_points\titer\tthr\tres_mean\tres_median\tres_max\tnum_inliers\ttotal_points\tmean_residual_inliers\tmean_residual_outliers\n"
                 )
 
+        # Key points saving configuration
+        self.save_key_points = self.pipeline_cfg.get("save_key_points", False)
+        self.key_points_save_path = self.pipeline_cfg.get(
+            "key_points_save_path", "./key_points"
+        )
+
+        # Create key points save directory if key point saving is enabled
+        if self.save_key_points:
+            os.makedirs(self.key_points_save_path, exist_ok=True)
+
         self.register = build_from_cfg(cfg.register, REGISTER)
         self.segmenter = build_from_cfg(cfg.segmenter, SEGMENTER)
         self.tracker = build_from_cfg(cfg.tracker, TRACKER)
@@ -128,6 +138,10 @@ class Pipeline:
             self.objects[obj_id].valid = self.track_table.valid[
                 self.track_table.obj2track_map[obj_id]
             ]
+            # Initialize frame tracking for initial key points (frame 0)
+            self.objects[obj_id].key_point_frames = np.full(
+                len(self.track_table.obj2track_map[obj_id]), 0, dtype=int
+            )
 
             # Initialize pose log file for this object if pose saving is enabled
             if self.save_pose:
@@ -377,15 +391,25 @@ class Pipeline:
                     ),
                     new_points_3d,
                 )
-                self.objects[obj_id].key_points = np.concatenate(
-                    (self.objects[obj_id].key_points, new_points_3d_obj_frame)
+
+                # Use the new add_key_points method with frame tracking
+                self.objects[obj_id].add_key_points(
+                    new_points_3d_obj_frame,
+                    0.5 * np.ones(len(new_points_3d_obj_frame), dtype=float),
+                    self.frame_id,
                 )
+
+                # Update valid array separately since add_key_points doesn't handle it
                 self.objects[obj_id].valid = np.concatenate(
                     (
                         self.objects[obj_id].valid,
                         valid_new_points_3d,
                     )
                 )
+
+                # Save key points with frame-based coloring if enabled
+                if self.save_key_points:
+                    self._save_key_points_for_object(obj_id)
 
                 self.track_table.append_track_table(
                     track_2d=new_sampled_points,
@@ -675,6 +699,27 @@ class Pipeline:
             f.write(
                 f"{timestamp:.6f}\t{frame_id}\t{obj_id}\t{num_points}\t{iter_count}\t{threshold:.6f}\t{res_mean:.6f}\t{res_median:.6f}\t{res_max:.6f}\t{num_inliers}\t{total_points}\t{mean_residual_inliers:.6f}\t{mean_residual_outliers:.6f}\n"
             )
+
+    def _save_key_points_for_object(self, obj_id: int):
+        """
+        Save key points for a specific object with frame-based coloring.
+
+        Args:
+            obj_id (int): Object ID to save key points for
+        """
+        if not self.save_key_points or obj_id >= len(self.objects):
+            return
+
+        # Create filename with frame ID
+        filename = f"obj_{obj_id}_keypoints_frame_{self.frame_id}.ply"
+        save_path = os.path.join(self.key_points_save_path, filename)
+
+        # Save key points with frame-based coloring
+        self.objects[obj_id].save_key_points_with_colors(save_path, self.frame_id)
+
+        print(
+            f"Saved key points for object {obj_id} at frame {self.frame_id} to {save_path}"
+        )
 
     def __del__(self):
         """Cleanup method to close pose log files"""

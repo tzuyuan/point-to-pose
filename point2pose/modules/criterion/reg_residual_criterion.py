@@ -28,5 +28,6 @@ class RegistrationResidualCriterion(SampleCriterion):
         # Always return true for the first iteration
         if context.reg_stats is None or "residuals" not in context.reg_stats:
             return False
-        rs_mean = np.mean(context.reg_stats["residuals"])
+        inliers = context.reg_stats["inliers"]
+        rs_mean = np.mean(context.reg_stats["residuals"][inliers])
         return rs_mean > self._residual_thres
