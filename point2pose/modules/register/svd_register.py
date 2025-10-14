@@ -15,6 +15,7 @@ class SVDRegister(Register):
         """
         Perform a single registration step using SVD.
         """
+        stats = {}
         # transform the points if the initial pose is given
         if init_pose is not None:
             p0 = transform_pts(init_pose, src_pcd)
@@ -24,11 +25,16 @@ class SVDRegister(Register):
         # fit transformation using svd
         T = self._svd_fit(p0, tgt_pcd)
 
+        p_T = transform_pts(T, p0.copy())
+
+        residuals = np.linalg.norm(p_T - tgt_pcd, axis=1)
+        stats["residuals"] = residuals
+
         # recover init pose if used
         if init_pose is not None:
             T = T @ init_pose
 
-        return T
+        return T, stats
 
     def _svd_fit(self, pa, qa):
         """

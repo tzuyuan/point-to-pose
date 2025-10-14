@@ -7,14 +7,16 @@ pipeline:
   params:
     estimate_init_pose: true
     frame_to_map_reg: true
-    debug_level: 0
+    debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/
+    save_pose: true
+    pose_save_path: /home/justin/code/point-to-pose/debug/poses
 
 
 register:
   type: svd_residual_outlier
   params:
-    debug_level: 0
+    debug_level: 2
     max_iter: 5
     threshold_method: mad
     inlier_thres: 0.1
@@ -39,15 +41,17 @@ tracker:
 sampler: 
   type: random
   params:
-    num_points: 10
+    num_points: 15
     debug_level: 0
     debug_dir: /home/justin/code/point-to-pose/debug/sampler
 
 criterion:
-  type: uncertainty_ratio
+  type: iteration
   params:
+    update_per_iter: 1000000
+    residual_thres: 0.01
     uncer_thres: 0.3
-    ratio_thres: 0.3
+    min_num_pts: 8
 
 visualization:
   params:

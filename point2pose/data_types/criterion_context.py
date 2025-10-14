@@ -13,6 +13,8 @@ class CriterionContext:
     cur_iter: Optional[int] = None
     uncertainty: Optional[np.ndarray] = None
 
+    reg_stats: Optional[dict] = None
+
     def update_criterion_context(self, **kwargs):
         """
         Update the criterion context with the given keyword arguments.

@@ -25,6 +25,7 @@ class SVDResidualOutlierRegister(Register):
             src_pcd, tgt_pcd: (N,3) source/target with known correspondence (row-wise).
             init_pose: (4,4) initial pose.
         """
+        stats = {}
         # number of points
         N = src_pcd.shape[0]
 
@@ -71,10 +72,19 @@ class SVDResidualOutlierRegister(Register):
             if (
                 np.array_equal(new_inliers, inliers)
                 or new_inliers.sum() < self._min_inliers
+                or it == self._max_iter - 1
             ):
+                stats["iter"] = it
+                stats["thr"] = thr
+                stats["residuals"] = residuals
+                stats["inliers"] = inliers
+
+                print(f"[Register] iter {it} res_mean: {np.mean(residuals)}")
+
                 break
 
             inliers = new_inliers
+
             # refit on inliers
             T = self._svd_fit(p0[inliers], tgt_pcd[inliers])
 
@@ -82,7 +92,7 @@ class SVDResidualOutlierRegister(Register):
         if init_pose is not None:
             T = T @ init_pose
 
-        return T
+        return T, stats
 
     def _svd_fit(self, pa, qa):
         """

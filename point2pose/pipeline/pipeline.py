@@ -24,6 +24,7 @@ from point2pose.modules.object.object import Object
 from point2pose.utils.camera import convert_pixel_to_world
 from point2pose.utils.point_cloud_io import save_reg_pcd
 from point2pose.utils.transform import transform_pts
+from scipy.spatial.transform import Rotation as R
 
 
 class Pipeline:
@@ -34,8 +35,28 @@ class Pipeline:
         self.debug_level = self.pipeline_cfg.get("debug_level", 0)
         self.debug_dir = self.pipeline_cfg.get("debug_dir", None)
 
+        # Pose logging configuration
+        self.save_pose = self.pipeline_cfg.get("save_pose", False)
+        self.pose_save_path = self.pipeline_cfg.get("pose_save_path", "./poses")
+
+        # Registration statistics logging
+        self.reg_stats_log = None
+        self.reg_stats_log_path = None
+
         if self.debug_level > 0 and self.debug_dir is not None:
             os.makedirs(self.debug_dir, exist_ok=True)
+
+        # Create pose save directory if pose logging is enabled
+        if self.save_pose:
+            os.makedirs(self.pose_save_path, exist_ok=True)
+            # Initialize registration stats log
+            self.reg_stats_log_path = os.path.join(
+                self.pose_save_path, "registration_stats.txt"
+            )
+            with open(self.reg_stats_log_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "timestamp\tframe_id\tobj_id\tnum_points\titer\tthr\tres_mean\tres_median\tres_max\tnum_inliers\ttotal_points\tmean_residual_inliers\tmean_residual_outliers\n"
+                )
 
         self.register = build_from_cfg(cfg.register, REGISTER)
         self.segmenter = build_from_cfg(cfg.segmenter, SEGMENTER)
@@ -52,6 +73,9 @@ class Pipeline:
 
         self.num_obj = 0
         self.objects = []
+
+        # Pose log file handles for each object
+        self.pose_log_files = []
 
         # self.prev3d_way_before = None
         # self.prev3d_before = None
@@ -105,6 +129,17 @@ class Pipeline:
                 self.track_table.obj2track_map[obj_id]
             ]
 
+            # Initialize pose log file for this object if pose saving is enabled
+            if self.save_pose:
+                pose_log_path = os.path.join(
+                    self.pose_save_path, f"obj_{obj_id}_pose.txt"
+                )
+                pose_log_file = open(pose_log_path, "w", encoding="utf-8")
+                pose_log_file.write("# timestamp tx ty tz qx qy qz qw\n")
+                self.pose_log_files.append(pose_log_file)
+            else:
+                self.pose_log_files.append(None)
+
         # estimate initial pose
         out_pose = np.tile(np.eye(4), (self.num_obj, 1, 1))
         if self._estimate_init_pose:
@@ -156,6 +191,7 @@ class Pipeline:
 
         # ------------- register -------------
         register_start = time.time()
+        reg_stats = {}
         for obj_id in range(self.num_obj):
             # frame to map registration
             if self._frame2map_reg:
@@ -166,18 +202,33 @@ class Pipeline:
                     track_3d,
                     visibles,
                     track_valid,
+                    uncertainties,
+                    uncertainty_thres=0.3,
                 )
 
                 if key_points.shape[0] < 3 or curr3d.shape[0] < 3:
                     continue
 
-                pose_to_key = self.register.register(key_points, curr3d)
+                pose_to_key, reg_stats = self.register.register(key_points, curr3d)
 
                 pose = pose_to_key @ self.objects[obj_id].init_pose
                 self.objects[obj_id].pose = pose
 
-                self.prev3d = key_points
-                self.curr3d = curr3d
+                # Log pose in TUM format
+                if self.save_pose and self.pose_log_files[obj_id] is not None:
+                    tum_pose = self._pose_matrix_to_tum_format(
+                        pose, timestamp=time.time()
+                    )
+                    self.pose_log_files[obj_id].write(tum_pose)
+                    self.pose_log_files[obj_id].flush()
+
+                # Log registration statistics
+                self._log_registration_stats(
+                    self.frame_id, obj_id, key_points.shape[0], reg_stats
+                )
+
+                # self.prev3d = key_points
+                # self.curr3d = curr3d
                 print(f"pose at frame {self.frame_id}: {pose}")
 
                 if self.debug_level > 1:
@@ -202,8 +253,23 @@ class Pipeline:
                 # self.prev3d_after = prev3d
                 # self.curr3d_after = curr3d
 
-                pose = self.register.register(prev3d, curr3d)
+                pose, reg_stats = self.register.register(prev3d, curr3d)
                 self.objects[obj_id].pose = pose @ self.objects[obj_id].pose
+
+                # Log pose in TUM format
+                if self.save_pose and self.pose_log_files[obj_id] is not None:
+                    tum_pose = self._pose_matrix_to_tum_format(
+                        self.objects[obj_id].pose, timestamp=time.time()
+                    )
+                    self.pose_log_files[obj_id].write(tum_pose)
+                    self.pose_log_files[obj_id].flush()
+
+                # Log registration statistics
+                if self.debug_level > 0:
+                    self._log_registration_stats(
+                        self.frame_id, obj_id, prev3d.shape[0], reg_stats
+                    )
+
                 print(f"Frame {self.frame_id} - Object {obj_id} - Pose: {pose}")
                 if self.debug_level > 1:
                     reg_debug_dir = os.path.join(self.debug_dir, "register")
@@ -230,7 +296,7 @@ class Pipeline:
         # ------------- criterion and sample -------------
         sampling_start = time.time()
         self.crit_ctx.update_criterion_context(
-            cur_iter=self.frame_id, uncertainty=uncertainties
+            cur_iter=self.frame_id, uncertainty=uncertainties, reg_stats=reg_stats
         )
         self._check_and_sample_for_all_obj(frame)
         sampling_time = time.time() - sampling_start
@@ -375,6 +441,7 @@ class Pipeline:
                     nb_neighbors=pcd_stat_outlier_removal_nb_neighbors,
                     std_ratio=pcd_stat_outlier_removal_std_ratio,
                 )
+            close_indices = None
             if pcd_radius_outlier_removal:
                 # Distance-based outlier removal if clicked point is provided
                 mean_mask_pixel_world, _ = convert_pixel_to_world(
@@ -413,6 +480,14 @@ class Pipeline:
             out_pose[obj_id, :3, 3] = self.objects[obj_id].init_bbox.center
             self.objects[obj_id].pose = out_pose[obj_id]
             self.objects[obj_id].init_pose = out_pose[obj_id]
+
+            # Log initial pose in TUM format
+            if self.save_pose and self.pose_log_files[obj_id] is not None:
+                tum_pose = self._pose_matrix_to_tum_format(
+                    out_pose[obj_id], timestamp=time.time()
+                )
+                self.pose_log_files[obj_id].write(tum_pose)
+                self.pose_log_files[obj_id].flush()
             # self.objects[obj_id].pose = np.eye(4)
             # out_pose[obj_id] = np.eye(4)
             # -----------------------------------------
@@ -446,7 +521,14 @@ class Pipeline:
         return out_pose
 
     def extract_valid_key_points(
-        self, obj, obj_idx, cur_pts_3d, cur_visible, cur_valid
+        self,
+        obj,
+        obj_idx,
+        cur_pts_3d,
+        cur_visible,
+        cur_valid,
+        cur_uncertainties,
+        uncertainty_thres=0.3,
     ):
         """
         Args:
@@ -467,7 +549,10 @@ class Pipeline:
         # object-local visibility mask (aligned with obj_idx)
         vis_obj = np.asarray(cur_visible, dtype=bool)[obj_idx]
         val_obj = np.asarray(cur_valid, dtype=bool)[obj_idx]
-        both_mask = vis_obj & val_obj & valid_kp_bool  # (M,)
+        uncer_obj = (
+            np.asarray(cur_uncertainties, dtype=float)[obj_idx] < uncertainty_thres
+        )
+        both_mask = vis_obj & val_obj & valid_kp_bool & uncer_obj  # (M,)
 
         # global indices for valid+visible points
         idx = obj_idx[both_mask]  # (K,)
@@ -514,3 +599,85 @@ class Pipeline:
         prev3d = track_table.track_3d[idx].copy()
         curr3d = curr_pts_3d[idx].copy()
         return idx, prev3d, curr3d
+
+    def _pose_matrix_to_tum_format(self, pose_matrix, timestamp=None):
+        """
+        Convert a 4x4 pose matrix to TUM format: timestamp tx ty tz qx qy qz qw
+        Args:
+            pose_matrix: 4x4 numpy array
+            timestamp: float timestamp (if None, uses current time)
+        Returns:
+            str: TUM format pose string
+        """
+        if timestamp is None:
+            timestamp = time.time()
+
+        # Extract translation
+        tx, ty, tz = pose_matrix[:3, 3]
+
+        # Extract rotation matrix and convert to quaternion
+        rotation_matrix = pose_matrix[:3, :3]
+        rotation = R.from_matrix(rotation_matrix)
+        qx, qy, qz, qw = rotation.as_quat()  # Returns [x, y, z, w]
+
+        return f"{timestamp:.6f} {tx:.6f} {ty:.6f} {tz:.6f} {qx:.6f} {qy:.6f} {qz:.6f} {qw:.6f}\n"
+
+    def _log_registration_stats(self, frame_id, obj_id, num_points, reg_stats):
+        """
+        Log registration statistics to file
+        Args:
+            frame_id: int current frame ID
+            obj_id: int object ID
+            num_points: int number of points used for registration
+            reg_stats: dict registration statistics from register method
+        """
+        if self.reg_stats_log_path is None:
+            return
+
+        # Get current timestamp
+        timestamp = time.time()
+
+        # Extract statistics with defaults
+        iter_count = reg_stats.get("iter", -1)
+        threshold = reg_stats.get("thr", -1.0)
+        residuals = reg_stats.get("residuals", np.array([]))
+        inliers = reg_stats.get("inliers", np.array([]))
+
+        # Calculate residual statistics
+        if len(residuals) > 0:
+            res_mean = np.mean(residuals)
+            res_median = np.median(residuals)
+            res_max = np.max(residuals)
+        else:
+            res_mean = res_median = res_max = -1.0
+
+        num_inliers = np.sum(inliers) if len(inliers) > 0 else -1
+
+        # Additional stats
+        total_points = int(len(residuals)) if residuals is not None else 0
+        if total_points > 0 and len(inliers) == total_points:
+            inlier_mask = inliers.astype(bool)
+            outlier_mask = ~inlier_mask
+            mean_residual_inliers = (
+                float(np.mean(residuals[inlier_mask])) if np.any(inlier_mask) else -1.0
+            )
+            mean_residual_outliers = (
+                float(np.mean(residuals[outlier_mask]))
+                if np.any(outlier_mask)
+                else -1.0
+            )
+        else:
+            mean_residual_inliers = -1.0
+            mean_residual_outliers = -1.0
+
+        # Write to file
+        with open(self.reg_stats_log_path, "a", encoding="utf-8") as f:
+            f.write(
+                f"{timestamp:.6f}\t{frame_id}\t{obj_id}\t{num_points}\t{iter_count}\t{threshold:.6f}\t{res_mean:.6f}\t{res_median:.6f}\t{res_max:.6f}\t{num_inliers}\t{total_points}\t{mean_residual_inliers:.6f}\t{mean_residual_outliers:.6f}\n"
+            )
+
+    def __del__(self):
+        """Cleanup method to close pose log files"""
+        for log_file in self.pose_log_files:
+            if log_file is not None:
+                log_file.close()
