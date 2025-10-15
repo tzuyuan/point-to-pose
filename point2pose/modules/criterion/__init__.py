@@ -2,3 +2,5 @@ from .iteration_criterion import IterationCriterion
 from .uncertainty_ratio_criterion import UncertaintyRatioCriterion
 from .uncertainty_number_criterion import UncertaintyNumberCriterion
 from .reg_residual_criterion import RegistrationResidualCriterion
+from .rotation_grid_criterion import RotationGridCriterion
+from .rotation_thres_criterion import RotationThresholdCriterion

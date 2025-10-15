@@ -15,7 +15,7 @@ class RegistrationResidualCriterion(SampleCriterion):
         super().__init__()
         self._residual_thres = config.get("residual_thres", 0.01)
 
-    def check_sample_criterion(self, context: CriterionContext) -> bool:
+    def check_sample_criterion(self, context: CriterionContext, obj_id: int) -> bool:
         """
         Check if the current iteration is a multiple of the return every n iterations.
 

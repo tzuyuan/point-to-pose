@@ -49,12 +49,27 @@ sampler:
     debug_dir: /home/justin/code/point-to-pose/debug/sampler
 
 criterion:
-  type: registration_residual
+  ### criterion types: 
+  ###      iteration, registration_residual, 
+  ###      uncertainty_ratio, uncertainty_number, 
+  ###      rotation_grid, rotation_threshold
+  type: rotation_threshold
   params:
+    # iteration criterion
     update_per_iter: 1000000
+
+    # residual criterion
     residual_thres: 0.006
+
+    # uncertainty criterion
     uncer_thres: 0.3
     min_num_pts: 8
+
+    # rotation grid criterion
+    discretization_angle: 60
+
+    # rotation threshold criterion
+    max_angle_deg: 45
 
 visualization:
   params:

@@ -17,7 +17,7 @@ class UncertaintyRatioCriterion(SampleCriterion):
         self._uncer_thres = config.get("uncer_thres", 0.5)
         self._ratio_thres = config.get("ratio_thres", 0.5)
 
-    def check_sample_criterion(self, context: CriterionContext) -> bool:
+    def check_sample_criterion(self, context: CriterionContext, obj_id: int) -> bool:
         """
         Check the ratio of (number of points with uncertainty > threshold) to (total number of points).
         If the ratio falls below a specified threshold, return True to indicate that resampling is needed.

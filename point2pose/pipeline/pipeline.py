@@ -87,12 +87,6 @@ class Pipeline:
         # Pose log file handles for each object
         self.pose_log_files = []
 
-        # self.prev3d_way_before = None
-        # self.prev3d_before = None
-        # self.curr3d_before = None
-        self.prev3d = None
-        self.curr3d = None
-
         self._estimate_init_pose = self.pipeline_cfg.get("estimate_init_pose", False)
         self._frame2map_reg = self.pipeline_cfg.get("frame_to_map_reg", False)
 
@@ -153,6 +147,9 @@ class Pipeline:
                 self.pose_log_files.append(pose_log_file)
             else:
                 self.pose_log_files.append(None)
+
+        self.crit_ctx.objects = self.objects
+        self.criterion.initialize(self.crit_ctx)
 
         # estimate initial pose
         out_pose = np.tile(np.eye(4), (self.num_obj, 1, 1))
@@ -366,7 +363,7 @@ class Pipeline:
         # Check sample criteria
         for obj_id in range(self.num_obj):
             ## TODO: make crit_ctx to be object-specific?
-            if self.criterion.check_sample_criterion(self.crit_ctx):
+            if self.criterion.check_sample_criterion(self.crit_ctx, obj_id):
                 # Sample points
                 new_sampled_points = self.sampler.sample(frame, obj_id)
 

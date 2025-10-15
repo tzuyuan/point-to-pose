@@ -17,7 +17,7 @@ class UncertaintyNumberCriterion(SampleCriterion):
         self._uncer_thres = config.get("uncer_thres", 0.5)
         self._min_num_pts = config.get("min_num_pts", 5)
 
-    def check_sample_criterion(self, context: CriterionContext) -> bool:
+    def check_sample_criterion(self, context: CriterionContext, obj_id: int) -> bool:
 
         if context.uncertainty is None:
             print("[Warning][Criterion] Uncertainty is none, not checking criterion.")

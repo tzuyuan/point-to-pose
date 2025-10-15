@@ -14,7 +14,7 @@ class IterationCriterion(SampleCriterion):
         self._cur_iter = 0
         self._return_every_n_iterations = config.get("update_per_iter", 5)
 
-    def check_sample_criterion(self, context: CriterionContext) -> bool:
+    def check_sample_criterion(self, context: CriterionContext, obj_id: int) -> bool:
         """
         Check if the current iteration is a multiple of the return every n iterations.
 
