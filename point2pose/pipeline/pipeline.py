@@ -22,8 +22,9 @@ from point2pose.core.module_registry import (
 from point2pose.data_types.criterion_context import CriterionContext
 from point2pose.data_types.point_track_table import PointTrackTable
 from point2pose.modules.object.object import Object
+from point2pose.io.outputs.logger import DataLogger
+from point2pose.io.outputs.point_cloud_io import save_reg_pcd
 from point2pose.utils.camera import convert_pixel_to_world
-from point2pose.utils.point_cloud_io import save_reg_pcd
 from point2pose.utils.transform import transform_pts
 
 
@@ -92,6 +93,35 @@ class Pipeline:
 
         self._estimate_init_pose = self.pipeline_cfg.get("estimate_init_pose", False)
         self._frame2map_reg = self.pipeline_cfg.get("frame_to_map_reg", False)
+        self.save_meta_data = self.pipeline_cfg.get("save_meta_data", False)
+        self.meta_data_save_path = self.pipeline_cfg.get(
+            "meta_data_save_path", "./meta_data"
+        )
+        if self.save_meta_data:
+            os.makedirs(self.meta_data_save_path, exist_ok=True)
+            self.data_logger = DataLogger(
+                out_dir=self.meta_data_save_path,
+                base_name="meata_data",
+                # ragged fields include data that is not fixed shape
+                ragged_fields={
+                    # tracker stats
+                    "track2d",
+                    "uncertainties",
+                    "visibles",
+                    "track3d",
+                    "valid_depth",
+                    # object stats
+                    "obj_key_points",
+                    "obj_uncertainties",
+                    "obj_valid",
+                    # registeration stats
+                    "reg_key_points",
+                    "reg_curr3d",
+                    "reg_inliers",
+                    "reg_residuals",
+                },
+                also_save_h5=True,
+            )
 
     # -------- one-time init with user clicks ----------
     def add_user_points(self, obj_points: list[list[int]], labels: list[int]):
@@ -167,6 +197,7 @@ class Pipeline:
         """
         Step the pipeline for one frame.
         """
+
         # if it's the first frame, initialize the pipeline
         if self.frame_id == 0:
             return self.initialize_first_frame(frame)
@@ -184,6 +215,7 @@ class Pipeline:
         # ------------- tracker -------------
         tracker_start = time.time()
         tracks, uncertainties, visibles = self.tracker.track_once(frame)
+
         print(f"num tracks: {len(tracks)}")
         # Convert visibles to boolean since TAPIR returns float32
         visibles = visibles.astype(bool)
@@ -206,6 +238,7 @@ class Pipeline:
         # ------------- register -------------
         register_start = time.time()
         reg_stats = {}
+        reg_stats_obj0 = {}
         for obj_id in range(self.num_obj):
             # frame to map registration
             if self._frame2map_reg:
@@ -219,9 +252,22 @@ class Pipeline:
                     uncertainties,
                     uncertainty_thres=0.6,
                 )
+                # TODO: put it at better place
+                if self.save_meta_data and obj_id == 0:
+                    reg_stats_obj0.update(
+                        {
+                            "reg_key_points": key_points,
+                            "reg_curr3d": curr3d,
+                        }
+                    )
 
                 if key_points.shape[0] < 3 or curr3d.shape[0] < 3:
+                    # self.data_logger.log({"too_few_points": 1})
+                    reg_stats_obj0.update({"too_few_points": 1})
                     continue
+
+                # self.data_logger.log({"too_few_points": 0})
+                reg_stats_obj0.update({"too_few_points": 0})
 
                 pose_to_key, reg_stats = self.register.register(key_points, curr3d)
 
@@ -241,8 +287,17 @@ class Pipeline:
                     self.frame_id, obj_id, key_points.shape[0], reg_stats
                 )
 
-                # self.prev3d = key_points
-                # self.curr3d = curr3d
+                # TODO: put it at better place
+                if self.save_meta_data and obj_id == 0:
+                    reg_stats_obj0.update(
+                        {
+                            "reg_iter": reg_stats.get("iter", -1),
+                            "reg_thr": reg_stats.get("thr", -1.0),
+                            "reg_residuals": reg_stats.get("residuals", np.array([])),
+                            "reg_inliers": reg_stats.get("inliers", np.array([])),
+                        }
+                    )
+
                 print(f"pose at frame {self.frame_id}: {pose}")
 
                 if self.debug_level > 1:
@@ -302,6 +357,33 @@ class Pipeline:
         )
         table_update_time = time.time() - table_update_start
         # print(f"Frame {self.frame_id} - Track table update: {table_update_time:.4f}s")
+
+        # ---------------- log meta data ----------------
+        if self.save_meta_data:
+            print("obj_id: 0---------------------------")
+            print(self.objects[0].pose)
+            self.data_logger.log(
+                {
+                    "timestamp": frame.timestamp,
+                    "frame_id": self.frame_id,
+                    "track2d": tracks,
+                    "uncertainties": uncertainties,
+                    "visibles": visibles,
+                    "track3d": track_3d,
+                    "valid": track_valid,
+                    "valid_depth": frame.depth,
+                    "obj_init_pose": self.objects[0].init_pose,
+                    "obj_pose": self.objects[0].pose,
+                    "obj_key_points": self.objects[0].key_points,
+                    "obj_uncertainties": self.objects[0].uncertainties,
+                    "obj_valid": self.objects[0].valid,
+                    # "reg_iter": reg_stats.get("iter", -1),
+                    # "reg_thr": reg_stats.get("thr", -1.0),
+                    # "reg_residuals": reg_stats.get("residuals", np.array([])),
+                    # "reg_inliers": reg_stats.get("inliers", np.array([])),
+                    **reg_stats_obj0,
+                }
+            )
 
         # ------------- criterion and sample -------------
         sampling_start = time.time()
@@ -695,6 +777,38 @@ class Pipeline:
             f.write(
                 f"{timestamp:.6f}\t{frame_id}\t{obj_id}\t{num_points}\t{iter_count}\t{threshold:.6f}\t{res_mean:.6f}\t{res_median:.6f}\t{res_max:.6f}\t{num_inliers}\t{total_points}\t{mean_residual_inliers:.6f}\t{mean_residual_outliers:.6f}\n"
             )
+
+    # def _log_stats(self, frame_id, obj_id, num_points, reg_stats):
+    #     """
+    #     Log registration statistics to file
+    #     Args:
+    #         frame_id: int current frame ID
+    #         obj_id: int object ID
+    #         num_points: int number of points used for registration
+    #         reg_stats: dict registration statistics from register method
+    #     """
+    #     self.data_logger.log(
+    #         {
+    #             "timestamp": time.time(),
+    #             "frame_id": frame_id,
+    #             "obj_id": obj_id,
+    #             "num_points": num_points,
+    #             # tracker stats
+    #             "track2d": track2d,
+    #             "track3d": track3d,
+    #             "valid": valid,
+    #             "uncertainties": uncertainties,
+    #             "visibles": visibles,
+    #             "valid_depth": valid_depth,
+    #             # object stats
+    #             "obj_key_points": obj_key_points,
+    #             # registration stats
+    #             "reg_iter": reg_stats.get("iter", -1),
+    #             "reg_thr": reg_stats.get("thr", -1.0),
+    #             "reg_residuals": reg_stats.get("residuals", np.array([])),
+    #             "reg_inliers": reg_stats.get("inliers", np.array([])),
+    #         }
+    #     )
 
     def _save_key_points_for_object(self, obj_id: int):
         """

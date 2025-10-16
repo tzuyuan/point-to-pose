@@ -13,7 +13,9 @@ pipeline:
     pose_save_path: /home/justin/code/point-to-pose/debug/poses
     save_key_points: true
     key_points_save_path: /home/justin/code/point-to-pose/debug/key_points
-
+    save_meta_data: true
+    meta_data_save_path: /home/justin/code/point-to-pose/debug/pipeline/meta_data
+  
 
 register:
   type: svd_residual_outlier
