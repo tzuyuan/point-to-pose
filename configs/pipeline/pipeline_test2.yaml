@@ -44,7 +44,7 @@ sampler:
   type: uniform_fps
   params:
     num_points: 15
-    edge_margin_px: 8
+    edge_margin_px: 20
     debug_level: 0
     debug_dir: /home/justin/code/point-to-pose/debug/sampler
 
@@ -75,3 +75,5 @@ visualization:
   params:
     visualize_points: true
     points_vis_method: uncertainty
+    save_images: True
+    output_image_dir: /home/justin/code/point-to-pose/debug/output_images

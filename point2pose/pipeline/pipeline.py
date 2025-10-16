@@ -4,8 +4,9 @@ import time
 
 import numpy as np
 import open3d as o3d
-
+import h5py
 import torch
+from scipy.spatial.transform import Rotation as scipy_R
 
 from point2pose.core.build import build_from_cfg
 
@@ -24,7 +25,6 @@ from point2pose.modules.object.object import Object
 from point2pose.utils.camera import convert_pixel_to_world
 from point2pose.utils.point_cloud_io import save_reg_pcd
 from point2pose.utils.transform import transform_pts
-from scipy.spatial.transform import Rotation as R
 
 
 class Pipeline:
@@ -45,6 +45,9 @@ class Pipeline:
 
         if self.debug_level > 0 and self.debug_dir is not None:
             os.makedirs(self.debug_dir, exist_ok=True)
+            self._reg_debug_dir = os.path.join(self.debug_dir, "register")
+            if not os.path.exists(self._reg_debug_dir):
+                os.makedirs(self._reg_debug_dir, exist_ok=True)
 
         # Create pose save directory if pose logging is enabled
         if self.save_pose:
@@ -207,14 +210,14 @@ class Pipeline:
             # frame to map registration
             if self._frame2map_reg:
 
-                idx, key_points, curr3d = self.extract_valid_key_points(
+                idx, key_points, curr3d = self._extract_valid_key_points(
                     self.objects[obj_id],
                     self.track_table.obj2track_map[obj_id],
                     track_3d,
                     visibles,
                     track_valid,
                     uncertainties,
-                    uncertainty_thres=0.3,
+                    uncertainty_thres=0.6,
                 )
 
                 if key_points.shape[0] < 3 or curr3d.shape[0] < 3:
@@ -243,20 +246,19 @@ class Pipeline:
                 print(f"pose at frame {self.frame_id}: {pose}")
 
                 if self.debug_level > 1:
-                    reg_debug_dir = os.path.join(self.debug_dir, "register")
-                    if not os.path.exists(reg_debug_dir):
-                        os.makedirs(reg_debug_dir, exist_ok=True)
+
                     save_reg_pcd(
                         key_points,
                         curr3d,
                         pose_to_key,
-                        reg_debug_dir,
+                        self._reg_debug_dir,
                         f"obj_{obj_id}_frame_{self.frame_id}",
+                        reg_stats,
                     )
 
             # frame to frame registration
             else:
-                idx, prev3d, curr3d = self.extract_valid_idx_points_for_obj(
+                idx, prev3d, curr3d = self._extract_valid_idx_points_for_obj(
                     obj_id, self.track_table, track_3d, track_valid, visibles
                 )
                 # self.prev3d_before = self.track_table.track_3d
@@ -283,14 +285,11 @@ class Pipeline:
 
                 print(f"Frame {self.frame_id} - Object {obj_id} - Pose: {pose}")
                 if self.debug_level > 1:
-                    reg_debug_dir = os.path.join(self.debug_dir, "register")
-                    if not os.path.exists(reg_debug_dir):
-                        os.makedirs(reg_debug_dir, exist_ok=True)
                     save_reg_pcd(
                         prev3d,
                         curr3d,
                         pose,
-                        reg_debug_dir,
+                        self._reg_debug_dir,
                         f"obj_{obj_id}_frame_{self.frame_id}",
                     )
         register_time = time.time() - register_start
@@ -541,7 +540,7 @@ class Pipeline:
                 )
         return out_pose
 
-    def extract_valid_key_points(
+    def _extract_valid_key_points(
         self,
         obj,
         obj_idx,
@@ -584,7 +583,7 @@ class Pipeline:
 
         return idx, key_points, curr3d
 
-    def extract_valid_idx_points_for_obj(
+    def _extract_valid_idx_points_for_obj(
         self,
         obj_id: int,
         track_table,  # holds previous-frame state
@@ -638,7 +637,7 @@ class Pipeline:
 
         # Extract rotation matrix and convert to quaternion
         rotation_matrix = pose_matrix[:3, :3]
-        rotation = R.from_matrix(rotation_matrix)
+        rotation = scipy_R.from_matrix(rotation_matrix)
         qx, qy, qz, qw = rotation.as_quat()  # Returns [x, y, z, w]
 
         return f"{timestamp:.6f} {tx:.6f} {ty:.6f} {tz:.6f} {qx:.6f} {qy:.6f} {qz:.6f} {qw:.6f}\n"

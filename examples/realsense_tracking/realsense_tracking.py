@@ -6,7 +6,6 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 import cv2
 import numpy as np
-import torch
 import pyrealsense2 as rs
 from omegaconf import OmegaConf
 
@@ -46,6 +45,15 @@ class RealSensePipelineTracker:
 
         self._visualize_points = self.cfg.visualization.params.visualize_points
         self._points_vis_method = self.cfg.visualization.params.points_vis_method
+        self._save_images = self.cfg.visualization.params.save_images
+        self._output_image_dir = Path(self.cfg.visualization.params.output_image_dir)
+
+        # Create output directory if saving images is enabled
+        if self._save_images:
+            self._output_image_dir.mkdir(parents=True, exist_ok=True)
+            print(
+                f"Image saving enabled. Images will be saved to: {self._output_image_dir}"
+            )
 
         # Initialize pipeline
         self.pipeline = Pipeline(self.cfg)
@@ -142,7 +150,6 @@ class RealSensePipelineTracker:
         # Get current frame for initialization
         frames = self.rs_pipeline.wait_for_frames()
         color_frame = frames.get_color_frame()
-        depth_frame = frames.get_depth_frame()
 
         # Align the depth frame to color frame
         aligned_frames = self._rs_align.process(frames)
@@ -221,7 +228,7 @@ class RealSensePipelineTracker:
 
         return frame
 
-    def visualize_tracking_results(self, frame, objects):
+    def visualize_tracking_results(self, frame, objects, frame_id=None):
         """Visualize tracking results on the frame"""
         display_frame = frame.rgb.copy()
         display_frame = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
@@ -336,6 +343,11 @@ class RealSensePipelineTracker:
                 )
                 display_frame = draw_xyz_axis(image=display_frame, ob_in_cam=obj.pose)
 
+        # Save image if flag is enabled and frame_id is provided
+        if self._save_images and frame_id is not None:
+            image_filename = self._output_image_dir / f"frame_{frame_id:06d}.png"
+            cv2.imwrite(str(image_filename), display_frame)
+
         return display_frame
 
     def run_tracking(self):
@@ -394,6 +406,14 @@ class RealSensePipelineTracker:
                         2,
                     )
 
+                    # Save image if flag is enabled (for point collection phase)
+                    if self._save_images:
+                        image_filename = (
+                            self._output_image_dir
+                            / f"point_collection_{self.frame_count:06d}.png"
+                        )
+                        cv2.imwrite(str(image_filename), display_frame)
+
                 else:
                     # Create frame for pipeline
                     frame = self.create_frame_from_realsense(self.frame_count)
@@ -405,7 +425,7 @@ class RealSensePipelineTracker:
 
                     # Visualize results
                     display_frame = self.visualize_tracking_results(
-                        frame, self.pipeline.objects
+                        frame, self.pipeline.objects, self.frame_count
                     )
 
                     # Show tracking info

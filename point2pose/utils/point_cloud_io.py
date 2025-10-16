@@ -5,7 +5,9 @@ import numpy as np
 from point2pose.utils.transform import transform_pts
 
 
-def save_reg_pcd(src_pcd, trg_pcd, tf, save_dir, file_name="registered_pcd"):
+def save_reg_pcd(
+    src_pcd, trg_pcd, tf, save_dir, file_name="registered_pcd", reg_stats=None
+):
     """
     Save a combined registered point cloud containing both target and transformed source points.
     Args:
@@ -14,6 +16,8 @@ def save_reg_pcd(src_pcd, trg_pcd, tf, save_dir, file_name="registered_pcd"):
         tf: (4, 4) float transformation matrix
         save_dir: (str) save directory
         file_name: (str) name for the saved file
+        reg_stats: (optional dict) may include key "inliers" as (K,) bool mask.
+            Indices where inliers is False (outliers) will be colored darker.
     """
     print(f"number of source points: {src_pcd.shape[0]}")
     print(f"number of target points: {trg_pcd.shape[0]}")
@@ -25,12 +29,36 @@ def save_reg_pcd(src_pcd, trg_pcd, tf, save_dir, file_name="registered_pcd"):
     # Michigan blue color for target point cloud
     blue_color = np.array([0.0, 0.153, 0.463])  # RGB normalized to [0,1]
 
+    # Darker variants for outliers
+    # darker_maize = np.clip(maize_color * darken, 0.0, 1.0)
+    # darker_blue = np.clip(blue_color * darken, 0.0, 1.0)
+    darker_maize = np.array([1.0, 0.5, 0.0])
+    darker_blue = np.array([1.0, 0.0, 0.5])
     # Combine both point clouds
     combined_points = np.vstack([trg_pcd, src_pcd_transformed])
 
     # Create combined colors: blue for target, maize for transformed source
     trg_colors = np.tile(blue_color, (trg_pcd.shape[0], 1))
     src_colors = np.tile(maize_color, (src_pcd_transformed.shape[0], 1))
+
+    # If provided, apply outlier coloring using inliers mask
+    if isinstance(reg_stats, dict) and "inliers" in reg_stats:
+        inliers = reg_stats["inliers"]
+        if (
+            isinstance(inliers, np.ndarray)
+            and inliers.ndim == 1
+            and inliers.dtype == bool
+        ):
+            # Determine how many corresponded points the mask applies to
+            n_match = min(
+                inliers.shape[0], src_pcd_transformed.shape[0], trg_pcd.shape[0]
+            )
+            if n_match > 0:
+                outlier_mask = ~inliers[:n_match]
+                # Darken outliers on both clouds for corresponding indices
+                if np.any(outlier_mask):
+                    trg_colors[:n_match][outlier_mask] = darker_blue
+                    src_colors[:n_match][outlier_mask] = darker_maize
     combined_colors = np.vstack([trg_colors, src_colors])
 
     # Create and save combined point cloud
