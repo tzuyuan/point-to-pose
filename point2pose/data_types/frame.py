@@ -18,6 +18,10 @@ class Frame:
 
     timestamp: Optional[float] = None
 
+    # TODO: move this potentially
+    # convex hull of the current visible points in this frame
+    convex_hull_xy: Optional[np.ndarray] = None  # Nx2 float32 (x,y) coordinates
+
     # dataset related
     gt_pose: Optional[np.ndarray] = (
         None  # 4x4 float64 (world_T_cam or cam_T_obj—document it)

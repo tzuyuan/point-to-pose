@@ -92,6 +92,8 @@ class MaskAreaCriterion(SampleCriterion):
             try:
                 hull = ConvexHull(points)
                 point_area = hull.volume  # in 2D, `volume` is the polygon area
+
+                context.frame.convex_hull_xy = hull.points[hull.vertices]
             except (ValueError, RuntimeError):
                 print("convex hull fails (e.g. collinear points)")
                 return True  # convex hull fails (e.g. collinear points)

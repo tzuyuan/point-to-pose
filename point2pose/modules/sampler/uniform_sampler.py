@@ -14,6 +14,7 @@ class UniformFPSampler(Sampler):
         self.num_points = config.get("num_points", 10)
         # Distance (in pixels) from the mask boundary to exclude
         self.edge_margin_px = config.get("edge_margin_px", 5)
+        self._remove_convex_hull = config.get("remove_convex_hull", True)
         self._i = 0
 
     def sample(self, frame: Frame, obj_id: int) -> np.ndarray:
@@ -28,6 +29,9 @@ class UniformFPSampler(Sampler):
             mask_np = (mask_t.detach().cpu().numpy() > 0).astype(np.uint8)
         else:
             mask_np = (mask_t > 0).astype(np.uint8)
+
+        if self._remove_convex_hull and frame.convex_hull_xy is not None:
+            mask_np = self.subtract_convex_hull(mask_np, frame.convex_hull_xy)
 
         # Early exit on empty mask
         if mask_np.sum() == 0:
@@ -138,3 +142,25 @@ class UniformFPSampler(Sampler):
             last = pts[far_idx : far_idx + 1]
 
         return pts[selected]
+
+    def subtract_convex_hull(self, mask: np.ndarray, hull_xy: np.ndarray):
+        """
+        mask: np.ndarray or {0,1} HxW (or 1xHxW)
+        hull_xy: (K, 2) numpy array of (x, y) pixel coords for the convex hull boundary
+        """
+        assert mask.ndim in (2, 3), "mask must be HxW or 1xHxW"
+        H, W = mask.shape[-2], mask.shape[-1]
+
+        # Build a CPU uint8 canvas and fill the convex polygon
+        poly = np.round(hull_xy).astype(np.int32)
+        poly[:, 0] = np.clip(poly[:, 0], 0, W - 1)
+        poly[:, 1] = np.clip(poly[:, 1], 0, H - 1)
+
+        hull_mask_np = np.zeros((H, W), dtype=np.uint8)
+        if len(poly) >= 3:  # only fill if valid polygon
+            cv.fillConvexPoly(hull_mask_np, poly.reshape(-1, 1, 2), 1)
+
+        hull_mask = hull_mask_np.astype(bool)
+
+        out = mask & (~hull_mask)  # mask - convex_hull
+        return out

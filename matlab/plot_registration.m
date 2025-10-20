@@ -8,7 +8,7 @@ frame_id  = getfield(D.fixed, 'frame_id');     %#ok<GFLD>
 timestamp = getfield(D.fixed, 'timestamp');    %#ok<GFLD>
 
 
-i = 84;
+i = 140;
 
 reg_key_points =  D.helpers.regroup_triples(D.ragged.reg_key_points);
 cur3d =  D.helpers.regroup_triples(D.ragged.reg_curr3d);
