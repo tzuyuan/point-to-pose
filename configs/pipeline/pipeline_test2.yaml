@@ -22,9 +22,10 @@ register:
   params:
     debug_level: 2
     max_iter: 5
-    threshold_method: fixed
-    inlier_thres: 0.01
-    mad_scale: 2.5
+    threshold_method: mad
+    inlier_thres: 0.05
+    thres_reduce_factor: 0.01
+    mad_scale: 1.0
     min_inliers: 3
 
 segmenter:

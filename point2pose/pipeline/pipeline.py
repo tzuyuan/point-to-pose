@@ -270,7 +270,13 @@ class Pipeline:
                 # self.data_logger.log({"too_few_points": 0})
                 reg_stats_obj0.update({"too_few_points": 0})
 
-                pose_init_guess, reg_stats = self.register.register(key_points, curr3d)
+                prev_pose = self.objects[obj_id].pose @ np.linalg.inv(
+                    self.objects[obj_id].init_pose
+                )
+
+                pose_init_guess, reg_stats = self.register.register(
+                    key_points, curr3d, init_pose=prev_pose
+                )
                 pose_to_key = pose_init_guess
                 # refiner_t = time.time()
                 # # refine the solution using another registration?

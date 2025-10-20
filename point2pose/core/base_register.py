@@ -12,7 +12,7 @@ class Register(ABC):
             os.makedirs(self.debug_dir, exist_ok=True)
 
     @abstractmethod
-    def register(self, src_pcd, tgt_pcd, init_pose=None):
+    def register(self, source_pcd, target_pcd, init_pose=None):
         raise NotImplementedError(
             "Registrator method must be implemented by subclasses."
         )

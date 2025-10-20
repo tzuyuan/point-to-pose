@@ -14,7 +14,8 @@ class SVDResidualOutlierRegister(Register):
         super().__init__(config)
         self._max_iter = config.get("max_iter", 5)
         self._threshold_method = config.get("threshold_method", "mad")
-        self._inlier_thres = config.get("inlier_thres", 0.01)
+        self._inlier_thres = config.get("inlier_thres", 0.05)
+        self._thres_reduce_factor = config.get("thres_reduce_factor", 0.01)
         self._mad_scale = config.get("mad_scale", 2.5)
         self._min_inliers = config.get("min_inliers", 3)
 
@@ -54,6 +55,10 @@ class SVDResidualOutlierRegister(Register):
                 )  # 1.4826 makes MAD ~ std for Gaussian
             elif self._threshold_method == "fixed":
                 thr = float(self._inlier_thres)
+            elif self._threshold_method == "reduce":
+                thr = float(self._inlier_thres) - float(self._thres_reduce_factor * it)
+                if thr < 0:
+                    thr = 0.001
             else:
                 raise ValueError(f"Invalid threshold method: {self._threshold_method}")
 
@@ -116,6 +121,36 @@ class SVDResidualOutlierRegister(Register):
         # translation
         t = cq - R @ cp
         # return SE(3) matrix
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = t
+        return T
+
+    def _weighted_svd_fit(self, src, tgt, w):
+        """
+        Weighted rigid Procrustes (point-to-point). Returns 4x4 T (src->tgt).
+        """
+        w = np.clip(w, 0.0, None)
+        if np.sum(w) < 1e-9:
+            return np.eye(4)
+
+        W = w / (np.sum(w) + 1e-12)
+        mu_src = np.sum(src * W[:, None], axis=0)
+        mu_tgt = np.sum(tgt * W[:, None], axis=0)
+
+        Xc = src - mu_src
+        Yc = tgt - mu_tgt
+
+        # weighted cross-covariance
+        S = (Xc * W[:, None]).T @ Yc
+        U, _, Vt = np.linalg.svd(S)
+        R = Vt.T @ U.T
+        # det correction
+        if np.linalg.det(R) < 0:
+            Vt[-1, :] *= -1
+            R = Vt.T @ U.T
+        t = mu_tgt - R @ mu_src
+
         T = np.eye(4)
         T[:3, :3] = R
         T[:3, 3] = t

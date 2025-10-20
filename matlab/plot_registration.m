@@ -8,13 +8,36 @@ frame_id  = getfield(D.fixed, 'frame_id');     %#ok<GFLD>
 timestamp = getfield(D.fixed, 'timestamp');    %#ok<GFLD>
 
 
-i = 140;
+i = 25;
 
 reg_key_points =  D.helpers.regroup_triples(D.ragged.reg_key_points);
 cur3d =  D.helpers.regroup_triples(D.ragged.reg_curr3d);
+track3d = D.helpers.regroup_triples(D.ragged.track3d);
 
 reg_key_points_i = reg_key_points{i};
 cur3d_i = cur3d{i};
+track3d_i = track3d{i};
+
+% --- Find indices of curr3d_i in track3d_i ---
+tol = 1e-6;  % tolerance for floating-point comparison
+
+idx_in_track = zeros(size(cur3d_i,1),1);  % preallocate
+
+for k = 1:size(cur3d_i,1)
+    diffs = vecnorm(track3d_i - cur3d_i(k,:), 2, 2);
+    [min_val, min_idx] = min(diffs);
+    if min_val < tol
+        idx_in_track(k) = min_idx;
+    else
+        idx_in_track(k) = NaN; % no match found
+    end
+end
+
+% Remove NaN if you only want valid matches
+valid_idx = idx_in_track(~isnan(idx_in_track));
+
+
+
 visible_i = D.ragged.visibles{i};
 uncertainties_i = D.ragged.uncertainties{i};
 inlier_i = D.ragged.reg_inliers{i};
