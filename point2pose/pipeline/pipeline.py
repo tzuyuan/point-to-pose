@@ -4,9 +4,10 @@ import time
 
 import numpy as np
 import open3d as o3d
-import h5py
 import torch
 from scipy.spatial.transform import Rotation as scipy_R
+
+import cupoch as cph
 
 from point2pose.core.build import build_from_cfg
 
@@ -269,7 +270,59 @@ class Pipeline:
                 # self.data_logger.log({"too_few_points": 0})
                 reg_stats_obj0.update({"too_few_points": 0})
 
-                pose_to_key, reg_stats = self.register.register(key_points, curr3d)
+                pose_init_guess, reg_stats = self.register.register(key_points, curr3d)
+                pose_to_key = pose_init_guess
+                # refiner_t = time.time()
+                # # refine the solution using another registration?
+                # criteria = cph.registration.ICPConvergenceCriteria()
+                # criteria.max_iteration = 5
+
+                # key_points_pcd = cph.geometry.PointCloud()
+                # key_points_pcd.points = cph.utility.Vector3fVector(key_points)
+                # masked_pcd = cph.geometry.PointCloud()
+
+                # mask = frame.mask[obj_id, 0]  # [H, W] on cuda, dtype=bool/uint8
+
+                # # Get (y,x) indices on GPU; switch to (x,y) like your NumPy code
+                # coords_yx = torch.nonzero(mask > 0, as_tuple=False)  # [N, 2], (y,x)
+                # valid_pxl_in_mask_g = coords_yx[
+                #     :, [1, 0]
+                # ].contiguous()  # [N, 2], (x,y), still on GPU
+
+                # valid_pxl_in_mask = valid_pxl_in_mask_g.cpu().numpy()
+
+                # masked_pts, _ = convert_pixel_to_world(
+                #     pixel=valid_pxl_in_mask,
+                #     depth_image=frame.depth,
+                #     cam_intrinsics=frame.intrinsics,
+                #     depth_factor=frame.depth_factor,
+                #     remove_invalid=True,
+                # )
+
+                # masked_pcd.points = cph.utility.Vector3fVector(masked_pts)
+
+                # refine_result = cph.registration.registration_generalized_icp(
+                #     key_points_pcd,
+                #     masked_pcd,
+                #     max_correspondence_distance=0.02,
+                #     init=pose_init_guess.astype(np.float32),
+                #     estimation=cph.registration.TransformationEstimationForGeneralizedICP(),
+                #     criteria=criteria,
+                # )
+
+                # pose_to_key = refine_result.transformation
+
+                # # temp saving
+                # if self.debug_level > 1:
+
+                #     save_reg_pcd(
+                #         key_points,
+                #         masked_pts,
+                #         pose_to_key,
+                #         self._reg_debug_dir,
+                #         f"obj_{obj_id}_frame_{self.frame_id}_refine",
+                #         reg_stats,
+                #     )
 
                 pose = pose_to_key @ self.objects[obj_id].init_pose
                 self.objects[obj_id].pose = pose
@@ -305,7 +358,7 @@ class Pipeline:
                     save_reg_pcd(
                         key_points,
                         curr3d,
-                        pose_to_key,
+                        pose_init_guess,
                         self._reg_debug_dir,
                         f"obj_{obj_id}_frame_{self.frame_id}",
                         reg_stats,
@@ -388,7 +441,11 @@ class Pipeline:
         # ------------- criterion and sample -------------
         sampling_start = time.time()
         self.crit_ctx.update_criterion_context(
-            cur_iter=self.frame_id, uncertainty=uncertainties, reg_stats=reg_stats
+            cur_iter=self.frame_id,
+            uncertainty=uncertainties,
+            reg_stats=reg_stats,
+            track_table=self.track_table,
+            frame=frame,
         )
         self._check_and_sample_for_all_obj(frame)
         sampling_time = time.time() - sampling_start

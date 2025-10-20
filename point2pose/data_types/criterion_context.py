@@ -4,6 +4,7 @@ from typing import Optional, List
 import numpy as np
 
 from point2pose.modules.object.object import Object
+from point2pose.data_types.frame import Frame
 
 
 @dataclass
@@ -18,6 +19,10 @@ class CriterionContext:
     objects: Optional[List[Object]] = None
 
     reg_stats: Optional[dict] = None
+
+    track_table: Optional[dict] = None
+
+    frame: Optional[Frame] = None
 
     def update_criterion_context(self, **kwargs):
         """

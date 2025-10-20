@@ -22,8 +22,8 @@ register:
   params:
     debug_level: 2
     max_iter: 5
-    threshold_method: mad
-    inlier_thres: 0.1
+    threshold_method: fixed
+    inlier_thres: 0.01
     mad_scale: 2.5
     min_inliers: 3
 
@@ -46,8 +46,8 @@ sampler:
   type: uniform_fps
   params:
     num_points: 15
-    edge_margin_px: 20
-    debug_level: 0
+    edge_margin_px: 10
+    debug_level: 1
     debug_dir: /home/justin/code/point-to-pose/debug/sampler
 
 criterion:
@@ -55,7 +55,8 @@ criterion:
   ###      iteration, registration_residual, 
   ###      uncertainty_ratio, uncertainty_number, 
   ###      rotation_grid, rotation_threshold
-  type: rotation_threshold
+  ###      mask_area
+  type: mask_area
   params:
     # iteration criterion
     update_per_iter: 1000000
@@ -72,6 +73,12 @@ criterion:
 
     # rotation threshold criterion
     max_angle_deg: 45
+
+    # mask area criterion
+    fit_mode: convex
+    ratio_threshold: 0.4
+    debug_viz: false
+    debug_dir: /home/justin/code/point-to-pose/debug/criterion
 
 visualization:
   params:

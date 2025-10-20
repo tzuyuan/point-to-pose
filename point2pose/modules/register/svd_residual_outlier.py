@@ -14,7 +14,7 @@ class SVDResidualOutlierRegister(Register):
         super().__init__(config)
         self._max_iter = config.get("max_iter", 5)
         self._threshold_method = config.get("threshold_method", "mad")
-        self._inlier_thres = config.get("inlier_thres", 0.1)
+        self._inlier_thres = config.get("inlier_thres", 0.01)
         self._mad_scale = config.get("mad_scale", 2.5)
         self._min_inliers = config.get("min_inliers", 3)
 

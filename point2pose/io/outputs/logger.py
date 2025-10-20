@@ -3,7 +3,6 @@ import atexit
 import signal
 from typing import Dict, Any, Iterable, Set, Tuple
 import numpy as np
-import h5py
 from scipy.io import savemat
 
 
@@ -191,32 +190,32 @@ class DataLogger:
         savemat(mat_path, self._mat_sanitize_dict(packed_mat))
 
         # 5) Optional: HDF5 (fixed fields as datasets; ragged as vlen datasets)
-        if self.also_save_h5:
-            with h5py.File(h5_path, "w") as f:
-                # fixed fields
-                for k in fixed_keys:
-                    arr = packed_npz[k]
-                    f.create_dataset(
-                        k,
-                        data=arr,
-                        compression=self.h5_compression if arr.size > 0 else None,
-                    )
-                # ragged fields as vlen
-                for k in self.ragged_fields:
-                    # reconstruct per-row arrays from packed to write as vlen
-                    data = packed_npz[f"{k}_data"]
-                    offsets = packed_npz[f"{k}_offsets"]
-                    lengths = packed_npz[f"{k}_lengths"]
-                    dtype = data.dtype
-                    vlen_dt = h5py.vlen_dtype(dtype)
-                    ds = f.create_dataset(
-                        k,
-                        shape=(len(lengths),),
-                        dtype=vlen_dt,
-                        compression=self.h5_compression if data.size > 0 else None,
-                    )
-                    for i, (off, L) in enumerate(zip(offsets, lengths)):
-                        ds[i] = data[off : off + L]
+        # if self.also_save_h5:
+        #     with h5py.File(h5_path, "w") as f:
+        #         # fixed fields
+        #         for k in fixed_keys:
+        #             arr = packed_npz[k]
+        #             f.create_dataset(
+        #                 k,
+        #                 data=arr,
+        #                 compression=self.h5_compression if arr.size > 0 else None,
+        #             )
+        #         # ragged fields as vlen
+        #         for k in self.ragged_fields:
+        #             # reconstruct per-row arrays from packed to write as vlen
+        #             data = packed_npz[f"{k}_data"]
+        #             offsets = packed_npz[f"{k}_offsets"]
+        #             lengths = packed_npz[f"{k}_lengths"]
+        #             dtype = data.dtype
+        #             vlen_dt = h5py.vlen_dtype(dtype)
+        #             ds = f.create_dataset(
+        #                 k,
+        #                 shape=(len(lengths),),
+        #                 dtype=vlen_dt,
+        #                 compression=self.h5_compression if data.size > 0 else None,
+        #             )
+        #             for i, (off, L) in enumerate(zip(offsets, lengths)):
+        #                 ds[i] = data[off : off + L]
 
         self._saved = True
         return npz_path, mat_path
