@@ -19,6 +19,7 @@ class Frame:
     timestamp: Optional[float] = None
 
     # TODO: move this potentially
+    # TODO: doesn't work for multiple objects yet
     # convex hull of the current visible points in this frame
     convex_hull_xy: Optional[np.ndarray] = None  # Nx2 float32 (x,y) coordinates
 

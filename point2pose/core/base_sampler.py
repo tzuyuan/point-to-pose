@@ -1,6 +1,8 @@
 import os
 from abc import ABC, abstractmethod
 
+from point2pose.data_types.sampler_context import SamplerContext
+
 
 class Sampler(ABC):
 
@@ -13,6 +15,6 @@ class Sampler(ABC):
             os.makedirs(self.debug_dir, exist_ok=True)
 
     @abstractmethod
-    def sample(self):
+    def sample(self, context: SamplerContext):
         """Perform the sampling operation."""
         pass

@@ -2,9 +2,12 @@ import numpy as np
 import cv2 as cv
 import torch
 
+from scipy.spatial import ConvexHull
+
 from point2pose.data_types.frame import Frame
 from point2pose.core.base_sampler import Sampler
 from point2pose.core.module_registry import SAMPLER
+from point2pose.data_types.sampler_context import SamplerContext
 
 
 @SAMPLER.register_module("uniform_fps")
@@ -16,13 +19,17 @@ class UniformFPSampler(Sampler):
         self.edge_margin_px = config.get("edge_margin_px", 5)
         self._remove_convex_hull = config.get("remove_convex_hull", True)
         self._i = 0
+        self._initialized_obj_ids = set()
 
-    def sample(self, frame: Frame, obj_id: int) -> np.ndarray:
+    def sample(self, context: SamplerContext, obj_id: int) -> np.ndarray:
         """
         Uniform-like sampling (blue-noise) via Farthest Point Sampling within the mask,
         while staying at least `edge_margin_px` away from the mask boundary.
         Returns integer (x,y) coordinates (np.int32).
         """
+
+        frame = context.frame
+
         # ---- 1) Get mask -> CPU uint8
         mask_t = frame.mask[obj_id, 0]  # [H,W], bool/uint8, on CUDA/CPU
         if isinstance(mask_t, torch.Tensor):
@@ -30,8 +37,14 @@ class UniformFPSampler(Sampler):
         else:
             mask_np = (mask_t > 0).astype(np.uint8)
 
-        if self._remove_convex_hull and frame.convex_hull_xy is not None:
-            mask_np = self.subtract_convex_hull(mask_np, frame.convex_hull_xy)
+        if obj_id in self._initialized_obj_ids:
+            if self._remove_convex_hull and frame.convex_hull_xy is not None:
+                mask_np = self.subtract_convex_hull(mask_np, frame.convex_hull_xy)
+            elif self._remove_convex_hull and frame.convex_hull_xy is None:
+                frame.convex_hull_xy = self._fit_convex_hull(context, obj_id)
+                mask_np = self.subtract_convex_hull(mask_np, frame.convex_hull_xy)
+        else:
+            self._initialized_obj_ids.add(obj_id)
 
         # Early exit on empty mask
         if mask_np.sum() == 0:
@@ -142,6 +155,58 @@ class UniformFPSampler(Sampler):
             last = pts[far_idx : far_idx + 1]
 
         return pts[selected]
+
+    def _fit_convex_hull(self, context: SamplerContext, obj_id: int):
+        """
+        Fit the convex hull of the object in the mask.
+        ## TODO: optimize this
+        """
+        mask = context.frame.mask[obj_id, 0] > 0
+
+        obj_idx = context.track_table.obj2track_map[obj_id]
+        vis_obj = np.asarray(context.track_table.visible, dtype=bool)[obj_idx]
+
+        idx = obj_idx[vis_obj]
+        points = context.track_table.track_2d[idx]
+
+        # remove points outside of the mask
+        original_point_count = points.shape[0]
+        if points.shape[0] > 0:
+            # Convert mask to numpy for indexing
+            mask_np = mask.cpu().numpy() if isinstance(mask, torch.Tensor) else mask
+
+            # Get image dimensions
+            h, w = mask_np.shape
+
+            # Filter points that are within image bounds and inside the mask
+            valid_points_mask = (
+                (points[:, 0] >= 0)
+                & (points[:, 0] < w)  # x within bounds
+                & (points[:, 1] >= 0)
+                & (points[:, 1] < h)  # y within bounds
+                & mask_np[
+                    points[:, 1].astype(int), points[:, 0].astype(int)
+                ]  # inside mask
+            )
+
+            # Keep only valid points
+            points = points[valid_points_mask]
+            idx = idx[valid_points_mask]
+
+            # Debug info
+            filtered_count = original_point_count - points.shape[0]
+            if filtered_count > 0:
+                print(
+                    f"Filtered out {filtered_count} points outside mask (kept {points.shape[0]}/{original_point_count})"
+                )
+
+            # --- compute point region area ---
+
+            hull = ConvexHull(points)
+
+            convex_hull_xy = hull.points[hull.vertices]
+
+            return convex_hull_xy
 
     def subtract_convex_hull(self, mask: np.ndarray, hull_xy: np.ndarray):
         """

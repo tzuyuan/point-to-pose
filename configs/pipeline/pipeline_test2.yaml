@@ -23,8 +23,8 @@ register:
     debug_level: 2
     max_iter: 5
     threshold_method: mad
-    inlier_thres: 0.05
-    thres_reduce_factor: 0.01
+    inlier_thres: 0.01
+    thres_reduce_factor: 0.005
     mad_scale: 1.0
     min_inliers: 3
 
@@ -57,7 +57,7 @@ criterion:
   ###      uncertainty_ratio, uncertainty_number, 
   ###      rotation_grid, rotation_threshold
   ###      mask_area
-  type: mask_area
+  type: rotation_threshold
   params:
     # iteration criterion
     update_per_iter: 1000000

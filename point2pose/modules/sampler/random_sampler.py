@@ -6,6 +6,7 @@ import torch
 from point2pose.data_types.frame import Frame
 from point2pose.core.base_sampler import Sampler
 from point2pose.core.module_registry import SAMPLER
+from point2pose.data_types.sampler_context import SamplerContext
 
 
 @SAMPLER.register_module("random")
@@ -15,7 +16,7 @@ class RandomSampler(Sampler):
         self.num_points = config.get("num_points", 10)
         self._i = 0
 
-    def sample(self, frame: Frame, obj_id: int) -> np.ndarray:
+    def sample(self, context: SamplerContext, obj_id: int) -> np.ndarray:
         """
 
         Args:
@@ -27,6 +28,7 @@ class RandomSampler(Sampler):
         # mask = frame.mask[obj_id, 0]
         # y_coords, x_coords = np.where(mask > 0)
         # valid_pixels = np.stack([x_coords, y_coords], axis=1)
+        frame = context.frame
         mask = frame.mask[obj_id, 0]  # [H, W] on cuda, dtype=bool/uint8
 
         # Get (y,x) indices on GPU; switch to (x,y) like your NumPy code

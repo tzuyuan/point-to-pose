@@ -21,6 +21,7 @@ from point2pose.core.module_registry import (
     OPTIM,
 )
 from point2pose.data_types.criterion_context import CriterionContext
+from point2pose.data_types.sampler_context import SamplerContext
 from point2pose.data_types.point_track_table import PointTrackTable
 from point2pose.modules.object.object import Object
 from point2pose.io.outputs.logger import DataLogger
@@ -84,6 +85,7 @@ class Pipeline:
         self.frame_id = 0
 
         self.crit_ctx = CriterionContext()
+        self.samp_ctx = SamplerContext(frame=None)
         self.track_table = PointTrackTable.new(n0=0)
 
         self.num_obj = 0
@@ -149,8 +151,10 @@ class Pipeline:
         obj_ids, mask_logits = self.segmenter.segment(frame.rgb)
         frame.mask = mask_logits
 
+        self.samp_ctx.frame = frame
+
         # ------------- sampler -------------
-        self._sample_for_all_obj(frame)
+        self._sample_for_all_obj(self.samp_ctx)
 
         # ------------- tracker -------------
         self.tracker.initialize(frame)
@@ -213,6 +217,8 @@ class Pipeline:
         segmenter_time = time.time() - segmenter_start
         print(f"Frame {self.frame_id} - Segmentation: {segmenter_time:.4f}s")
 
+        self.samp_ctx.frame = frame
+
         # ------------- tracker -------------
         tracker_start = time.time()
         tracks, uncertainties, visibles = self.tracker.track_once(frame)
@@ -270,6 +276,7 @@ class Pipeline:
                 # self.data_logger.log({"too_few_points": 0})
                 reg_stats_obj0.update({"too_few_points": 0})
 
+                # TODO optimize this by saving the previous pose directly
                 prev_pose = self.objects[obj_id].pose @ np.linalg.inv(
                     self.objects[obj_id].init_pose
                 )
@@ -278,6 +285,7 @@ class Pipeline:
                     key_points, curr3d, init_pose=prev_pose
                 )
                 pose_to_key = pose_init_guess
+
                 # refiner_t = time.time()
                 # # refine the solution using another registration?
                 # criteria = cph.registration.ICPConvergenceCriteria()
@@ -307,12 +315,12 @@ class Pipeline:
 
                 # masked_pcd.points = cph.utility.Vector3fVector(masked_pts)
 
-                # refine_result = cph.registration.registration_generalized_icp(
+                # refine_result = cph.registration.registration_icp(
                 #     key_points_pcd,
                 #     masked_pcd,
                 #     max_correspondence_distance=0.02,
                 #     init=pose_init_guess.astype(np.float32),
-                #     estimation=cph.registration.TransformationEstimationForGeneralizedICP(),
+                #     estimation_method=cph.registration.TransformationEstimationPointToPlane(),
                 #     criteria=criteria,
                 # )
 
@@ -453,7 +461,8 @@ class Pipeline:
             track_table=self.track_table,
             frame=frame,
         )
-        self._check_and_sample_for_all_obj(frame)
+        self.samp_ctx.update_sampler_context(frame=frame, track_table=self.track_table)
+        self._check_and_sample_for_all_obj(self.samp_ctx)
         sampling_time = time.time() - sampling_start
         # print(f"Frame {self.frame_id} - Criterion and sampling: {sampling_time:.4f}s")
 
@@ -468,14 +477,15 @@ class Pipeline:
 
         return np.tile(np.eye(4), (self.num_obj, 1, 1))
 
-    def _sample_for_all_obj(self, frame):
+    def _sample_for_all_obj(self, context: SamplerContext):
         """
         Sample points for all objects, and add the query points to the tracker.
         """
         all_sampled_points = np.empty((0, 2))
+        frame = context.frame
         for obj_id in range(self.num_obj):
             # Sample points
-            new_sampled_points = self.sampler.sample(frame, obj_id)
+            new_sampled_points = self.sampler.sample(context, obj_id)
             all_sampled_points = np.vstack((all_sampled_points, new_sampled_points))
             print(f"new_sampled_points shape: {new_sampled_points.shape}")
             # add new sampled points to the tracker
@@ -500,16 +510,17 @@ class Pipeline:
             visibles=np.ones(len(all_sampled_points), dtype=bool),
         )
 
-    def _check_and_sample_for_all_obj(self, frame):
+    def _check_and_sample_for_all_obj(self, samp_context: SamplerContext):
         """
         Check sample criteria for all objects and sample points for all objects if the criterion is met.
         """
         # Check sample criteria
+        frame = samp_context.frame
         for obj_id in range(self.num_obj):
             ## TODO: make crit_ctx to be object-specific?
             if self.criterion.check_sample_criterion(self.crit_ctx, obj_id):
                 # Sample points
-                new_sampled_points = self.sampler.sample(frame, obj_id)
+                new_sampled_points = self.sampler.sample(samp_context, obj_id)
 
                 # add new sampled points to the tracker
                 new_indices = self.tracker.add_query_points(frame, new_sampled_points)
