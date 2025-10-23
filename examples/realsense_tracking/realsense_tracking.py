@@ -341,7 +341,9 @@ class RealSensePipelineTracker:
                     obj.pose,
                     bbox_min_max_local,
                 )
-                display_frame = draw_xyz_axis(image=display_frame, ob_in_cam=obj.pose)
+                display_frame = draw_xyz_axis(
+                    image=display_frame, ob_in_cam=obj.pose, K=self.camera_intrinsics
+                )
 
         # Save image if flag is enabled and frame_id is provided
         if self._save_images and frame_id is not None:

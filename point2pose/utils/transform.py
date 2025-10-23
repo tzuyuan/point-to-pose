@@ -27,3 +27,16 @@ def to_homo(pts):
     assert len(pts.shape) == 2, f"pts.shape: {pts.shape}"
     homo = np.concatenate((pts, np.ones((pts.shape[0], 1))), axis=-1)
     return homo
+
+
+def inverse_SE3(T: np.ndarray) -> np.ndarray:
+    """
+    Inverse a SE3 transform.
+    """
+
+    R = T[:3, :3]
+    t = T[:3, 3]
+    T_inv = np.eye(4)
+    T_inv[:3, :3] = R.T
+    T_inv[:3, 3] = -R.T @ t
+    return T_inv

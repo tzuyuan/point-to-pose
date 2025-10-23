@@ -47,7 +47,7 @@ sampler:
   type: uniform_fps
   params:
     num_points: 15
-    edge_margin_px: 10
+    edge_margin_px: 5
     debug_level: 1
     debug_dir: /home/justin/code/point-to-pose/debug/sampler
 

@@ -118,6 +118,7 @@ class Pipeline:
                     "obj_uncertainties",
                     "obj_valid",
                     # registeration stats
+                    "reg_key_points_idx",
                     "reg_key_points",
                     "reg_curr3d",
                     "reg_inliers",
@@ -263,6 +264,7 @@ class Pipeline:
                 if self.save_meta_data and obj_id == 0:
                     reg_stats_obj0.update(
                         {
+                            "reg_key_points_idx": idx,
                             "reg_key_points": key_points,
                             "reg_curr3d": curr3d,
                         }
