@@ -7,7 +7,7 @@ import open3d as o3d
 import torch
 from scipy.spatial.transform import Rotation as scipy_R
 
-import cupoch as cph
+# import cupoch as cph
 
 from point2pose.core.build import build_from_cfg
 
@@ -27,7 +27,7 @@ from point2pose.modules.object.object import Object
 from point2pose.io.outputs.logger import DataLogger
 from point2pose.io.outputs.point_cloud_io import save_reg_pcd
 from point2pose.utils.camera import convert_pixel_to_world
-from point2pose.utils.transform import transform_pts
+from point2pose.utils.transform import transform_pts, inverse_SE3
 
 
 class Pipeline:
@@ -193,7 +193,7 @@ class Pipeline:
         # estimate initial pose
         out_pose = np.tile(np.eye(4), (self.num_obj, 1, 1))
         if self._estimate_init_pose:
-            out_pose = self._estimate_init_pose_and_bbox_for_all_obj(frame)
+            self._estimate_init_pose_and_bbox_for_all_obj(frame)
 
         self.frame_id += 1
         return out_pose
@@ -279,14 +279,16 @@ class Pipeline:
                 reg_stats_obj0.update({"too_few_points": 0})
 
                 # TODO optimize this by saving the previous pose directly
-                prev_pose = self.objects[obj_id].pose @ np.linalg.inv(
-                    self.objects[obj_id].init_pose
-                )
+                prev_pose = self.objects[obj_id].pose
 
-                pose_init_guess, reg_stats = self.register.register(
+                # key points are represented in the first frame coordinate system
+                # pose_i_0 is the transformation from the first frame to the current frame
+                # init_pose here is the warm start for the optimization, not the initial pose of the object
+                pose_i_0, reg_stats = self.register.register(
                     key_points, curr3d, init_pose=prev_pose
                 )
-                pose_to_key = pose_init_guess
+
+                # pose_i_0 = pose_init_guess
 
                 # refiner_t = time.time()
                 # # refine the solution using another registration?
@@ -340,7 +342,7 @@ class Pipeline:
                 #         reg_stats,
                 #     )
 
-                pose = pose_to_key @ self.objects[obj_id].init_pose
+                pose = pose_i_0
                 self.objects[obj_id].pose = pose
 
                 # Log pose in TUM format
@@ -374,7 +376,7 @@ class Pipeline:
                     save_reg_pcd(
                         key_points,
                         curr3d,
-                        pose_init_guess,
+                        pose_i_0,
                         self._reg_debug_dir,
                         f"obj_{obj_id}_frame_{self.frame_id}",
                         reg_stats,
@@ -538,27 +540,18 @@ class Pipeline:
                     depth_factor=frame.depth_factor,
                 )
 
-                new_points_3d_obj_frame = transform_pts(
-                    np.linalg.inv(
-                        self.objects[obj_id].pose
-                        @ np.linalg.inv(self.objects[obj_id].init_pose)
-                    ),
+                # key points are represented in the first frame coordinate system
+                new_points_3d_frame_0 = transform_pts(
+                    inverse_SE3(self.objects[obj_id].pose),
                     new_points_3d,
                 )
 
-                # Use the new add_key_points method with frame tracking
+                # add new key points to the object with 0.5 uncertainty
                 self.objects[obj_id].add_key_points(
-                    new_points_3d_obj_frame,
-                    0.5 * np.ones(len(new_points_3d_obj_frame), dtype=float),
+                    new_points_3d_frame_0,
+                    0.5 * np.ones(len(new_points_3d_frame_0), dtype=float),
+                    valid_new_points_3d,
                     self.frame_id,
-                )
-
-                # Update valid array separately since add_key_points doesn't handle it
-                self.objects[obj_id].valid = np.concatenate(
-                    (
-                        self.objects[obj_id].valid,
-                        valid_new_points_3d,
-                    )
                 )
 
                 # Save key points with frame-based coloring if enabled
@@ -656,7 +649,9 @@ class Pipeline:
             # set the initial pose
             out_pose[obj_id, :3, :3] = self.objects[obj_id].init_bbox.R
             out_pose[obj_id, :3, 3] = self.objects[obj_id].init_bbox.center
-            self.objects[obj_id].pose = out_pose[obj_id]
+            # the first frame pose is the identity
+            self.objects[obj_id].pose = np.eye(4)
+            # initial pose is the pose from the object frame to the first frame
             self.objects[obj_id].init_pose = out_pose[obj_id]
 
             # Log initial pose in TUM format

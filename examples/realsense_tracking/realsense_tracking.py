@@ -332,17 +332,18 @@ class RealSensePipelineTracker:
         # Draw pose information
         for i, obj in enumerate(objects):
             if obj.pose is not None:
+                pose = obj.pose @ obj.init_pose
                 half = 0.5 * np.asarray(obj.bbox.extent, dtype=float)
                 bbox_min_max_local = np.vstack([-half, +half])  # (2,3)
 
                 display_frame = draw_posed_3d_box(
                     self.camera_intrinsics,
                     display_frame,
-                    obj.pose,
+                    pose,
                     bbox_min_max_local,
                 )
                 display_frame = draw_xyz_axis(
-                    image=display_frame, ob_in_cam=obj.pose, K=self.camera_intrinsics
+                    image=display_frame, ob_in_cam=pose, K=self.camera_intrinsics
                 )
 
         # Save image if flag is enabled and frame_id is provided

@@ -10,7 +10,7 @@ class Object:
     def __init__(self, id: int):
         self.id = id
 
-        # 3D points belonging to the object, represented in the initial object frame
+        # 3D points belonging to the object, represented in the first frame coordinate system
         self.key_points = np.empty((0, 3))  # Mx3
         self.uncertainties = np.empty((0,))
         self.valid = np.empty((0,))  # M, bool
@@ -19,7 +19,12 @@ class Object:
         )  # M, frame IDs when points were added
 
         # pose of the object
+        # init_pose is the transformation from the object frame to the first frame
+        # e.g. the estimated pose of the object in the first frame
         self.init_pose = np.eye(4)
+
+        # pose is the transformation from the first frame to the current frame
+        # T_i_0: transformation points from frame 0 -> frame i
         self.pose = np.eye(
             4
         )  # 4x4 transformation matrix from object frame to world frame
@@ -33,6 +38,7 @@ class Object:
         self,
         new_key_points: np.ndarray,
         new_uncertainties: np.ndarray,
+        new_valid: np.ndarray,
         frame_id: int = None,
     ):
         """
@@ -53,6 +59,7 @@ class Object:
 
         self.key_points = np.vstack((self.key_points, new_key_points))
         self.uncertainties = np.hstack((self.uncertainties, new_uncertainties))
+        self.valid = np.hstack((self.valid, new_valid))
         self.key_point_frames = np.hstack(
             (self.key_point_frames, np.full(new_key_points.shape[0], frame_id))
         )
