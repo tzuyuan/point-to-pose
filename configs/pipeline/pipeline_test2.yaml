@@ -5,6 +5,7 @@ realsense:
 
 pipeline:
   params:
+    max_num_obj: 2
     estimate_init_pose: true
     frame_to_map_reg: true
     debug_level: 2
@@ -20,7 +21,7 @@ pipeline:
 register:
   type: svd_residual_outlier
   params:
-    debug_level: 2
+    debug_level: 0
     max_iter: 5
     threshold_method: mad
     inlier_thres: 0.01
@@ -47,8 +48,8 @@ sampler:
   type: uniform_fps
   params:
     num_points: 15
-    edge_margin_px: 5
-    debug_level: 1
+    edge_margin_px: 10
+    debug_level: 0
     debug_dir: /home/justin/code/point-to-pose/debug/sampler
 
 criterion:
@@ -73,13 +74,20 @@ criterion:
     discretization_angle: 60
 
     # rotation threshold criterion
-    max_angle_deg: 45
+    max_angle_deg: 30
 
     # mask area criterion
     fit_mode: convex
     ratio_threshold: 0.4
     debug_viz: false
     debug_dir: /home/justin/code/point-to-pose/debug/criterion
+
+optimizer:
+  type: isam2
+  params:
+    relinearize_threshold: 0.1
+    relinearize_skip: 1
+    prior_noise_param: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
 
 visualization:
   params:

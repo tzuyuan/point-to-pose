@@ -1,6 +1,6 @@
 # src/point2pose/core/build.py
 from typing import Mapping, Any
-from point2pose.core.module_registry import REGISTER, TRACKER, STATE, SAMPLER, OPTIM
+from point2pose.core.module_registry import REGISTER, TRACKER, STATE, SAMPLER, OPTIMIZER
 import point2pose.modules
 
 

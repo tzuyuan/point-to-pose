@@ -18,12 +18,15 @@ from point2pose.core.module_registry import (
     SAMPLER,
     CRITERION,
     SEGMENTER,
-    OPTIM,
+    OPTIMIZER,
 )
+from point2pose.modules.optimizer_manager.optimizer_manager import OptimizerManager
 from point2pose.data_types.criterion_context import CriterionContext
 from point2pose.data_types.sampler_context import SamplerContext
 from point2pose.data_types.point_track_table import PointTrackTable
+from point2pose.data_types.object_frame_data import ObjectFrameData
 from point2pose.modules.object.object import Object
+from point2pose.data_types.optimizer_result import OptimizerResult
 from point2pose.io.outputs.logger import DataLogger
 from point2pose.io.outputs.point_cloud_io import save_reg_pcd
 from point2pose.utils.camera import convert_pixel_to_world
@@ -81,6 +84,12 @@ class Pipeline:
         self.criterion = build_from_cfg(cfg.criterion, CRITERION)
         self.sampler = build_from_cfg(cfg.sampler, SAMPLER)
         # self.optimizer = build_from_cfg(cfg.optimizer, OPTIM)
+
+        max_num_obj = self.pipeline_cfg.get("max_num_obj", 1)
+        self.optimizer_manager = OptimizerManager(cfg.optimizer)
+        # initialize optimizer manager
+        self.optimizer_manager.initialize(max_num_obj)
+        self.optimizer_manager.start()
 
         self.frame_id = 0
 
@@ -176,6 +185,20 @@ class Pipeline:
                 len(self.track_table.obj2track_map[obj_id]), 0, dtype=int
             )
 
+            # Initialize optimizer manager
+            self.optimizer_manager.set_input(
+                obj_id,
+                ObjectFrameData(
+                    obj_id=obj_id,
+                    frame_id=0,
+                    pose=np.eye(4),
+                    cur_3d=self.objects[obj_id].key_points,
+                    cur_3d_idx=np.arange(len(self.objects[obj_id].key_points)),
+                    inliers=np.ones(len(self.objects[obj_id].key_points), dtype=bool),
+                    residuals=np.zeros(len(self.objects[obj_id].key_points)),
+                ),
+            )
+
             # Initialize pose log file for this object if pose saving is enabled
             if self.save_pose:
                 pose_log_path = os.path.join(
@@ -183,9 +206,34 @@ class Pipeline:
                 )
                 pose_log_file = open(pose_log_path, "w", encoding="utf-8")
                 pose_log_file.write("# timestamp tx ty tz qx qy qz qw\n")
+                # add initial pose which is the identity
+                tum_pose = self._pose_matrix_to_tum_format(
+                    np.eye(4), timestamp=time.time()
+                )
+                pose_log_file.write(tum_pose)
                 self.pose_log_files.append(pose_log_file)
             else:
                 self.pose_log_files.append(None)
+
+        # Logger
+        if self.save_meta_data:
+            self.data_logger.log(
+                {
+                    "timestamp": frame.timestamp,
+                    "frame_id": self.frame_id,
+                    "track2d": self.track_table.track_2d,
+                    "uncertainties": self.track_table.uncertainty,
+                    "visibles": self.track_table.visible,
+                    "track3d": self.track_table.track_3d,
+                    "valid": self.track_table.valid,
+                    "valid_depth": frame.depth,
+                    "obj_init_pose": self.objects[0].init_pose,
+                    "obj_pose": self.objects[0].pose,
+                    "obj_key_points": self.objects[0].key_points,
+                    "obj_uncertainties": self.objects[0].uncertainties,
+                    "obj_valid": self.objects[0].valid,
+                }
+            )
 
         self.crit_ctx.objects = self.objects
         self.criterion.initialize(self.crit_ctx)
@@ -213,7 +261,7 @@ class Pipeline:
 
         # ------------- segmenter -------------
         segmenter_start = time.time()
-        obj_ids, mask_logits = self.segmenter.segment(frame.rgb)
+        _, mask_logits = self.segmenter.segment(frame.rgb)
         frame.mask = mask_logits  # mask is a torch tensor on gpu
         segmenter_time = time.time() - segmenter_start
         print(f"Frame {self.frame_id} - Segmentation: {segmenter_time:.4f}s")
@@ -248,6 +296,28 @@ class Pipeline:
         reg_stats = {}
         reg_stats_obj0 = {}
         for obj_id in range(self.num_obj):
+
+            # check and update the keypoints from the graph optimizer
+
+            # get the output from the optimizer manager
+            opt_results = self.optimizer_manager.get_output(obj_id)
+
+            # if we have optmized results, update the object info
+            if opt_results is not None:
+                ## TODO: do we update pose here...?
+                # self.objects[obj_id].pose = opt_results.pose_optimized
+                # print(
+                #     f"key points before optimization: {self.objects[obj_id].key_points.shape}"
+                # )
+                # print(self.objects[obj_id].key_points)
+                kp_idx = opt_results.key_points_idx_optimized
+                kp_optimized = opt_results.key_points_optimized
+                self.objects[obj_id].key_points[kp_idx] = kp_optimized
+                # print(
+                #     f"key points after optimization: {self.objects[obj_id].key_points.shape}"
+                # )
+                # print(self.objects[obj_id].key_points)
+
             # frame to map registration
             if self._frame2map_reg:
 
@@ -261,6 +331,7 @@ class Pipeline:
                     uncertainty_thres=0.6,
                 )
                 # TODO: put it at better place
+
                 if self.save_meta_data and obj_id == 0:
                     reg_stats_obj0.update(
                         {
@@ -343,7 +414,23 @@ class Pipeline:
                 #     )
 
                 pose = pose_i_0
+
+                # update object info
                 self.objects[obj_id].pose = pose
+
+                # update object frame data and send to optimizer manager
+                object_frame_data = ObjectFrameData(
+                    obj_id=obj_id,
+                    frame_id=self.frame_id,
+                    pose=pose,
+                    cur_3d=curr3d,
+                    cur_3d_idx=idx,
+                    inliers=reg_stats.get("inliers", np.array([])),
+                    residuals=reg_stats.get("residuals", np.array([])),
+                )
+
+                # once the input is set, the optimizer manager will start the optimization process
+                self.optimizer_manager.set_input(obj_id, object_frame_data)
 
                 # Log pose in TUM format
                 if self.save_pose and self.pose_log_files[obj_id] is not None:
@@ -448,10 +535,6 @@ class Pipeline:
                     "obj_key_points": self.objects[0].key_points,
                     "obj_uncertainties": self.objects[0].uncertainties,
                     "obj_valid": self.objects[0].valid,
-                    # "reg_iter": reg_stats.get("iter", -1),
-                    # "reg_thr": reg_stats.get("thr", -1.0),
-                    # "reg_residuals": reg_stats.get("residuals", np.array([])),
-                    # "reg_inliers": reg_stats.get("inliers", np.array([])),
                     **reg_stats_obj0,
                 }
             )
