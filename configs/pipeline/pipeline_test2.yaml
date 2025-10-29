@@ -49,7 +49,7 @@ sampler:
   params:
     num_points: 15
     edge_margin_px: 10
-    debug_level: 0
+    debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/sampler
 
 criterion:
@@ -58,13 +58,13 @@ criterion:
   ###      uncertainty_ratio, uncertainty_number, 
   ###      rotation_grid, rotation_threshold
   ###      mask_area
-  type: rotation_threshold
+  type: mask_area
   params:
     # iteration criterion
     update_per_iter: 1000000
 
     # residual criterion
-    residual_thres: 0.006
+    residual_thres: 0.02
 
     # uncertainty criterion
     uncer_thres: 0.3
@@ -74,7 +74,7 @@ criterion:
     discretization_angle: 60
 
     # rotation threshold criterion
-    max_angle_deg: 30
+    max_angle_deg: 40
 
     # mask area criterion
     fit_mode: convex

@@ -223,7 +223,7 @@ def load_correspondence_data(
             key_points_homo = np.hstack([key_points, np.ones((len(key_points), 1))])
 
             # Apply transformation: obj_pose @ (obj_init_pose.inv())
-            transform = obj_pose @ np.linalg.inv(obj_init_pose)
+            transform = obj_pose
             key_points_transformed_homo = (transform @ key_points_homo.T).T
 
             # Convert back to 3D coordinates

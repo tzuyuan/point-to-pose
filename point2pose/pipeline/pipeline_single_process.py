@@ -7,7 +7,7 @@ import open3d as o3d
 import torch
 from scipy.spatial.transform import Rotation as scipy_R
 
-# import cupoch as cph
+import cupoch as cph
 
 from point2pose.core.build import build_from_cfg
 
@@ -20,12 +20,14 @@ from point2pose.core.module_registry import (
     SEGMENTER,
     OPTIMIZER,
 )
-from point2pose.modules.optimizer_manager.optimizer_manager import OptimizerManager
+
+# from point2pose.modules.optimizer_manager.optimizer_manager import OptimizerManager
 from point2pose.data_types.criterion_context import CriterionContext
 from point2pose.data_types.sampler_context import SamplerContext
 from point2pose.data_types.point_track_table import PointTrackTable
 from point2pose.data_types.object_frame_data import ObjectFrameData
 from point2pose.modules.object.object import Object
+from point2pose.modules.optimizer.isam2_optimizer import ISAM2Optimizer
 from point2pose.data_types.optimizer_result import OptimizerResult
 from point2pose.io.outputs.logger import DataLogger
 from point2pose.io.outputs.point_cloud_io import save_reg_pcd
@@ -33,7 +35,11 @@ from point2pose.utils.camera import convert_pixel_to_world
 from point2pose.utils.transform import transform_pts, inverse_SE3
 
 
-class Pipeline:
+class PipelineSingleProcess:
+    """
+    Note: This version supports a single object only for now.
+    """
+
     def __init__(self, cfg):
         self.cfg = cfg
         self.pipeline_cfg = cfg.pipeline.params
@@ -86,10 +92,7 @@ class Pipeline:
         # self.optimizer = build_from_cfg(cfg.optimizer, OPTIM)
 
         max_num_obj = self.pipeline_cfg.get("max_num_obj", 1)
-        self.optimizer_manager = OptimizerManager(cfg.optimizer)
-        # initialize optimizer manager
-        self.optimizer_manager.initialize(max_num_obj)
-        self.optimizer_manager.start()
+        self.optimizer = ISAM2Optimizer(cfg.optimizer)
 
         self.frame_id = 0
 
@@ -185,9 +188,7 @@ class Pipeline:
                 len(self.track_table.obj2track_map[obj_id]), 0, dtype=int
             )
 
-            # Initialize optimizer manager
-            self.optimizer_manager.set_input(
-                obj_id,
+            opt_results = self.optimizer.optimize(
                 ObjectFrameData(
                     obj_id=obj_id,
                     frame_id=0,
@@ -196,7 +197,7 @@ class Pipeline:
                     cur_3d_idx=np.arange(len(self.objects[obj_id].key_points)),
                     inliers=np.ones(len(self.objects[obj_id].key_points), dtype=bool),
                     residuals=np.zeros(len(self.objects[obj_id].key_points)),
-                ),
+                )
             )
 
             # Initialize pose log file for this object if pose saving is enabled
@@ -299,26 +300,6 @@ class Pipeline:
 
             # check and update the keypoints from the graph optimizer
 
-            # get the output from the optimizer manager
-            opt_results = self.optimizer_manager.get_output(obj_id)
-
-            # if we have optmized results, update the object info
-            if opt_results is not None:
-                ## TODO: do we update pose here...?
-                # self.objects[obj_id].pose = opt_results.pose_optimized
-                # print(
-                #     f"key points before optimization: {self.objects[obj_id].key_points.shape}"
-                # )
-                # print(self.objects[obj_id].key_points)
-                kp_idx = opt_results.key_points_idx_optimized
-                # kp_idx = self.track_table.obj2track_map[obj_id][kp_idx]
-                kp_optimized = opt_results.key_points_optimized
-                self.objects[obj_id].key_points[kp_idx] = kp_optimized
-                # print(
-                #     f"key points after optimization: {self.objects[obj_id].key_points.shape}"
-                # )
-                # print(self.objects[obj_id].key_points)
-
             # frame to map registration
             if self._frame2map_reg:
 
@@ -362,45 +343,45 @@ class Pipeline:
 
                 # pose_i_0 = pose_init_guess
 
-                # refiner_t = time.time()
-                # # refine the solution using another registration?
-                # criteria = cph.registration.ICPConvergenceCriteria()
-                # criteria.max_iteration = 5
+                refiner_t = time.time()
+                # refine the solution using another registration?
+                criteria = cph.registration.ICPConvergenceCriteria()
+                criteria.max_iteration = 5
 
-                # key_points_pcd = cph.geometry.PointCloud()
-                # key_points_pcd.points = cph.utility.Vector3fVector(key_points)
-                # masked_pcd = cph.geometry.PointCloud()
+                key_points_pcd = cph.geometry.PointCloud()
+                key_points_pcd.points = cph.utility.Vector3fVector(key_points)
+                masked_pcd = cph.geometry.PointCloud()
 
-                # mask = frame.mask[obj_id, 0]  # [H, W] on cuda, dtype=bool/uint8
+                mask = frame.mask[obj_id, 0]  # [H, W] on cuda, dtype=bool/uint8
 
-                # # Get (y,x) indices on GPU; switch to (x,y) like your NumPy code
-                # coords_yx = torch.nonzero(mask > 0, as_tuple=False)  # [N, 2], (y,x)
-                # valid_pxl_in_mask_g = coords_yx[
-                #     :, [1, 0]
-                # ].contiguous()  # [N, 2], (x,y), still on GPU
+                # Get (y,x) indices on GPU; switch to (x,y) like your NumPy code
+                coords_yx = torch.nonzero(mask > 0, as_tuple=False)  # [N, 2], (y,x)
+                valid_pxl_in_mask_g = coords_yx[
+                    :, [1, 0]
+                ].contiguous()  # [N, 2], (x,y), still on GPU
 
-                # valid_pxl_in_mask = valid_pxl_in_mask_g.cpu().numpy()
+                valid_pxl_in_mask = valid_pxl_in_mask_g.cpu().numpy()
 
-                # masked_pts, _ = convert_pixel_to_world(
-                #     pixel=valid_pxl_in_mask,
-                #     depth_image=frame.depth,
-                #     cam_intrinsics=frame.intrinsics,
-                #     depth_factor=frame.depth_factor,
-                #     remove_invalid=True,
-                # )
+                masked_pts, _ = convert_pixel_to_world(
+                    pixel=valid_pxl_in_mask,
+                    depth_image=frame.depth,
+                    cam_intrinsics=frame.intrinsics,
+                    depth_factor=frame.depth_factor,
+                    remove_invalid=True,
+                )
 
-                # masked_pcd.points = cph.utility.Vector3fVector(masked_pts)
+                masked_pcd.points = cph.utility.Vector3fVector(masked_pts)
 
-                # refine_result = cph.registration.registration_icp(
-                #     key_points_pcd,
-                #     masked_pcd,
-                #     max_correspondence_distance=0.02,
-                #     init=pose_init_guess.astype(np.float32),
-                #     estimation_method=cph.registration.TransformationEstimationPointToPlane(),
-                #     criteria=criteria,
-                # )
+                refine_result = cph.registration.registration_icp(
+                    key_points_pcd,
+                    masked_pcd,
+                    max_correspondence_distance=0.015,
+                    init=pose_i_0.astype(np.float32),
+                    estimation_method=cph.registration.TransformationEstimationPointToPlane(),
+                    criteria=criteria,
+                )
 
-                # pose_to_key = refine_result.transformation
+                pose_i_0 = refine_result.transformation
 
                 # # temp saving
                 # if self.debug_level > 1:
@@ -414,29 +395,50 @@ class Pipeline:
                 #         reg_stats,
                 #     )
 
-                pose = pose_i_0
+                inliers = reg_stats["inliers"]
+                if np.mean(reg_stats["residuals"][inliers]) < 1:
+                    pose = pose_i_0
 
-                # update object info
-                self.objects[obj_id].pose = pose
+                    # update object info
+                    self.objects[obj_id].pose = pose
 
-                # update object frame data and send to optimizer manager
-                object_frame_data = ObjectFrameData(
-                    obj_id=obj_id,
-                    frame_id=self.frame_id,
-                    pose=pose,
-                    cur_3d=curr3d,
-                    cur_3d_idx=idx,
-                    inliers=reg_stats.get("inliers", np.array([])),
-                    residuals=reg_stats.get("residuals", np.array([])),
-                )
+                    # update object frame data and send to optimizer manager
+                    object_frame_data = ObjectFrameData(
+                        obj_id=obj_id,
+                        frame_id=self.frame_id,
+                        pose=pose,
+                        cur_3d=curr3d,
+                        cur_3d_idx=idx,
+                        inliers=reg_stats.get("inliers", np.array([])),
+                        residuals=reg_stats.get("residuals", np.array([])),
+                    )
 
-                # once the input is set, the optimizer manager will start the optimization process
-                self.optimizer_manager.set_input(obj_id, object_frame_data)
+                    # once the input is set, the optimizer manager will start the optimization process
+                    opt_results = self.optimizer.optimize(object_frame_data)
+
+                    # if we have optmized results, update the object info
+                    if opt_results is not None:
+                        ## TODO: do we update pose here...?
+                        # self.objects[obj_id].pose = opt_results.pose_optimized
+                        # print(
+                        #     f"key points before optimization: {self.objects[obj_id].key_points.shape}"
+                        # )
+                        # print(self.objects[obj_id].key_points)
+                        kp_idx = opt_results.key_points_idx_optimized
+                        # kp_idx = self.track_table.obj2track_map[obj_id][kp_idx]
+                        kp_optimized = opt_results.key_points_optimized
+                        self.objects[obj_id].key_points[kp_idx] = kp_optimized
+                        # print(
+                        #     f"key points after optimization: {self.objects[obj_id].key_points.shape}"
+                        # )
+                        # print(self.objects[obj_id].key_points)
+                else:
+                    pose = self.objects[obj_id].pose
 
                 # Log pose in TUM format
                 if self.save_pose and self.pose_log_files[obj_id] is not None:
                     tum_pose = self._pose_matrix_to_tum_format(
-                        pose, timestamp=time.time()
+                        self.objects[obj_id].pose, timestamp=time.time()
                     )
                     self.pose_log_files[obj_id].write(tum_pose)
                     self.pose_log_files[obj_id].flush()
@@ -460,6 +462,8 @@ class Pipeline:
                 print(f"pose at frame {self.frame_id}: {pose}")
 
                 if self.debug_level > 1:
+
+                    self.save_optimizer_key_points(obj_id)
 
                     save_reg_pcd(
                         key_points,
@@ -985,6 +989,40 @@ class Pipeline:
         print(
             f"Saved key points for object {obj_id} at frame {self.frame_id} to {save_path}"
         )
+
+    def save_optimizer_key_points(self, obj_id: int):
+        """
+        Save key points after optimization into `debug/optimizer` using the
+        existing `_save_key_points_for_object()` method.
+
+        This temporarily overrides `self.key_points_save_path` and
+        `self.save_key_points` to ensure saving occurs in the requested
+        debug directory without changing global configuration.
+
+        Args:
+            obj_id (int): Object ID whose key points to save
+        """
+        # Determine optimizer debug directory
+        optimizer_dir = (
+            os.path.join(self.debug_dir, "optimizer")
+            if self.debug_dir
+            else "debug/optimizer"
+        )
+        os.makedirs(optimizer_dir, exist_ok=True)
+
+        # Stash original settings
+        original_save_flag = self.save_key_points
+        original_save_path = self.key_points_save_path
+
+        try:
+            # Force-save into optimizer directory
+            self.save_key_points = True
+            self.key_points_save_path = optimizer_dir
+            self._save_key_points_for_object(obj_id)
+        finally:
+            # Restore original settings
+            self.save_key_points = original_save_flag
+            self.key_points_save_path = original_save_path
 
     def __del__(self):
         """Cleanup method to close pose log files"""

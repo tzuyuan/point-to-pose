@@ -10,6 +10,7 @@ import pyrealsense2 as rs
 from omegaconf import OmegaConf
 
 from point2pose.pipeline.pipeline import Pipeline
+from point2pose.pipeline.pipeline_single_process import PipelineSingleProcess
 from point2pose.data_types.frame import Frame
 
 # from point2pose.data_types.object import Object
@@ -56,7 +57,8 @@ class RealSensePipelineTracker:
             )
 
         # Initialize pipeline
-        self.pipeline = Pipeline(self.cfg)
+        # self.pipeline = Pipeline(self.cfg)
+        self.pipeline = PipelineSingleProcess(self.cfg)
 
         # Initialize RealSense camera
         self._init_realsense(rs_serial)
@@ -137,7 +139,8 @@ class RealSensePipelineTracker:
         self.current_poses = None
 
         # Reset pipeline
-        self.pipeline = Pipeline(self.cfg)
+        # self.pipeline = Pipeline(self.cfg)
+        self.pipeline = PipelineSingleProcess(self.cfg)
 
         print("Points reset. Click to add new points.")
 

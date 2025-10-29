@@ -67,7 +67,7 @@ class ISAM2Optimizer(Optimizer):
             self._initialized = True
         else:
             Xim1 = gtsam.symbol("x", self._prev_frame_id)
-            rel_T = gtsam.Pose3(inverse_SE3(self._prev_pose_inv) @ cur_pose)
+            rel_T = gtsam.Pose3(self._prev_pose_inv @ cur_pose)
 
             # noise scaled by the residuals
             sigma_between = (
@@ -108,6 +108,7 @@ class ISAM2Optimizer(Optimizer):
                     self._values.insert(Lj, p_w)
                     self._inserted_landmarks.add(Lj)
                     bisect.insort(self.inserted_landmark_ids, int(lid))
+                    # self.inserted_landmark_ids.append(int(lid))
 
                 # form bearing/range in the camera/body frame (your code does this)
                 z_range = float(np.linalg.norm(z_cam))
@@ -141,7 +142,8 @@ class ISAM2Optimizer(Optimizer):
             pose_optimized = inverse_SE3(Xi_hat.matrix())
             key_points_optimized = gtsam.utilities.extractPoint3(current_estimate)
             # key_points_optimized = transform_pts(pose_optimized, key_points_optimized)
-
+            # print("current estimate: ", current_estimate)
+            # print(self.inserted_landmark_ids)
             print(
                 f"[ISAM2Optimizer] Optimized frame {frame_id} for object {data.obj_id}, number of key points: {key_points_optimized.shape[0]}"
             )
