@@ -331,6 +331,26 @@ class RealSensePipelineTracker:
                         track_2d_points,
                         visible_color,
                     )
+            elif self._points_vis_method == "visible_uncertainty":
+                # Plot only visible points, colored by their uncertainty colors
+                for i, obj in enumerate(objects):
+                    if i not in self.pipeline.track_table.obj2track_map:
+                        continue
+
+                    track_idx = self.pipeline.track_table.obj2track_map[i]
+                    track_2d_points = self.pipeline.track_table.track_2d[track_idx]
+                    visible_mask = self.pipeline.track_table.visible[track_idx]
+
+                    if np.any(visible_mask):
+                        uncertainty_color = get_n_uncertainty_colors(
+                            self.pipeline.track_table.uncertainty[track_idx]
+                        )
+
+                        draw_points_on_image(
+                            display_frame,
+                            track_2d_points[visible_mask],
+                            uncertainty_color[visible_mask],
+                        )
 
         # Draw pose information
         for i, obj in enumerate(objects):

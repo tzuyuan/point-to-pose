@@ -33,6 +33,7 @@ from point2pose.io.outputs.logger import DataLogger
 from point2pose.io.outputs.point_cloud_io import save_reg_pcd
 from point2pose.utils.camera import convert_pixel_to_world
 from point2pose.utils.transform import transform_pts, inverse_SE3
+from point2pose.utils.se3_low_pass_filter import SE3LowPassFilter
 
 
 class PipelineSingleProcess:
@@ -102,6 +103,7 @@ class PipelineSingleProcess:
 
         self.num_obj = 0
         self.objects = []
+        self.is_key_frame = {}
 
         # Pose log file handles for each object
         self.pose_log_files = []
@@ -197,8 +199,11 @@ class PipelineSingleProcess:
                     cur_3d_idx=np.arange(len(self.objects[obj_id].key_points)),
                     inliers=np.ones(len(self.objects[obj_id].key_points), dtype=bool),
                     residuals=np.zeros(len(self.objects[obj_id].key_points)),
+                    uncertainties=0.01 * np.ones(len(self.objects[obj_id].key_points)),
                 )
             )
+
+            self.is_key_frame[obj_id] = False
 
             # Initialize pose log file for this object if pose saving is enabled
             if self.save_pose:
@@ -337,51 +342,62 @@ class PipelineSingleProcess:
                 # key points are represented in the first frame coordinate system
                 # pose_i_0 is the transformation from the first frame to the current frame
                 # init_pose here is the warm start for the optimization, not the initial pose of the object
-                pose_i_0, reg_stats = self.register.register(
-                    key_points, curr3d, init_pose=prev_pose
-                )
+                if self.register.type == "svd_uncertainty_outlier":
+                    pose_i_0, reg_stats = self.register.register(
+                        key_points,
+                        curr3d,
+                        init_pose=prev_pose,
+                        sigma_tgt=uncertainties[idx],
+                    )
+                else:
+                    pose_i_0, reg_stats = self.register.register(
+                        key_points, curr3d, init_pose=prev_pose
+                    )
+                # pose_i_0, reg_stats = self.register.register(
+                #     key_points, curr3d, init_pose=prev_pose
+                # )
 
                 # pose_i_0 = pose_init_guess
 
-                refiner_t = time.time()
-                # refine the solution using another registration?
-                criteria = cph.registration.ICPConvergenceCriteria()
-                criteria.max_iteration = 5
+                # refiner_t = time.time()
+                # # refine the solution using another registration?
+                # criteria = cph.registration.ICPConvergenceCriteria()
+                # criteria.max_iteration = 5
 
-                key_points_pcd = cph.geometry.PointCloud()
-                key_points_pcd.points = cph.utility.Vector3fVector(key_points)
-                masked_pcd = cph.geometry.PointCloud()
+                # key_points_pcd = cph.geometry.PointCloud()
+                # key_points_pcd.points = cph.utility.Vector3fVector(key_points)
+                # masked_pcd = cph.geometry.PointCloud()
 
-                mask = frame.mask[obj_id, 0]  # [H, W] on cuda, dtype=bool/uint8
+                # mask = frame.mask[obj_id, 0]  # [H, W] on cuda, dtype=bool/uint8
 
-                # Get (y,x) indices on GPU; switch to (x,y) like your NumPy code
-                coords_yx = torch.nonzero(mask > 0, as_tuple=False)  # [N, 2], (y,x)
-                valid_pxl_in_mask_g = coords_yx[
-                    :, [1, 0]
-                ].contiguous()  # [N, 2], (x,y), still on GPU
+                # # Get (y,x) indices on GPU; switch to (x,y) like your NumPy code
+                # coords_yx = torch.nonzero(mask > 0, as_tuple=False)  # [N, 2], (y,x)
+                # valid_pxl_in_mask_g = coords_yx[
+                #     :, [1, 0]
+                # ].contiguous()  # [N, 2], (x,y), still on GPU
 
-                valid_pxl_in_mask = valid_pxl_in_mask_g.cpu().numpy()
+                # valid_pxl_in_mask = valid_pxl_in_mask_g.cpu().numpy()
 
-                masked_pts, _ = convert_pixel_to_world(
-                    pixel=valid_pxl_in_mask,
-                    depth_image=frame.depth,
-                    cam_intrinsics=frame.intrinsics,
-                    depth_factor=frame.depth_factor,
-                    remove_invalid=True,
-                )
+                # masked_pts, _ = convert_pixel_to_world(
+                #     pixel=valid_pxl_in_mask,
+                #     depth_image=frame.depth,
+                #     cam_intrinsics=frame.intrinsics,
+                #     depth_factor=frame.depth_factor,
+                #     remove_invalid=True,
+                # )
 
-                masked_pcd.points = cph.utility.Vector3fVector(masked_pts)
+                # masked_pcd.points = cph.utility.Vector3fVector(masked_pts)
 
-                refine_result = cph.registration.registration_icp(
-                    key_points_pcd,
-                    masked_pcd,
-                    max_correspondence_distance=0.015,
-                    init=pose_i_0.astype(np.float32),
-                    estimation_method=cph.registration.TransformationEstimationPointToPlane(),
-                    criteria=criteria,
-                )
+                # refine_result = cph.registration.registration_icp(
+                #     key_points_pcd,
+                #     masked_pcd,
+                #     max_correspondence_distance=0.015,
+                #     init=pose_i_0.astype(np.float32),
+                #     estimation_method=cph.registration.TransformationEstimationPointToPlane(),
+                #     criteria=criteria,
+                # )
 
-                pose_i_0 = refine_result.transformation
+                # pose_i_0 = refine_result.transformation
 
                 # # temp saving
                 # if self.debug_level > 1:
@@ -396,7 +412,7 @@ class PipelineSingleProcess:
                 #     )
 
                 inliers = reg_stats["inliers"]
-                if np.mean(reg_stats["residuals"][inliers]) < 1:
+                if np.mean(reg_stats["residuals"][inliers]) < 0.07:
                     pose = pose_i_0
 
                     # update object info
@@ -411,6 +427,7 @@ class PipelineSingleProcess:
                         cur_3d_idx=idx,
                         inliers=reg_stats.get("inliers", np.array([])),
                         residuals=reg_stats.get("residuals", np.array([])),
+                        uncertainties=uncertainties[idx],
                     )
 
                     # once the input is set, the optimizer manager will start the optimization process
@@ -611,6 +628,7 @@ class PipelineSingleProcess:
         for obj_id in range(self.num_obj):
             ## TODO: make crit_ctx to be object-specific?
             if self.criterion.check_sample_criterion(self.crit_ctx, obj_id):
+                self.is_key_frame[obj_id] = True
                 # Sample points
                 new_sampled_points = self.sampler.sample(samp_context, obj_id)
 

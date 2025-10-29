@@ -51,6 +51,7 @@ class ISAM2Optimizer(Optimizer):
         cur_3d_idx = data.cur_3d_idx
         inliers = data.inliers
         residuals = data.residuals
+        pts_uncertainties = data.uncertainties
 
         cur_pose_gtsam = gtsam.Pose3(cur_pose)
 
@@ -74,9 +75,29 @@ class ISAM2Optimizer(Optimizer):
                 float(max(1e-4, np.mean(residuals))) if residuals.size else 0.01
             )
             between_noise = gtsam.noiseModel.Isotropic.Sigma(6, sigma_between)
+            # between_noise = gtsam.noiseModel.Diagonal.Sigmas(
+            #     np.array(
+            #         [
+            #             50 * sigma_between,
+            #             50 * sigma_between,
+            #             50 * sigma_between,
+            #             50 * sigma_between,
+            #             50 * sigma_between,
+            #             50 * sigma_between,
+            #         ]
+            #     )
+            # )
 
             self._graph.push_back(
                 gtsam.BetweenFactorPose3(Xim1, Xi, rel_T, between_noise)
+            )
+
+            T_I = gtsam.Pose3(np.eye(4))
+            between_noise_const = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
+
+            # constant velocity model
+            self._graph.push_back(
+                gtsam.BetweenFactorPose3(Xim1, Xi, T_I, between_noise_const)
             )
             # self._values.insert(Xi, cur_pose)
             # self._inserted_poses.add(Xi)

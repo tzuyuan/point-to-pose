@@ -16,3 +16,4 @@ class ObjectFrameData:
     cur_3d_idx: np.ndarray
     inliers: np.ndarray
     residuals: np.ndarray
+    uncertainties: np.ndarray

@@ -17,6 +17,12 @@ class UniformFPSampler(Sampler):
         self.num_points = config.get("num_points", 10)
         # Distance (in pixels) from the mask boundary to exclude
         self.edge_margin_px = config.get("edge_margin_px", 5)
+        # If erosion removes too many pixels, shrink margin by this ratio (<1)
+        self.edge_margin_shrink_ratio = float(
+            config.get("edge_margin_shrink_ratio", 0.8)
+        )
+        # Minimum number of safe pixels required before accepting the safe region
+        self.min_safe_points = int(config.get("min_safe_points", 5))
         self._remove_convex_hull = config.get("remove_convex_hull", True)
         self._i = 0
         self._initialized_obj_ids = set()
@@ -60,16 +66,40 @@ class UniformFPSampler(Sampler):
             dist = cv.distanceTransform(mask_np, distanceType=cv.DIST_L2, maskSize=3)
             safe = dist >= d  # keep pixels at least d px from boundary
         else:
+            dist = None
             safe = mask_np.astype(bool)
 
-        # If safety erosion removes everything, gracefully fall back to original mask
-        if not np.any(safe):
+        # If erosion removes too many pixels, gradually relax d by a ratio until enough remain
+        if np.count_nonzero(safe) < self.min_safe_points:
+            ratio = self.edge_margin_shrink_ratio
+            # Ensure a sane ratio
+            if not (0.0 < ratio < 1.0):
+                ratio = 0.8
+            if d > 0 and dist is None:
+                dist = cv.distanceTransform(
+                    mask_np, distanceType=cv.DIST_L2, maskSize=3
+                )
+            d_float = float(d)
+            attempts = 0
+            while d_float > 0 and np.count_nonzero(safe) < self.min_safe_points:
+                d_float *= ratio
+                d_new = int(max(0, np.floor(d_float)))
+                # Ensure progress
+                if d_new == d:
+                    if d_new == 0:
+                        break
+                    d_new = d - 1
+                d = d_new
+                if d > 0:
+                    safe = dist >= d
+                else:
+                    safe = mask_np.astype(bool)
+                attempts += 1
             if getattr(self, "debug_level", 0) >= 1:
                 print(
-                    f"[UniformFPSampler] No pixels remain after edge_margin_px={d}. "
-                    f"Falling back to the raw mask for object {obj_id}."
+                    f"[UniformFPSampler] Relaxed edge_margin_px to {d} after {attempts} step(s); "
+                    f"safe_count={np.count_nonzero(safe)} (min={self.min_safe_points}) for object {obj_id}."
                 )
-            safe = mask_np.astype(bool)
 
         # ---- 3) Build candidate coords (x,y) from safe region
         ys, xs = np.where(safe)

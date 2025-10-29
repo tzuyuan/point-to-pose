@@ -19,7 +19,7 @@ pipeline:
   
 
 register:
-  type: svd_residual_outlier
+  type: svd_uncertainty_outlier
   params:
     debug_level: 0
     max_iter: 5
@@ -49,6 +49,7 @@ sampler:
   params:
     num_points: 15
     edge_margin_px: 10
+    remove_convex_hull: False
     debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/sampler
 
@@ -87,11 +88,11 @@ optimizer:
   params:
     relinearize_threshold: 0.1
     relinearize_skip: 1
-    prior_noise_param: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+    prior_noise_param: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
 
 visualization:
   params:
     visualize_points: true
-    points_vis_method: uncertainty
+    points_vis_method: visible_uncertainty
     save_images: True
     output_image_dir: /home/justin/code/point-to-pose/debug/output_images
