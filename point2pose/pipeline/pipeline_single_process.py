@@ -285,7 +285,8 @@ class PipelineSingleProcess:
 
         print(f"num tracks: {len(tracks)}")
         # Convert visibles to boolean since TAPIR returns float32
-        visibles = visibles.astype(bool)
+        # visibles = visibles.astype(bool)
+        visibles = visibles > 0.5
         tracker_time = time.time() - tracker_start
         print(f"Frame {self.frame_id} - Tracking: {tracker_time:.4f}s")
 
@@ -381,63 +382,6 @@ class PipelineSingleProcess:
                     pose_i_0, reg_stats = self.register.register(
                         key_points, curr3d, init_pose=prev_pose
                     )
-                # pose_i_0, reg_stats = self.register.register(
-                #     key_points, curr3d, init_pose=prev_pose
-                # )
-
-                # pose_i_0 = pose_init_guess
-
-                # refiner_t = time.time()
-                # # refine the solution using another registration?
-                # criteria = cph.registration.ICPConvergenceCriteria()
-                # criteria.max_iteration = 5
-
-                # key_points_pcd = cph.geometry.PointCloud()
-                # key_points_pcd.points = cph.utility.Vector3fVector(key_points)
-                # masked_pcd = cph.geometry.PointCloud()
-
-                # mask = frame.mask[obj_id, 0]  # [H, W] on cuda, dtype=bool/uint8
-
-                # # Get (y,x) indices on GPU; switch to (x,y) like your NumPy code
-                # coords_yx = torch.nonzero(mask > 0, as_tuple=False)  # [N, 2], (y,x)
-                # valid_pxl_in_mask_g = coords_yx[
-                #     :, [1, 0]
-                # ].contiguous()  # [N, 2], (x,y), still on GPU
-
-                # valid_pxl_in_mask = valid_pxl_in_mask_g.cpu().numpy()
-
-                # masked_pts, _ = convert_pixel_to_world(
-                #     pixel=valid_pxl_in_mask,
-                #     depth_image=frame.depth,
-                #     cam_intrinsics=frame.intrinsics,
-                #     depth_factor=frame.depth_factor,
-                #     remove_invalid=True,
-                # )
-
-                # masked_pcd.points = cph.utility.Vector3fVector(masked_pts)
-
-                # refine_result = cph.registration.registration_icp(
-                #     key_points_pcd,
-                #     masked_pcd,
-                #     max_correspondence_distance=0.015,
-                #     init=pose_i_0.astype(np.float32),
-                #     estimation_method=cph.registration.TransformationEstimationPointToPlane(),
-                #     criteria=criteria,
-                # )
-
-                # pose_i_0 = refine_result.transformation
-
-                # # temp saving
-                # if self.debug_level > 1:
-
-                #     save_reg_pcd(
-                #         key_points,
-                #         masked_pts,
-                #         pose_to_key,
-                #         self._reg_debug_dir,
-                #         f"obj_{obj_id}_frame_{self.frame_id}_refine",
-                #         reg_stats,
-                #     )
 
                 inliers = reg_stats["inliers"]
                 if np.mean(reg_stats["residuals"][inliers]) < 0.07:
@@ -1067,6 +1011,65 @@ class PipelineSingleProcess:
         prev3d = track_table.track_3d[idx].copy()
         curr3d = curr_pts_3d[idx].copy()
         return idx, prev3d, curr3d
+
+    # def _refine_registration(self):
+    # pose_i_0, reg_stats = self.register.register(
+    #     key_points, curr3d, init_pose=prev_pose
+    # )
+
+    # pose_i_0 = pose_init_guess
+
+    # refiner_t = time.time()
+    # # refine the solution using another registration?
+    # criteria = cph.registration.ICPConvergenceCriteria()
+    # criteria.max_iteration = 5
+
+    # key_points_pcd = cph.geometry.PointCloud()
+    # key_points_pcd.points = cph.utility.Vector3fVector(key_points)
+    # masked_pcd = cph.geometry.PointCloud()
+
+    # mask = frame.mask[obj_id, 0]  # [H, W] on cuda, dtype=bool/uint8
+
+    # # Get (y,x) indices on GPU; switch to (x,y) like your NumPy code
+    # coords_yx = torch.nonzero(mask > 0, as_tuple=False)  # [N, 2], (y,x)
+    # valid_pxl_in_mask_g = coords_yx[
+    #     :, [1, 0]
+    # ].contiguous()  # [N, 2], (x,y), still on GPU
+
+    # valid_pxl_in_mask = valid_pxl_in_mask_g.cpu().numpy()
+
+    # masked_pts, _ = convert_pixel_to_world(
+    #     pixel=valid_pxl_in_mask,
+    #     depth_image=frame.depth,
+    #     cam_intrinsics=frame.intrinsics,
+    #     depth_factor=frame.depth_factor,
+    #     remove_invalid=True,
+    # )
+
+    # masked_pcd.points = cph.utility.Vector3fVector(masked_pts)
+
+    # refine_result = cph.registration.registration_icp(
+    #     key_points_pcd,
+    #     masked_pcd,
+    #     max_correspondence_distance=0.015,
+    #     init=pose_i_0.astype(np.float32),
+    #     estimation_method=cph.registration.TransformationEstimationPointToPlane(),
+    #     criteria=criteria,
+    # )
+
+    # pose_i_0 = refine_result.transformation
+
+    # # temp saving
+    # if self.debug_level > 1:
+
+    #     save_reg_pcd(
+    #         key_points,
+    #         masked_pts,
+    #         pose_to_key,
+    #         self._reg_debug_dir,
+    #         f"obj_{obj_id}_frame_{self.frame_id}_refine",
+    #         reg_stats,
+    #     )
 
     def _pose_matrix_to_tum_format(self, pose_matrix, timestamp=None):
         """

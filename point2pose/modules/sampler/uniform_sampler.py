@@ -1,7 +1,6 @@
 import numpy as np
 import cv2 as cv
 import torch
-
 from scipy.spatial import ConvexHull
 
 from point2pose.data_types.frame import Frame
@@ -14,16 +13,33 @@ from point2pose.data_types.sampler_context import SamplerContext
 class UniformFPSampler(Sampler):
     def __init__(self, config):
         super().__init__(config)
-        self.num_points = config.get("num_points", 10)
+        # Legacy fixed count (used only if density_per_kpx <= 0)
+        self.num_points = int(config.get("num_points", 10))
+
+        # New: density in "points per 1,000 pixels" of *safe* area
+        # e.g., 0.5 -> ~1 point per 2,000 px; 2.0 -> 2 points per 1,000 px
+        self.density_per_kpx = float(config.get("density_per_kpx", 1.0))
+
+        # Optional clamps for auto k
+        self.min_points = int(config.get("min_points", 5))
+        self.max_points = int(config.get("max_points", 50))
+
+        # Rounding mode for converting density*area to an integer
+        # choices: "round", "ceil", "floor"
+        self.round_mode = str(config.get("round_mode", "round")).lower()
+
         # Distance (in pixels) from the mask boundary to exclude
-        self.edge_margin_px = config.get("edge_margin_px", 5)
+        self.edge_margin_px = int(config.get("edge_margin_px", 5))
+
         # If erosion removes too many pixels, shrink margin by this ratio (<1)
         self.edge_margin_shrink_ratio = float(
             config.get("edge_margin_shrink_ratio", 0.8)
         )
+
         # Minimum number of safe pixels required before accepting the safe region
         self.min_safe_points = int(config.get("min_safe_points", 5))
-        self._remove_convex_hull = config.get("remove_convex_hull", True)
+
+        self._remove_convex_hull = bool(config.get("remove_convex_hull", True))
         self._i = 0
         self._initialized_obj_ids = set()
 
@@ -33,7 +49,6 @@ class UniformFPSampler(Sampler):
         while staying at least `edge_margin_px` away from the mask boundary.
         Returns integer (x,y) coordinates (np.int32).
         """
-
         frame = context.frame
 
         # ---- 1) Get mask -> CPU uint8
@@ -48,7 +63,8 @@ class UniformFPSampler(Sampler):
                 mask_np = self.subtract_convex_hull(mask_np, frame.convex_hull_xy)
             elif self._remove_convex_hull and frame.convex_hull_xy is None:
                 frame.convex_hull_xy = self._fit_convex_hull(context, obj_id)
-                mask_np = self.subtract_convex_hull(mask_np, frame.convex_hull_xy)
+                if frame.convex_hull_xy is not None:
+                    mask_np = self.subtract_convex_hull(mask_np, frame.convex_hull_xy)
         else:
             self._initialized_obj_ids.add(obj_id)
 
@@ -61,8 +77,6 @@ class UniformFPSampler(Sampler):
         # ---- 2) Exclude pixels within d of boundary using distance transform
         d = max(int(self.edge_margin_px), 0)
         if d > 0:
-            # Euclidean distance to nearest zero (boundary/outside); only computed inside mask
-            # Note: cv.distanceTransform expects non-zero = foreground
             dist = cv.distanceTransform(mask_np, distanceType=cv.DIST_L2, maskSize=3)
             safe = dist >= d  # keep pixels at least d px from boundary
         else:
@@ -72,7 +86,6 @@ class UniformFPSampler(Sampler):
         # If erosion removes too many pixels, gradually relax d by a ratio until enough remain
         if np.count_nonzero(safe) < self.min_safe_points:
             ratio = self.edge_margin_shrink_ratio
-            # Ensure a sane ratio
             if not (0.0 < ratio < 1.0):
                 ratio = 0.8
             if d > 0 and dist is None:
@@ -84,16 +97,12 @@ class UniformFPSampler(Sampler):
             while d_float > 0 and np.count_nonzero(safe) < self.min_safe_points:
                 d_float *= ratio
                 d_new = int(max(0, np.floor(d_float)))
-                # Ensure progress
                 if d_new == d:
                     if d_new == 0:
                         break
                     d_new = d - 1
                 d = d_new
-                if d > 0:
-                    safe = dist >= d
-                else:
-                    safe = mask_np.astype(bool)
+                safe = dist >= d if d > 0 else mask_np.astype(bool)
                 attempts += 1
             if getattr(self, "debug_level", 0) >= 1:
                 print(
@@ -105,29 +114,43 @@ class UniformFPSampler(Sampler):
         ys, xs = np.where(safe)
         coords_xy_np = np.stack([xs, ys], axis=1)  # (N,2) int32
         N = coords_xy_np.shape[0]
-
         if N == 0:
             return np.zeros((0, 2), dtype=np.int32)
 
-        # Move to torch (use same device as mask_t if it’s a tensor; else CPU)
+        # ---- 3.5) Compute k from density and safe area
+        # area in pixels = number of safe pixels
+        safe_area_px = int(N)
+        if self.density_per_kpx > 0:
+            # points = density * (area / 1000)
+            raw = self.density_per_kpx * (safe_area_px / 1000.0)
+            if self.round_mode == "ceil":
+                k_auto = int(np.ceil(raw))
+            elif self.round_mode == "floor":
+                k_auto = int(np.floor(raw))
+            else:
+                k_auto = int(np.round(raw))
+            k = max(self.min_points, min(self.max_points, k_auto))
+        else:
+            # Fallback to legacy fixed count
+            k = int(self.num_points)
+
+        # Also cannot exceed candidate count
+        k = max(0, min(k, N))
+
+        # ---- 4) FPS for uniform coverage
         device = (
             mask_t.device if isinstance(mask_t, torch.Tensor) else torch.device("cpu")
         )
         coords_xy = torch.from_numpy(coords_xy_np).to(
             device=device, dtype=torch.float32
         )
-
-        # ---- 4) FPS for uniform coverage
-        k = min(self.num_points, coords_xy.shape[0])
         picked_xy = self._fps_2d(coords_xy, k)  # (k,2) float32 on device
         sampled_np = picked_xy.detach().cpu().numpy().round().astype(np.int32)
 
         # ---- 5) Debug viz (optional)
         if getattr(self, "debug_level", 0) >= 1:
-            # Mask image (BGR)
             mask_img = cv.cvtColor((mask_np * 255).astype(np.uint8), cv.COLOR_GRAY2BGR)
 
-            # RGB image (assume HxWx3 RGB uint8, else convert)
             rgb_src = frame.rgb
             if isinstance(rgb_src, torch.Tensor):
                 rgb_src = rgb_src.detach().cpu().numpy()
@@ -143,9 +166,13 @@ class UniformFPSampler(Sampler):
             frame_id = getattr(frame, "id", "unk")
             cv.imwrite(f"{out_dir}/{frame_id}_mask_{obj_id}.png", mask_img)
             cv.imwrite(f"{out_dir}/{frame_id}_rgb_{obj_id}.png", rgb_img)
-            print(f"[UniformFPSampler] Saved debug images to {out_dir}")
+            print(
+                f"[UniformFPSampler] Safe area: {safe_area_px}px, "
+                f"density={self.density_per_kpx}/kpx -> k={k} (N={N}). "
+                f"Saved debug images to {out_dir}"
+            )
 
-        if sampled_np.shape[0] < self.num_points:
+        if sampled_np.shape[0] < k:
             print(
                 f"[UniformFPSampler] Returned {sampled_np.shape[0]} points (limited by safe region)."
             )
@@ -189,7 +216,6 @@ class UniformFPSampler(Sampler):
     def _fit_convex_hull(self, context: SamplerContext, obj_id: int):
         """
         Fit the convex hull of the object in the mask.
-        ## TODO: optimize this
         """
         mask = context.frame.mask[obj_id, 0] > 0
 
@@ -202,51 +228,44 @@ class UniformFPSampler(Sampler):
         # remove points outside of the mask
         original_point_count = points.shape[0]
         if points.shape[0] > 0:
-            # Convert mask to numpy for indexing
             mask_np = mask.cpu().numpy() if isinstance(mask, torch.Tensor) else mask
-
-            # Get image dimensions
             h, w = mask_np.shape
-
-            # Filter points that are within image bounds and inside the mask
             valid_points_mask = (
                 (points[:, 0] >= 0)
-                & (points[:, 0] < w)  # x within bounds
+                & (points[:, 0] < w)
                 & (points[:, 1] >= 0)
-                & (points[:, 1] < h)  # y within bounds
-                & mask_np[
-                    points[:, 1].astype(int), points[:, 0].astype(int)
-                ]  # inside mask
+                & (points[:, 1] < h)
+                & mask_np[points[:, 1].astype(int), points[:, 0].astype(int)]
             )
-
-            # Keep only valid points
             points = points[valid_points_mask]
             idx = idx[valid_points_mask]
 
-            # Debug info
             filtered_count = original_point_count - points.shape[0]
             if filtered_count > 0:
                 print(
-                    f"Filtered out {filtered_count} points outside mask (kept {points.shape[0]}/{original_point_count})"
+                    f"Filtered out {filtered_count} points outside mask "
+                    f"(kept {points.shape[0]}/{original_point_count})"
                 )
 
-            # --- compute point region area ---
-
-            hull = ConvexHull(points)
-
-            convex_hull_xy = hull.points[hull.vertices]
-
-            return convex_hull_xy
+            if points.shape[0] >= 3:
+                hull = ConvexHull(points)
+                convex_hull_xy = hull.points[hull.vertices]
+                return convex_hull_xy
+            else:
+                return None
+        return None
 
     def subtract_convex_hull(self, mask: np.ndarray, hull_xy: np.ndarray):
         """
         mask: np.ndarray or {0,1} HxW (or 1xHxW)
         hull_xy: (K, 2) numpy array of (x, y) pixel coords for the convex hull boundary
         """
+        if hull_xy is None:
+            return mask.astype(bool)
+
         assert mask.ndim in (2, 3), "mask must be HxW or 1xHxW"
         H, W = mask.shape[-2], mask.shape[-1]
 
-        # Build a CPU uint8 canvas and fill the convex polygon
         poly = np.round(hull_xy).astype(np.int32)
         poly[:, 0] = np.clip(poly[:, 0], 0, W - 1)
         poly[:, 1] = np.clip(poly[:, 1], 0, H - 1)
@@ -256,6 +275,6 @@ class UniformFPSampler(Sampler):
             cv.fillConvexPoly(hull_mask_np, poly.reshape(-1, 1, 2), 1)
 
         hull_mask = hull_mask_np.astype(bool)
-
-        out = mask & (~hull_mask)  # mask - convex_hull
-        return out
+        base = mask.astype(bool)
+        out = base & (~hull_mask)  # mask - convex_hull
+        return out.astype(np.uint8)

@@ -92,13 +92,13 @@ class ISAM2Optimizer(Optimizer):
                 gtsam.BetweenFactorPose3(Xim1, Xi, rel_T, between_noise)
             )
 
-            T_I = gtsam.Pose3(np.eye(4))
-            between_noise_const = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
+            # T_I = gtsam.Pose3(np.eye(4))
+            # between_noise_const = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
 
-            # constant velocity model
-            self._graph.push_back(
-                gtsam.BetweenFactorPose3(Xim1, Xi, T_I, between_noise_const)
-            )
+            # # constant velocity model
+            # self._graph.push_back(
+            #     gtsam.BetweenFactorPose3(Xim1, Xi, T_I, between_noise_const)
+            # )
             # self._values.insert(Xi, cur_pose)
             # self._inserted_poses.add(Xi)
 

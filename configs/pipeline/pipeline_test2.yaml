@@ -21,7 +21,7 @@ pipeline:
 register:
   type: svd_uncertainty_outlier
   params:
-    remove_outside_mask: false
+    remove_outside_mask: True
     debug_level: 0
     max_iter: 5
     threshold_method: mad
@@ -49,8 +49,16 @@ sampler:
   type: uniform_fps
   params:
     num_points: 15
+    density_per_kpx: 2
+
+    min_points: 5
+    max_points: 50
     edge_margin_px: 10
-    remove_convex_hull: False
+    remove_convex_hull: True
+
+
+    cell_size: 30
+
     debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/sampler
 
@@ -94,6 +102,7 @@ optimizer:
 visualization:
   params:
     visualize_points: true
-    points_vis_method: frame_id
+    # uncertainty, visible, visible_uncertainty, frame_id
+    points_vis_method: visible_uncertainty
     save_images: True
     output_image_dir: /home/justin/code/point-to-pose/debug/output_images

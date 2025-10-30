@@ -289,6 +289,17 @@ class TapirTracker(Tracker):
         # obtain feature grids for the frames
         feature_grids = model.get_feature_grids(frames, is_training=False)
 
+        # feature_grid = feature_grids.lowres[0]
+        # hires_feats = feature_grids.hires[0]
+        # query_feature_hires = query_features.hires[0]
+        # print(f"feature_grid lowres: {feature_grid.shape}")
+        # print(f"feature_grid hires: {hires_feats.shape}")
+        # print(f"feature_grid resolutions: {feature_grids.resolutions}")
+        # print(f"query_feature lowres: {query_features.lowres[0].shape}")
+        # print(f"query_features hires: {query_feature_hires.shape}")
+
+        # print(f"query_features resolutions: {query_features.resolutions}")
+
         trajectories = model.estimate_trajectories(
             frames.shape[-3:-1],
             is_training=False,
