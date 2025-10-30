@@ -15,6 +15,12 @@ from typing import List, Optional, Tuple
 import numpy as np
 import open3d as o3d
 
+try:
+    import matplotlib
+except ImportError:
+    matplotlib = None
+    print("matplotlib is required for keyframe coloring")
+
 
 def find_available_frames(register_folder: str, object_number: int) -> List[int]:
     """Find all available frame numbers for a given object."""
@@ -214,9 +220,7 @@ def load_correspondence_data(
         # Load pose data and transform keypoints
         if "obj_pose" in data and "obj_init_pose" in data:
             obj_pose = data["obj_pose"][frame_idx]  # Current pose for this frame
-            obj_init_pose = data["obj_init_pose"][
-                frame_idx
-            ]  # Initial pose for this frame
+            # obj_init_pose = data["obj_init_pose"][frame_idx]  # Initial pose for this frame -- unused
 
             # Transform keypoints: key_points_transformed = obj_pose @ (obj_init_pose.inv()) @ key_points
             # First transform to homogeneous coordinates
@@ -316,6 +320,76 @@ def create_correspondence_visualization(
     return geometries
 
 
+def color_points_via_nearest_neighbors(
+    pcd_points: np.ndarray,
+    curr3d: np.ndarray,
+    key_frame_ids: np.ndarray,
+    inliers: Optional[np.ndarray],
+):
+    """Return colors array for all pcd_points, coloring only those nearest to curr3d points by key_frame_ids.
+    Unmatched remain grey. Outliers are colored red.
+    """
+    # Default grey
+    colors = np.full((len(pcd_points), 3), 0.6, dtype=np.float64)
+    if curr3d is None or key_frame_ids is None or len(curr3d) == 0:
+        return colors
+    # Build KDTree on pcd_points (use PointCloud to avoid API issues)
+    pc = o3d.geometry.PointCloud()
+    pc.points = o3d.utility.Vector3dVector(pcd_points)
+    kdtree = o3d.geometry.KDTreeFlann(pc)
+    # Prepare per-frame palette avoiding red
+    uniq_ids = np.unique(key_frame_ids)
+    frame_to_color = {}
+    if matplotlib is not None:
+        # Use modern API if available, fallback otherwise
+        cmap_get = getattr(getattr(matplotlib, "colormaps", matplotlib.cm), "get_cmap")
+        tab10_colors = cmap_get("tab10")
+        cmap_indices = {
+            fid: i if i < 3 else i + 1 for i, fid in enumerate(sorted(uniq_ids))
+        }
+        frame_to_color = {
+            fid: tab10_colors(idx % 10)[:3] for fid, idx in cmap_indices.items()
+        }
+    else:
+        # Fallback palette excluding red
+        palette = [
+            (0.2, 0.2, 1.0),
+            (0.0, 0.7, 0.3),
+            (1.0, 0.6, 0.0),
+            (0.6, 0.0, 0.8),
+            (0.0, 0.7, 0.7),
+            (0.6, 0.6, 0.0),
+        ]
+        for i, fid in enumerate(sorted(uniq_ids)):
+            frame_to_color[fid] = palette[i % len(palette)]
+    # Map each curr3d to nearest pcd point index
+    used_indices = set()
+    for i, pt in enumerate(curr3d):
+        # Skip invalid points
+        if pt is None or not np.all(np.isfinite(pt)):
+            continue
+        try:
+            k, idxs, _ = kdtree.search_knn_vector_3d(pt, 1)
+        except Exception:
+            continue
+        if k <= 0 or len(idxs) == 0:
+            continue
+        j = int(idxs[0])
+        if j in used_indices or j < 0 or j >= len(pcd_points):
+            continue
+        used_indices.add(j)
+        # Outlier handling: red for outliers only
+        if inliers is not None and i < len(inliers) and not bool(inliers[i]):
+            colors[j] = [1.0, 0.0, 0.0]
+        else:
+            c = frame_to_color.get(key_frame_ids[i], (0.5, 0.5, 0.5))
+            # Ensure not red for non-outliers
+            if c[0] == 1.0 and c[1] == 0.0 and c[2] == 0.0:
+                c = (0.2, 0.2, 1.0)
+            colors[j] = c
+    return colors
+
+
 def interactive_visualization(
     register_folder: str,
     object_number: int,
@@ -323,6 +397,7 @@ def interactive_visualization(
     start_frame: int,
     refine: bool = False,
     visualize_correspondence: bool = False,
+    args=None,
 ):
     """Interactive visualization with keyboard navigation."""
     current_frame_idx = available_frames.index(start_frame)
@@ -354,11 +429,26 @@ def interactive_visualization(
             f"Displaying: obj_{object_number}_frame_{frame_number}.ply ({len(pcd.points)} points)"
         )
 
-        # Create visualization
         vis = o3d.visualization.Visualizer()
         vis.create_window(window_name=f"Object {object_number} - Frame {frame_number}")
 
         if not visualize_correspondence:
+            if getattr(args, "color_by_keyframe_id", False):
+                key_frame_ids = get_keyframe_ids_for_register_pointcloud(
+                    register_folder, object_number, frame_number, refine
+                )
+                correspondence_data = load_correspondence_data(
+                    register_folder, object_number, frame_number, refine
+                )
+                inliers = None
+                curr3d = None
+                if correspondence_data is not None:
+                    _, curr3d, inliers = correspondence_data
+                # Build colors via NN mapping so we only color matched registered points
+                colors = color_points_via_nearest_neighbors(
+                    np.asarray(pcd.points), curr3d, key_frame_ids, inliers
+                )
+                pcd.colors = o3d.utility.Vector3dVector(colors)
             vis.add_geometry(pcd)
 
         # Load and visualize correspondence data if requested
@@ -499,7 +589,81 @@ def main(args):
         start_frame,
         args.refine,
         args.visualize_correspondence,
+        args,
     )
+
+
+def get_keyframe_ids_for_register_pointcloud(
+    register_folder, object_number, frame_number, refine=False
+):
+    # object_number and refine are unused, kept for compatibility but suppressed linter
+    _ = object_number
+    _ = refine
+    meta_paths = [
+        os.path.join(register_folder, "meata_data.npz"),
+        os.path.join(os.path.dirname(register_folder), "meata_data.npz"),
+        os.path.join(
+            os.path.dirname(os.path.dirname(register_folder)),
+            "debug",
+            "pipeline",
+            "meta_data",
+            "meata_data.npz",
+        ),
+    ]
+    meta_path = None
+    for path in meta_paths:
+        if os.path.exists(path):
+            meta_path = path
+            break
+    if meta_path is None:
+        print("No meata_data.npz found for coloring by keyframe id")
+        return None
+    data = np.load(meta_path, allow_pickle=True)
+    if "frame_id" not in data:
+        print("No frame_id field in meata_data.npz")
+        return None
+    frame_ids = data["frame_id"]
+    frame_idx = None
+    for i, fid in enumerate(frame_ids):
+        if fid == frame_number:
+            frame_idx = i
+            break
+    if frame_idx is None:
+        print(f"Frame {frame_number} not found in meta_data.npz!")
+        return None
+    key_points_len = data["reg_key_points_lengths"][frame_idx]
+    n_kps = key_points_len // 3
+    frame_ids_offset = data["obj_key_point_frames_offsets"][frame_idx]
+    key_point_frame_ids = data["obj_key_point_frames_data"][
+        frame_ids_offset : frame_ids_offset + n_kps
+    ]
+    if n_kps != len(key_point_frame_ids):
+        print(
+            f"Warning: key_points_len ({n_kps}) != key_point_frame_ids ({len(key_point_frame_ids)})"
+        )
+    return key_point_frame_ids[:n_kps]
+
+
+def assign_point_colors_by_keyframe_id(points, key_frame_ids, inliers=None):
+    if matplotlib is None or key_frame_ids is None or len(points) != len(key_frame_ids):
+        default_color = np.array([[0.6, 0.6, 0.6]] * len(points))
+        return default_color
+    uniq_ids = np.unique(key_frame_ids)
+    # Use modern API when available
+    cmap_get = getattr(getattr(matplotlib, "colormaps", matplotlib.cm), "get_cmap")
+    tab10_colors = cmap_get("tab10")
+    cmap_indices = {
+        fid: i if i < 3 else i + 1 for i, fid in enumerate(sorted(uniq_ids))
+    }
+    color_map = {}
+    for fid, idx in cmap_indices.items():
+        color_map[fid] = tab10_colors(idx % 10)[:3]
+    result = np.zeros((len(points), 3))
+    for i, f in enumerate(key_frame_ids):
+        result[i] = color_map.get(f, (0.5, 0.5, 0.5))
+    if inliers is not None:
+        result[~inliers] = [1.0, 0.0, 0.0]
+    return result
 
 
 if __name__ == "__main__":
@@ -543,6 +707,14 @@ if __name__ == "__main__":
         "--visualize_correspondence",
         "-c",
         help="visualize correspondence points with colored lines connecting them",
+        default=False,
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--color_by_keyframe_id",
+        "-kfid",
+        help="color each registered point by its originating key frame id (from meta_data)",
         default=False,
         action="store_true",
     )

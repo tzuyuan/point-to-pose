@@ -21,6 +21,7 @@ pipeline:
 register:
   type: svd_uncertainty_outlier
   params:
+    remove_outside_mask: false
     debug_level: 0
     max_iter: 5
     threshold_method: mad
@@ -93,6 +94,6 @@ optimizer:
 visualization:
   params:
     visualize_points: true
-    points_vis_method: visible_uncertainty
+    points_vis_method: frame_id
     save_images: True
     output_image_dir: /home/justin/code/point-to-pose/debug/output_images

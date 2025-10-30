@@ -351,6 +351,47 @@ class RealSensePipelineTracker:
                             track_2d_points[visible_mask],
                             uncertainty_color[visible_mask],
                         )
+            elif self._points_vis_method == "frame_id":
+                # Color each point based on the frame id it was first seen (object.key_point_frames)
+                for i, obj in enumerate(objects):
+                    if i not in self.pipeline.track_table.obj2track_map:
+                        continue
+
+                    track_idx = self.pipeline.track_table.obj2track_map[i]
+                    track_2d_points = self.pipeline.track_table.track_2d[track_idx]
+                    visible_mask = self.pipeline.track_table.visible[track_idx]
+
+                    # Only proceed if there are visible points
+                    if not np.any(visible_mask):
+                        continue
+                    if obj.key_point_frames.shape[0] == 0:
+                        continue
+                    # Align per-object track order with object's key point order
+                    # Assume key_point_frames order corresponds to obj2track_map order
+                    num_tracks_for_obj = len(track_idx)
+                    kp_frames_for_obj = obj.key_point_frames[
+                        :num_tracks_for_obj
+                    ].astype(np.int32)
+
+                    # Frame ids for visible points; replace unknown -1 with current frame id if available
+                    frame_ids = kp_frames_for_obj[visible_mask]
+                    if frame_id is not None:
+                        frame_ids = frame_ids.copy()
+                        frame_ids[frame_ids == -1] = int(frame_id)
+
+                    # Deterministic hash-to-hue mapping for consistent colors
+                    hues = ((frame_ids * 37) % 180).astype(np.uint8).reshape(-1, 1)
+                    sats = np.full_like(hues, 255, dtype=np.uint8)
+                    vals = np.full_like(hues, 255, dtype=np.uint8)
+                    hsv = np.concatenate([hues, sats, vals], axis=1).reshape(-1, 1, 3)
+                    colors_bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR).reshape(-1, 3)
+
+                    # Draw only visible points for this object, using aligned colors
+                    draw_points_on_image(
+                        display_frame,
+                        track_2d_points[visible_mask],
+                        colors_bgr,
+                    )
 
         # Draw pose information
         for i, obj in enumerate(objects):

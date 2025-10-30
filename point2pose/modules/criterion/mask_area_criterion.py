@@ -85,7 +85,7 @@ class MaskAreaCriterion(SampleCriterion):
             return False
 
         if points.shape[0] < 3:
-            return False  # degenerate case, trivially small
+            return True  # degenerate case, trivially small
 
         # --- compute point region area ---
         if self.fit_mode == "convex":

@@ -110,6 +110,9 @@ class PipelineSingleProcess:
 
         self._estimate_init_pose = self.pipeline_cfg.get("estimate_init_pose", False)
         self._frame2map_reg = self.pipeline_cfg.get("frame_to_map_reg", False)
+        self._reg_remove_outside_mask = self.cfg.register.params.get(
+            "remove_outside_mask", False
+        )
         self.save_meta_data = self.pipeline_cfg.get("save_meta_data", False)
         self.meta_data_save_path = self.pipeline_cfg.get(
             "meta_data_save_path", "./meta_data"
@@ -131,6 +134,7 @@ class PipelineSingleProcess:
                     "obj_key_points",
                     "obj_uncertainties",
                     "obj_valid",
+                    "obj_key_point_frames",
                     # registeration stats
                     "reg_key_points_idx",
                     "reg_key_points",
@@ -235,6 +239,7 @@ class PipelineSingleProcess:
                     "valid_depth": frame.depth,
                     "obj_init_pose": self.objects[0].init_pose,
                     "obj_pose": self.objects[0].pose,
+                    "obj_key_point_frames": self.objects[0].key_point_frames,
                     "obj_key_points": self.objects[0].key_points,
                     "obj_uncertainties": self.objects[0].uncertainties,
                     "obj_valid": self.objects[0].valid,
@@ -307,16 +312,39 @@ class PipelineSingleProcess:
 
             # frame to map registration
             if self._frame2map_reg:
+                t_extract_start = time.time()
 
-                idx, key_points, curr3d = self._extract_valid_key_points(
-                    self.objects[obj_id],
-                    self.track_table.obj2track_map[obj_id],
-                    track_3d,
-                    visibles,
-                    track_valid,
-                    uncertainties,
-                    uncertainty_thres=0.6,
+                if self._reg_remove_outside_mask:
+                    idx, key_points, curr3d, new_visibles = (
+                        self._extract_valid_key_points_mask_remove(
+                            self.objects[obj_id],
+                            self.track_table.obj2track_map[obj_id],
+                            tracks,
+                            track_3d,
+                            visibles,
+                            track_valid,
+                            uncertainties,
+                            frame.mask[obj_id, 0],
+                            uncertainty_thres=0.6,
+                        )
+                    )
+                    self.track_table.visible = new_visibles
+                else:
+                    idx, key_points, curr3d = self._extract_valid_key_points(
+                        self.objects[obj_id],
+                        self.track_table.obj2track_map[obj_id],
+                        track_3d,
+                        visibles,
+                        track_valid,
+                        uncertainties,
+                        uncertainty_thres=0.2,
+                    )
+
+                t_extract_end = time.time()
+                print(
+                    f"Extract valid key points time: {t_extract_end - t_extract_start:.4f}s"
                 )
+
                 # TODO: put it at better place
 
                 if self.save_meta_data and obj_id == 0:
@@ -557,6 +585,7 @@ class PipelineSingleProcess:
                     "obj_key_points": self.objects[0].key_points,
                     "obj_uncertainties": self.objects[0].uncertainties,
                     "obj_valid": self.objects[0].valid,
+                    "obj_key_point_frames": self.objects[0].key_point_frames,
                     **reg_stats_obj0,
                 }
             )
@@ -811,7 +840,7 @@ class PipelineSingleProcess:
     ):
         """
         Args:
-            obj_idx:     (M,) global indices for this object's points
+            obj_idx:     (N,) global indices for this object's points
             cur_pts_3d:  (N,3) global 3D point array
             cur_visible: (N,) bool visibility mask for all points
             cur_valid:   (N,) bool validity mask for all points
@@ -841,6 +870,166 @@ class PipelineSingleProcess:
         curr3d = cur_pts_3d[idx].copy()
 
         return idx, key_points, curr3d
+
+    # def _extract_valid_key_points(
+    #     self,
+    #     obj,
+    #     obj_idx,  # (M,) global indices for this object's points
+    #     cur_pts_2d,  # (N,2) global 2D pixel coords (float ok)
+    #     cur_pts_3d,  # (N,3) global 3D points
+    #     cur_visible,  # (N,) bool  -- UPDATED IN-PLACE
+    #     cur_valid,  # (N,) bool
+    #     cur_uncertainties,  # (N,) float
+    #     frame_mask_np,  # (H,W) or (1,H,W) NumPy array; >0 means inside
+    #     uncertainty_thres=0.3,
+    # ):
+    #     """
+    #     Side effect:
+    #         - Updates cur_visible (N,) to False for points OUTSIDE the mask
+    #         or with non-finite 2D coordinates.
+
+    #     Returns:
+    #         idx:        (K,) np int64 global indices of valid points
+    #         key_points: (K,3) np array from obj.key_points
+    #         curr3d:     (K,3) np array from cur_pts_3d
+    #     """
+    #     # Normalize mask to boolean HxW
+    #     if frame_mask_np.ndim == 3 and frame_mask_np.shape[0] == 1:
+    #         mask_bool = frame_mask_np[0] > 0
+    #     elif frame_mask_np.ndim == 2:
+    #         mask_bool = frame_mask_np > 0
+    #     else:
+    #         raise ValueError(
+    #             "frame_mask_np must be (H,W) or (1,H,W) for a single object."
+    #         )
+    #     H, W = mask_bool.shape
+
+    #     # Per-object views
+    #     val_obj = cur_valid[obj_idx]  # (M,)
+    #     uncer_obj = cur_uncertainties[obj_idx] < float(uncertainty_thres)  # (M,)
+
+    #     valid_kp_obj = getattr(obj, "valid", np.ones(len(obj_idx), dtype=bool))
+    #     valid_kp_obj = np.asarray(valid_kp_obj, dtype=bool)  # (M,)
+
+    #     # 2D coords for these points
+    #     pts2d_obj = cur_pts_2d[obj_idx]  # (M,2)
+    #     finite_xy = np.isfinite(pts2d_obj).all(axis=1)  # (M,)
+
+    #     # Convert to pixel indices (round to nearest) and clamp
+    #     x = np.rint(pts2d_obj[:, 0]).astype(np.int64)
+    #     y = np.rint(pts2d_obj[:, 1]).astype(np.int64)
+    #     np.clip(x, 0, W - 1, out=x)
+    #     np.clip(y, 0, H - 1, out=y)
+
+    #     # Mask lookup
+    #     inside_mask = mask_bool[y, x]  # (M,) bool
+
+    #     # ====== Update global visibility (N,) in-place ======
+    #     # Mark points OUTSIDE mask or with bad 2D as NOT visible
+    #     outside_or_bad = (~inside_mask) | (~finite_xy)  # (M,)
+    #     if outside_or_bad.any():
+    #         cur_visible[obj_idx[outside_or_bad]] = False
+
+    #     # Recompute vis_obj after the update
+    #     vis_obj = cur_visible[obj_idx]  # (M,)
+
+    #     # Final selection (keep inside the mask)
+    #     both_mask = (
+    #         vis_obj & val_obj & uncer_obj & valid_kp_obj & finite_xy & inside_mask
+    #     )  # (M,)
+
+    #     # Return subsets
+    #     idx = obj_idx[both_mask]  # (K,)
+    #     key_points = obj.key_points[both_mask].copy()  # (K,3)
+    #     curr3d = cur_pts_3d[idx].copy()  # (K,3)
+
+    #     return idx, key_points, curr3d, cur_visible
+
+    def _extract_valid_key_points_mask_remove(
+        self,
+        obj,
+        obj_idx,  # (M,) global indices for this object's points (np int)
+        cur_pts_2d,  # (N,2) global 2D pixel coords (np float ok)
+        cur_pts_3d,  # (N,3) global 3D points (np)
+        cur_visible,  # (N,) bool  -- UPDATED IN-PLACE (np)
+        cur_valid,  # (N,) bool (np)
+        cur_uncertainties,  # (N,) float (np)
+        frame_mask_gpu,  # (H,W) or (1,H,W) torch.Tensor on GPU; >0 means inside
+        uncertainty_thres=0.3,
+    ):
+        """
+        Side effect:
+            - Updates cur_visible (N,) to False for points OUTSIDE the mask
+            or with non-finite 2D coordinates.
+
+        Returns:
+            idx:        (K,) np int64 global indices of valid points
+            key_points: (K,3) np array from obj.key_points
+            curr3d:     (K,3) np array from cur_pts_3d
+            cur_visible: updated visibility (same array, returned for convenience)
+        """
+        # --- normalize mask to boolean 2D on GPU ---
+        if frame_mask_gpu.ndim == 3 and frame_mask_gpu.shape[0] == 1:
+            mask2d = frame_mask_gpu[0]
+        elif frame_mask_gpu.ndim == 2:
+            mask2d = frame_mask_gpu
+        else:
+            raise ValueError(
+                "frame_mask_gpu must be (H,W) or (1,H,W) for a single object."
+            )
+        # make sure it's boolean without allocating extra tensors if already bool
+        mask_bool = (mask2d > 0) if mask2d.dtype != torch.bool else mask2d
+        H, W = mask_bool.shape
+
+        # --- numpy views/arrays ---
+        obj_idx = np.asarray(obj_idx, dtype=np.int64)
+        cur_pts_2d = np.asarray(cur_pts_2d, dtype=np.float32)
+        cur_pts_3d = np.asarray(cur_pts_3d)
+        cur_visible = np.asarray(cur_visible, dtype=bool)
+        cur_valid = np.asarray(cur_valid, dtype=bool)
+        cur_uncertainties = np.asarray(cur_uncertainties, dtype=np.float32)
+
+        # per-object
+        val_obj = cur_valid[obj_idx]
+        uncer_obj = cur_uncertainties[obj_idx] < float(uncertainty_thres)
+        valid_kp_obj = np.asarray(
+            getattr(obj, "valid", np.ones(len(obj_idx), dtype=bool)), dtype=bool
+        )
+
+        pts2d_obj = cur_pts_2d[obj_idx]  # (M,2)
+        finite_xy = np.isfinite(pts2d_obj).all(axis=1)  # (M,)
+
+        # round -> int pixel indices, clamp to image
+        x = np.rint(pts2d_obj[:, 0]).astype(np.int64)
+        y = np.rint(pts2d_obj[:, 1]).astype(np.int64)
+        np.clip(x, 0, W - 1, out=x)
+        np.clip(y, 0, H - 1, out=y)
+
+        # --- sample GPU mask with torch indexing (fast & minimal conversion) ---
+        dev = mask_bool.device
+        x_t = torch.from_numpy(x).to(device=dev, dtype=torch.long)
+        y_t = torch.from_numpy(y).to(device=dev, dtype=torch.long)
+        inside_mask_np = mask_bool[y_t, x_t].detach().cpu().numpy()  # (M,) bool
+
+        # ====== update global visibility (N,) in-place ======
+        # mark points outside the mask or with bad 2D as NOT visible
+        outside_or_bad = (~inside_mask_np) | (~finite_xy)
+        if outside_or_bad.any():
+            cur_visible[obj_idx[outside_or_bad]] = False
+
+        # recompute vis after update
+        vis_obj = cur_visible[obj_idx]
+
+        # final selection (keep inside mask)
+        both_mask = (
+            vis_obj & val_obj & uncer_obj & valid_kp_obj & finite_xy & inside_mask_np
+        )
+
+        idx = obj_idx[both_mask]  # (K,)
+        key_points = obj.key_points[both_mask].copy()
+        curr3d = cur_pts_3d[idx].copy()
+
+        return idx, key_points, curr3d, cur_visible
 
     def _extract_valid_idx_points_for_obj(
         self,
