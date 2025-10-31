@@ -5,6 +5,43 @@ import numpy as np
 from point2pose.utils.transform import transform_pts
 
 
+def save_pcd(points, colors, save_dir, file_name="pcd"):
+    """
+    Save a point cloud with corresponding RGB colors.
+    Args:
+        points: np.ndarray (N, 3) float XYZ in meters
+        colors: np.ndarray (N, 3) RGB; accepts uint8 [0,255] or float [0,1]
+        save_dir: (str) output directory
+        file_name: (str) base file name without extension
+    """
+    if points is None or len(points) == 0:
+        return
+
+    pts = np.asarray(points, dtype=float)
+
+    # Normalize colors to float in [0,1]
+    cols = np.asarray(colors)
+    if cols.dtype == np.uint8:
+        cols = cols.astype(np.float32) / 255.0
+    else:
+        cols = cols.astype(np.float32)
+        cols = np.clip(cols, 0.0, 1.0)
+
+    # Guard shape mismatches by trimming to min length
+    n = min(pts.shape[0], cols.shape[0])
+    if n == 0:
+        return
+    pts = pts[:n]
+    cols = cols[:n]
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts)
+    pcd.colors = o3d.utility.Vector3dVector(cols)
+
+    os.makedirs(save_dir, exist_ok=True)
+    o3d.io.write_point_cloud(os.path.join(save_dir, f"{file_name}.ply"), pcd)
+
+
 def save_reg_pcd(
     src_pcd, trg_pcd, tf, save_dir, file_name="registered_pcd", reg_stats=None
 ):

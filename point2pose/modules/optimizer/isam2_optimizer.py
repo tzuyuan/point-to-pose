@@ -74,6 +74,7 @@ class ISAM2Optimizer(Optimizer):
             sigma_between = (
                 float(max(1e-4, np.mean(residuals))) if residuals.size else 0.01
             )
+            sigma_between = 0.1
             between_noise = gtsam.noiseModel.Isotropic.Sigma(6, sigma_between)
             # between_noise = gtsam.noiseModel.Diagonal.Sigmas(
             #     np.array(

@@ -16,7 +16,8 @@ pipeline:
     key_points_save_path: /home/justin/code/point-to-pose/debug/key_points
     save_meta_data: true
     meta_data_save_path: /home/justin/code/point-to-pose/debug/pipeline/meta_data
-  
+    save_cropped_pcd: True
+    cropped_pcd_dir: /home/justin/code/point-to-pose/debug/cropped_pcd
 
 register:
   type: svd_uncertainty_outlier
@@ -48,13 +49,15 @@ tracker:
 sampler: 
   type: uniform_fps
   params:
-    num_points: 15
-    density_per_kpx: 2
+    num_points: 50
+    density_per_kpx: -1
 
     min_points: 5
     max_points: 50
-    edge_margin_px: 10
-    remove_convex_hull: True
+    edge_margin_px: 5
+    remove_convex_hull: False
+    inflate_points: True
+    inflate_radius_px: 10
 
 
     cell_size: 30
@@ -68,7 +71,7 @@ criterion:
   ###      uncertainty_ratio, uncertainty_number, 
   ###      rotation_grid, rotation_threshold
   ###      mask_area
-  type: mask_area
+  type: rotation_threshold
   params:
     # iteration criterion
     update_per_iter: 1000000
@@ -84,11 +87,11 @@ criterion:
     discretization_angle: 60
 
     # rotation threshold criterion
-    max_angle_deg: 40
+    max_angle_deg: 30
 
     # mask area criterion
     fit_mode: convex
-    ratio_threshold: 0.4
+    ratio_threshold: 0.7
     debug_viz: false
     debug_dir: /home/justin/code/point-to-pose/debug/criterion
 

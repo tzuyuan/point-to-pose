@@ -28,9 +28,10 @@ from point2pose.data_types.object_frame_data import ObjectFrameData
 from point2pose.modules.object.object import Object
 from point2pose.data_types.optimizer_result import OptimizerResult
 from point2pose.io.outputs.logger import DataLogger
-from point2pose.io.outputs.point_cloud_io import save_reg_pcd
+from point2pose.io.outputs.point_cloud_io import save_reg_pcd, save_pcd
 from point2pose.utils.camera import convert_pixel_to_world
 from point2pose.utils.transform import transform_pts, inverse_SE3
+from point2pose.utils.lie import se3_to_vec, log_SE3
 
 
 class Pipeline:
@@ -54,6 +55,15 @@ class Pipeline:
             self._reg_debug_dir = os.path.join(self.debug_dir, "register")
             if not os.path.exists(self._reg_debug_dir):
                 os.makedirs(self._reg_debug_dir, exist_ok=True)
+
+        # Cropped point cloud debug saving
+        self.save_cropped_pcd = self.pipeline_cfg.get("save_cropped_pcd", False)
+        self.cropped_pcd_dir = self.pipeline_cfg.get(
+            "cropped_pcd_dir",
+            os.path.join(self.debug_dir if self.debug_dir else "./debug", "pcd"),
+        )
+        if self.save_cropped_pcd:
+            os.makedirs(self.cropped_pcd_dir, exist_ok=True)
 
         # Create pose save directory if pose logging is enabled
         if self.save_pose:
@@ -265,6 +275,40 @@ class Pipeline:
         frame.mask = mask_logits  # mask is a torch tensor on gpu
         segmenter_time = time.time() - segmenter_start
         print(f"Frame {self.frame_id} - Segmentation: {segmenter_time:.4f}s")
+
+        # Optionally save cropped point clouds per object using mask (with RGB)
+        if self.save_cropped_pcd:
+            num_objs = len(self.objects)
+            for obj_id in range(num_objs):
+                try:
+                    mask = frame.mask[obj_id, 0]
+                    coords_yx = torch.nonzero(mask > 0, as_tuple=False)
+                    if coords_yx.numel() == 0:
+                        continue
+                    # Convert (y,x) -> (x,y)
+                    pxl_xy = coords_yx[:, [1, 0]].cpu().numpy()
+                    world_pts, valid = convert_pixel_to_world(
+                        pixel=pxl_xy,
+                        depth_image=frame.depth,
+                        cam_intrinsics=frame.intrinsics,
+                        depth_factor=frame.depth_factor,
+                    )
+                    if world_pts.size == 0 or not np.any(valid):
+                        continue
+                    world_pts = world_pts[valid]
+                    pxl_xy_valid = pxl_xy[valid]
+                    rgb_vals = frame.rgb[
+                        pxl_xy_valid[:, 1], pxl_xy_valid[:, 0]
+                    ]  # uint8 RGB
+                    save_pcd(
+                        world_pts,
+                        rgb_vals,
+                        self.cropped_pcd_dir,
+                        f"obj_{obj_id}_frame_{self.frame_id}",
+                    )
+                except Exception:
+                    # Best-effort debug output; avoid breaking pipeline
+                    pass
 
         self.samp_ctx.frame = frame
 

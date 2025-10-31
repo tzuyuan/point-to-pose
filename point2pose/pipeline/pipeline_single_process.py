@@ -30,10 +30,11 @@ from point2pose.modules.object.object import Object
 from point2pose.modules.optimizer.isam2_optimizer import ISAM2Optimizer
 from point2pose.data_types.optimizer_result import OptimizerResult
 from point2pose.io.outputs.logger import DataLogger
-from point2pose.io.outputs.point_cloud_io import save_reg_pcd
+from point2pose.io.outputs.point_cloud_io import save_reg_pcd, save_pcd
 from point2pose.utils.camera import convert_pixel_to_world
 from point2pose.utils.transform import transform_pts, inverse_SE3
 from point2pose.utils.se3_low_pass_filter import SE3LowPassFilter
+from point2pose.utils.lie import se3_to_vec, log_SE3
 
 
 class PipelineSingleProcess:
@@ -61,6 +62,15 @@ class PipelineSingleProcess:
             self._reg_debug_dir = os.path.join(self.debug_dir, "register")
             if not os.path.exists(self._reg_debug_dir):
                 os.makedirs(self._reg_debug_dir, exist_ok=True)
+
+        # Cropped point cloud debug saving
+        self.save_cropped_pcd = self.pipeline_cfg.get("save_cropped_pcd", False)
+        self.cropped_pcd_dir = self.pipeline_cfg.get(
+            "cropped_pcd_dir",
+            os.path.join(self.debug_dir if self.debug_dir else "./debug", "pcd"),
+        )
+        if self.save_cropped_pcd:
+            os.makedirs(self.cropped_pcd_dir, exist_ok=True)
 
         # Create pose save directory if pose logging is enabled
         if self.save_pose:
@@ -277,6 +287,36 @@ class PipelineSingleProcess:
         segmenter_time = time.time() - segmenter_start
         print(f"Frame {self.frame_id} - Segmentation: {segmenter_time:.4f}s")
 
+        # Optionally save cropped point clouds per object using mask (with RGB)
+        if self.save_cropped_pcd:
+            num_objs = len(self.objects)
+            for obj_id in range(num_objs):
+                try:
+                    mask = frame.mask[obj_id, 0]
+                    coords_yx = torch.nonzero(mask > 0, as_tuple=False)
+                    if coords_yx.numel() == 0:
+                        continue
+                    pxl_xy = coords_yx[:, [1, 0]].cpu().numpy()
+                    world_pts, valid = convert_pixel_to_world(
+                        pixel=pxl_xy,
+                        depth_image=frame.depth,
+                        cam_intrinsics=frame.intrinsics,
+                        depth_factor=frame.depth_factor,
+                    )
+                    if world_pts.size == 0 or not np.any(valid):
+                        continue
+                    world_pts = world_pts[valid]
+                    pxl_xy_valid = pxl_xy[valid]
+                    rgb_vals = frame.rgb[pxl_xy_valid[:, 1], pxl_xy_valid[:, 0]]
+                    save_pcd(
+                        world_pts,
+                        rgb_vals,
+                        self.cropped_pcd_dir,
+                        f"obj_{obj_id}_frame_{self.frame_id}",
+                    )
+                except Exception:
+                    pass
+
         self.samp_ctx.frame = frame
 
         # ------------- tracker -------------
@@ -383,8 +423,17 @@ class PipelineSingleProcess:
                         key_points, curr3d, init_pose=prev_pose
                     )
 
+                # xi se(3) lie algebra. (omega, v)
+                xi_im1_i = se3_to_vec(log_SE3(inverse_SE3(pose_i_0) @ prev_pose))
+
+                # omega_norm = np.linalg.norm(xi_im1_i[:3])
+                # v_norm = np.linalg.norm(xi_im1_i[3:])
                 inliers = reg_stats["inliers"]
-                if np.mean(reg_stats["residuals"][inliers]) < 0.07:
+                mean_residual = np.mean(reg_stats["residuals"][inliers])
+                self.objects[obj_id].omega = xi_im1_i[:3]
+                self.objects[obj_id].v = xi_im1_i[3:]
+                self.objects[obj_id].mean_residual = mean_residual
+                if mean_residual < 0.07:
                     pose = pose_i_0
 
                     # update object info
@@ -599,6 +648,17 @@ class PipelineSingleProcess:
         # Check sample criteria
         frame = samp_context.frame
         for obj_id in range(self.num_obj):
+            ## Temp outlier rejection
+            ## TODO: make outlier rejection better organized
+            omega_norm = np.linalg.norm(self.objects[obj_id].omega)
+            v_norm = np.linalg.norm(self.objects[obj_id].v)
+            if (
+                omega_norm > 0.1
+                and v_norm > 1
+                and self.objects[obj_id].mean_residual > 0.07
+            ):
+                continue
+
             ## TODO: make crit_ctx to be object-specific?
             if self.criterion.check_sample_criterion(self.crit_ctx, obj_id):
                 self.is_key_frame[obj_id] = True

@@ -34,6 +34,10 @@ class Object:
             None  # 3D bounding box of the object, represented in the object frame
         )
 
+        omega = np.zeros(3)
+        v = np.zeros(3)
+        mean_residual = 0.0
+
     def add_key_points(
         self,
         new_key_points: np.ndarray,
