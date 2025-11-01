@@ -400,6 +400,9 @@ class PipelineSingleProcess:
                 if key_points.shape[0] < 3 or curr3d.shape[0] < 3:
                     # self.data_logger.log({"too_few_points": 1})
                     reg_stats_obj0.update({"too_few_points": 1})
+                    print(
+                        f"Frame {self.frame_id} - Object {obj_id} - Too few points: {key_points.shape[0]}"
+                    )
                     continue
 
                 # self.data_logger.log({"too_few_points": 0})
