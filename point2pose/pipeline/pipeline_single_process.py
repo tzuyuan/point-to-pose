@@ -9,6 +9,8 @@ from scipy.spatial.transform import Rotation as scipy_R
 
 import cupoch as cph
 
+# from point2pose.third_party.depth_anything_v2.dpt import DepthAnythingV2
+
 from point2pose.core.build import build_from_cfg
 
 import point2pose.modules as _modules  # trigger registrations
@@ -101,6 +103,37 @@ class PipelineSingleProcess:
         self.criterion = build_from_cfg(cfg.criterion, CRITERION)
         self.sampler = build_from_cfg(cfg.sampler, SAMPLER)
         # self.optimizer = build_from_cfg(cfg.optimizer, OPTIM)
+
+        # from point2pose.third_party.depth_anything_v2.dpt import DepthAnythingV2
+
+        ## TODO: make this a class
+
+        self.use_depth_estimate = self.pipeline_cfg.get("use_depth_estimate", False)
+        self.depth_encoder = self.pipeline_cfg.get("depth_encoder", "vits")
+        self._device = self.pipeline_cfg.get("device", "cpu")
+        self.depth_estimator = None  # lazy init
+        self._depth_model_cfg = {
+            "vits": {
+                "encoder": "vits",
+                "features": 64,
+                "out_channels": [48, 96, 192, 384],
+            },
+            "vitb": {
+                "encoder": "vitb",
+                "features": 128,
+                "out_channels": [96, 192, 384, 768],
+            },
+            "vitl": {
+                "encoder": "vitl",
+                "features": 256,
+                "out_channels": [256, 512, 1024, 1024],
+            },
+            "vitg": {
+                "encoder": "vitg",
+                "features": 384,
+                "out_channels": [1536, 1536, 1536, 1536],
+            },
+        }
 
         max_num_obj = self.pipeline_cfg.get("max_num_obj", 1)
         self.optimizer = ISAM2Optimizer(cfg.optimizer)
@@ -272,6 +305,20 @@ class PipelineSingleProcess:
         """
         Step the pipeline for one frame.
         """
+        if self.use_depth_estimate:
+            self._ensure_depth_model()
+            depth = self.depth_estimator.infer_image(frame.rgb)
+            # depth = (depth - depth.min()) / (depth.max() - depth.min()) * 255.0
+            # depth = depth.astype(np.uint8)
+            if isinstance(depth, torch.Tensor):
+                depth = depth.detach().cpu().numpy()
+                depth = depth.astype(np.float32, copy=False)
+
+            frame.depth = self._fit_affine_depth_to_rs(
+                est_depth=depth, rs_depth=frame.depth
+            )
+
+        # frame.depth = depth
 
         # if it's the first frame, initialize the pipeline
         if self.frame_id == 0:
@@ -1302,3 +1349,94 @@ class PipelineSingleProcess:
         for log_file in self.pose_log_files:
             if log_file is not None:
                 log_file.close()
+
+    def _ensure_depth_model(self):
+        if self.depth_estimator is not None:
+            return
+        # local import to avoid import-time CUDA/BLAS side-effects
+        from third_party.depth_anything_v2.dpt import DepthAnythingV2
+
+        m = DepthAnythingV2(**self._depth_model_cfg[self.depth_encoder])
+
+        # load on CPU first (faster, avoids early CUDA init), then move to device
+        state = torch.load(
+            f"checkpoints/depth_anything/depth_anything_v2_{self.depth_encoder}.pth",
+            map_location="cpu",
+        )
+        m.load_state_dict(state)
+        self.depth_estimator = m.to(self._device).eval()
+
+    def _fit_affine_depth_to_rs(
+        self,
+        est_depth,  # HxW, float32/float64 or uint8; relative depth from estimator
+        rs_depth,  # HxW, uint16 (mm) or float (m) from RealSense
+        depth_factor=None,  # e.g. 1000.0 if rs_depth is uint16 in millimeters
+        max_range_m=8.0,  # use only RS pixels < 8 meters for the fit
+        mask=None,  # optional [H,W] or [N,1,H,W] torch.BoolTensor: restrict fit region
+        min_samples=64,  # require at least this many samples to fit
+    ):
+        """
+        Fit s,b by least-squares on valid pixels where 0 < RS < max_range_m.
+        Returns d_metric (meters) as float32 with d_metric = s * est_depth + b.
+        """
+        # ---- to numpy ----
+        est_is_torch = isinstance(est_depth, torch.Tensor)
+        rs_is_torch = isinstance(rs_depth, torch.Tensor)
+
+        est = (
+            est_depth.detach().cpu().numpy() if est_is_torch else np.asarray(est_depth)
+        )
+        rs = rs_depth.detach().cpu().numpy() if rs_is_torch else np.asarray(rs_depth)
+
+        # If estimator accidentally produced uint8, undo to [0,1] so LS still works
+        if est.dtype == np.uint8:
+            est = est.astype(np.float32) / 255.0
+        else:
+            est = est.astype(np.float32, copy=False)
+
+        # RealSense -> meters
+        if depth_factor is None:
+            depth_factor = 1000.0 if np.issubdtype(rs.dtype, np.integer) else 1.0
+        rs_m = rs.astype(np.float32, copy=False) / float(depth_factor)
+
+        # Valid pixels: finite, 0 < RS < max_range_m, finite est
+        valid = (
+            np.isfinite(rs_m)
+            & (rs_m > 0)
+            & (rs_m < float(max_range_m))
+            & np.isfinite(est)
+        )
+
+        # Optional mask restriction (union if [N,1,H,W])
+        if mask is not None:
+            if isinstance(mask, torch.Tensor):
+                if mask.ndim == 4:
+                    m2d = (mask[:, 0] > 0).any(dim=0)
+                elif mask.ndim == 2:
+                    m2d = mask > 0
+                else:
+                    m2d = None
+                if m2d is not None:
+                    valid &= m2d.detach().cpu().numpy().astype(bool)
+            elif isinstance(mask, np.ndarray) and mask.ndim == 2:
+                valid &= mask.astype(bool)
+
+        # Need enough samples
+        if valid.sum() < min_samples:
+            # Not enough overlap to fit; just return the estimator (in its current scale) shifted to be non-negative
+            d_metric = est.copy()
+            d_metric[~np.isfinite(d_metric)] = 0.0
+            d_metric = np.maximum(d_metric, 0.0).astype(np.float32, copy=False)
+            return d_metric
+
+        # Build LS system: y ~ s*x + b
+        x = est[valid].astype(np.float64, copy=False).reshape(-1, 1)
+        y = rs_m[valid].astype(np.float64, copy=False).reshape(-1, 1)
+        A = np.hstack([x, np.ones_like(x)])
+        s, b = np.linalg.lstsq(A, y, rcond=None)[0].ravel()
+
+        # Apply to full map
+        d_metric = (s * est + b).astype(np.float32, copy=False)
+        # Clamp tiny negatives (can happen with noise)
+        np.maximum(d_metric, 0.0, out=d_metric)
+        return d_metric

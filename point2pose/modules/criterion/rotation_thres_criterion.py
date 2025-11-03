@@ -17,19 +17,26 @@ class RotationThresholdCriterion(SampleCriterion):
 
         # v is a list of direction vectors. (num_dirs, 3)
         # we assume the first vector to be the initial direction as (0, 0, 1)
-        self.v = np.array([[0, 0, 1]])
+        self._num_obj = 0
+        self._v_list = []
+
+    def initialize(self, crit_ctx: CriterionContext):
+        self._num_obj = len(crit_ctx.objects)
+        # v is a list of direction vectors. (num_dirs, 3)
+        self._v_list = []
+        for obj_id in range(self._num_obj):
+            self._v_list.append(np.array([[0, 0, 1]]))
 
     def check_sample_criterion(self, context: CriterionContext, obj_id: int) -> bool:
         obj = context.objects[obj_id]
-        init_R = obj.init_pose[:3, :3]
         R = obj.pose[:3, :3]
 
-        R_relative = R @ init_R.T
+        R_relative = R
 
-        u = R_relative @ self.v[0, :]
+        u = R_relative @ self._v_list[obj_id][0, :]
 
         # compute inner product of u and v
-        inner_product = u @ self.v.T
+        inner_product = u @ self._v_list[obj_id].T
         angle = np.arccos(inner_product)
         angle_deg = np.rad2deg(angle)
 
@@ -38,5 +45,7 @@ class RotationThresholdCriterion(SampleCriterion):
         if np.any(angle_deg < self._max_angle_deg):
             return False
         else:
-            self.v = np.concatenate([self.v, u.reshape(1, -1)], axis=0)
+            self._v_list[obj_id] = np.concatenate(
+                [self._v_list[obj_id], u.reshape(1, -1)], axis=0
+            )
             return True

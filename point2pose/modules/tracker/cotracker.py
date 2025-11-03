@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import cv2
 from collections import deque
-from typing import Tuple, List, Dict
+from typing import Tuple, List
 from contextlib import nullcontext
 
 from cotracker.predictor import CoTrackerOnlinePredictor
@@ -20,47 +20,31 @@ def _no_autocast_ctx(device: str):
     return nullcontext()
 
 
-def _letterbox_resize(
-    img: np.ndarray, out_w: int, out_h: int
-) -> Tuple[np.ndarray, Dict[str, float]]:
+def _orig_xy_to_resized_xy(
+    xy: np.ndarray, orig_w: int, orig_h: int, resize_w: int, resize_h: int
+) -> np.ndarray:
     """
-    Resize with unchanged aspect ratio using padding. Returns (resized_img, meta).
-    meta keys: scale, pad_x, pad_y, new_w, new_h.
-    """
-    H, W = img.shape[:2]
-    r = min(out_w / W, out_h / H)
-    new_w = int(round(W * r))
-    new_h = int(round(H * r))
-    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-    canvas = np.zeros((out_h, out_w, 3), dtype=img.dtype)
-    pad_x = (out_w - new_w) // 2
-    pad_y = (out_h - new_h) // 2
-    canvas[pad_y : pad_y + new_h, pad_x : pad_x + new_w] = resized
-
-    meta = dict(
-        scale=r, pad_x=float(pad_x), pad_y=float(pad_y), new_w=new_w, new_h=new_h
-    )
-    return canvas, meta
-
-
-def _orig_xy_to_lb_xy(xy: np.ndarray, meta: Dict[str, float]) -> np.ndarray:
-    """
-    Map original [x,y] to letterboxed canvas [x,y] pixels.
+    Map original [x,y] to resized [x,y] pixels using simple scaling.
     (x,y) input -> (x,y) output
     """
-    x = xy[:, 0] * meta["scale"] + meta["pad_x"]
-    y = xy[:, 1] * meta["scale"] + meta["pad_y"]
-    return np.stack([x, y], axis=-1).astype(np.float32)  # predictor order [x,y]
+    x_scale = resize_w / orig_w
+    y_scale = resize_h / orig_h
+    x = xy[:, 0] * x_scale
+    y = xy[:, 1] * y_scale
+    return np.stack([x, y], axis=-1).astype(np.float32)
 
 
-def _lb_xy_to_orig_xy(xy: np.ndarray, meta: Dict[str, float]) -> np.ndarray:
+def _resized_xy_to_orig_xy(
+    xy: np.ndarray, orig_w: int, orig_h: int, resize_w: int, resize_h: int
+) -> np.ndarray:
     """
-    Map letterboxed canvas [x,y] pixels back to original [x,y].
+    Map resized [x,y] pixels back to original [x,y] using simple scaling.
     (x,y) input -> (x,y) output
     """
-    x = (xy[:, 0] - meta["pad_x"]) / (meta["scale"] + 1e-8)
-    y = (xy[:, 1] - meta["pad_y"]) / (meta["scale"] + 1e-8)
+    x_scale = orig_w / resize_w
+    y_scale = orig_h / resize_h
+    x = xy[:, 0] * x_scale
+    y = xy[:, 1] * y_scale
     return np.stack([x, y], axis=-1).astype(np.float32)
 
 
@@ -73,7 +57,7 @@ class CoTrackerRealtimeTracker(Tracker):
       - initialize(frame) -> bool
       - add_query_points(frame, new_points[xy]) -> np.ndarray indices
       - track_once(frame) -> (tracks[N,2], uncertainties[N], visibles[N])
-        NOTE: tracks are returned in [y, x] format for compatibility with drawing libraries.
+        NOTE: tracks are returned in [x, y] format.
     """
 
     def __init__(self, config):
@@ -117,12 +101,7 @@ class CoTrackerRealtimeTracker(Tracker):
 
         # Online state
         self._frame_ids: deque[int] = deque(maxlen=self._window_len)
-        self._frame_buf: deque[np.ndarray] = deque(
-            maxlen=self._window_len
-        )  # letterboxed frames, uint8
-        self._lb_meta_buf: deque[Dict[str, float]] = deque(
-            maxlen=self._window_len
-        )  # per-frame letterbox meta
+        self._frame_buf: deque[np.ndarray] = deque()  # resized frames, uint8
 
         # Global queries (we store in ORIGINAL image pixels, [x,y])
         self._q_birth: List[int] = []
@@ -174,16 +153,15 @@ class CoTrackerRealtimeTracker(Tracker):
 
         Returns
         -------
-        tracks : (N,2) np.float32 in original image coords [y, x] <--- FINAL OUTPUT FLIPPED TO [y,x]
+        tracks : (N,2) np.float32 in original image coords [x, y]
         uncertainties : (N,) np.float32  ~ (1 - visibility)
         visibles : (N,) np.float32 in [0,1]
         """
-        # Letterbox the incoming frame (preserve aspect ratio)
-        canvas_img, lb_meta = _letterbox_resize(
-            frame.rgb, self._canvas_w, self._canvas_h
+        # Simple resize (no letterboxing, like TAPIR)
+        resized_img = cv2.resize(
+            frame.rgb, (self._canvas_w, self._canvas_h), interpolation=cv2.INTER_LINEAR
         )
-        self._frame_buf.append(canvas_img)
-        self._lb_meta_buf.append(lb_meta)
+        self._frame_buf.append(resized_img)
         self._frame_ids.append(int(frame.id))
 
         N_global = len(self._q_birth)
@@ -199,23 +177,28 @@ class CoTrackerRealtimeTracker(Tracker):
         vis_out = np.zeros((N_global,), dtype=np.float32)
         unc_out = np.ones((N_global,), dtype=np.float32)
 
-        # 1. BUFFERS NOT FULL (Frames 0 to 14): Echo spawn positions [x,y] and flip to [y,x]
+        # 1. BUFFERS NOT FULL (Frames 0 to 14): Echo spawn positions [x,y]
         if len(self._frame_buf) < self._window_len:
             idx_all = list(range(N_global))
             if idx_all:
                 xy_orig = np.array(
                     [self._q_xy_orig[i] for i in idx_all], dtype=np.float32
                 )
-                tracks_out[idx_all] = xy_orig[:, [1, 0]]  # FLIP TO [y,x]
+                tracks_out[idx_all] = xy_orig  # Keep as [x,y]
                 vis_out[idx_all] = 1.0
                 unc_out[idx_all] = 0.0
             return tracks_out, unc_out, vis_out
 
         # 2. BUFFERS ARE FULL (Frame 15 onwards): Build video chunk
+        print(f"self._frame_buf: {len(self._frame_buf)}")
         vid_np = np.stack(list(self._frame_buf), axis=0)  # (T, Hc, Wc, 3)
+        print(f"vid_np shape: {vid_np.shape}")
+        vid_np = vid_np[..., -self._window_len :, :, :, :]
         video_chunk = torch.tensor(
             vid_np, device=self._device, dtype=torch.float32
         ).permute(0, 3, 1, 2)[None]
+
+        print(f"video_chunk shape: {video_chunk.shape}")
 
         # Helper to call predictor with autocast disabled and FP32
         def _predict(**kwargs):
@@ -235,17 +218,18 @@ class CoTrackerRealtimeTracker(Tracker):
         # 3. FIRST COMMIT (Frame 15, if points were added early):
         # This handles the transition from fixed points (0-14) to tracking (15+)
         if self._need_commit and not self._ever_committed:
-            q_tyx = self._build_query_tensor_at_query_frame()  # [t, y, x]
+            q_txy = self._build_query_tensor_at_query_frame()  # [t, x, y]
             # Clamp to canvas bounds
-            q_tyx[:, :, 1].clamp_(0, self._canvas_h - 1)  # y
-            q_tyx[:, :, 2].clamp_(0, self._canvas_w - 1)  # x
+            q_txy[:, :, 1].clamp_(0, self._canvas_w - 1)  # x
+            q_txy[:, :, 2].clamp_(0, self._canvas_h - 1)  # y
+            print(f"q_txy: {q_txy}")
             is_first_commit = True
 
             # Perform initial commit and priming
             try:
                 pred_tracks, pred_vis = _predict(
                     video_chunk=video_chunk,
-                    queries=q_tyx,
+                    queries=q_txy,
                     add_support_grid=False,
                     grid_query_frame=self._grid_query_frame,
                     is_first_step=is_first_commit,
@@ -253,7 +237,7 @@ class CoTrackerRealtimeTracker(Tracker):
             except TypeError:
                 pred_tracks, pred_vis = _predict(
                     video_chunk=video_chunk,
-                    queries=q_tyx,
+                    queries=q_txy,
                     add_support_grid=False,
                     grid_query_frame=self._grid_query_frame,
                 )
@@ -265,33 +249,40 @@ class CoTrackerRealtimeTracker(Tracker):
             self._ever_committed = True
             self._primed = True
 
-            # Process prediction from commit call and return [y,x]
+            # Process prediction from commit call and return [x,y]
             if pred_tracks is None or pred_vis is None:
                 return tracks_out, unc_out, vis_out
 
             # Use the prediction from the commit step
             T = pred_tracks.shape[1]
-            xy_lb_last = (
+            print(f"pred_tracks: {pred_tracks}")
+            xy_resized_last = (
                 pred_tracks[0, T - 1].detach().float().cpu().numpy()
-            )  # [x,y] canvas
+            )  # [x,y] resized
             vis_last = pred_vis[0, T - 1].detach().float().cpu().numpy()
+            print(f"xy_resized_last: {xy_resized_last}")
 
-            last_meta = self._lb_meta_buf[-1]
-            xy_orig = _lb_xy_to_orig_xy(xy_lb_last, last_meta)  # [x,y]
-
-            # *** FIX: FLIP TO [y,x] FOR OUTPUT ***
-            yx_orig = xy_orig[:, [1, 0]]
+            # Map back to original [x,y] using simple scaling
+            xy_orig = _resized_xy_to_orig_xy(
+                xy_resized_last,
+                self._img_width,
+                self._img_height,
+                self._canvas_w,
+                self._canvas_h,
+            )  # [x,y]
+            print(f"xy_orig: {xy_orig}")
 
             # Scatter into global outputs using committed mapping
             N_model = xy_orig.shape[0]
-            scatter_idx = (
+            scatter_idx: list[int] = (
                 self._committed_indices[:N_model]
                 if self._committed_indices
                 else list(range(N_model))
             )
-            tracks_out[scatter_idx] = yx_orig  # Assign flipped [y,x]
+            tracks_out[scatter_idx] = xy_orig  # Assign as [x,y]
             vis_out[scatter_idx] = vis_last
             unc_out[scatter_idx] = 1.0 - vis_last
+            print(f"tracks_out: {tracks_out}")
 
             return tracks_out, unc_out, vis_out
 
@@ -299,36 +290,41 @@ class CoTrackerRealtimeTracker(Tracker):
 
         if self._ever_committed:
             # Regular online step (only happens if not a commit step)
-            try:
-                pred_tracks, pred_vis = _predict(
-                    video_chunk=video_chunk,
-                    queries=None,
-                    add_support_grid=False,
-                    grid_query_frame=self._grid_query_frame,
-                )
-            except TypeError:
-                pred_tracks, pred_vis = _predict(
-                    video_chunk=video_chunk,
-                    queries=None,
-                    add_support_grid=False,
-                )
+            # try:
+            #     pred_tracks, pred_vis = _predict(
+            #         video_chunk=video_chunk,
+            #         queries=None,
+            #         add_support_grid=False,
+            #         grid_query_frame=self._grid_query_frame,
+            #     )
+            # except TypeError:
+            pred_tracks, pred_vis = _predict(
+                video_chunk=video_chunk,
+                queries=None,
+                add_support_grid=False,
+            )
+
+            print(f"pred_tracks: {pred_tracks}")
 
             if pred_tracks is None or pred_vis is None:
                 return tracks_out, unc_out, vis_out
 
             # Process tracks
             T = pred_tracks.shape[1]
-            xy_lb_last = (
+            xy_resized_last = (
                 pred_tracks[0, T - 1].detach().float().cpu().numpy()
-            )  # [x,y] canvas
+            )  # [x,y] resized
             vis_last = pred_vis[0, T - 1].detach().float().cpu().numpy()
-
-            # Map back to ORIGINAL [x,y]
-            last_meta = self._lb_meta_buf[-1]
-            xy_orig = _lb_xy_to_orig_xy(xy_lb_last, last_meta)  # [x,y]
-
-            # *** FIX: FLIP TO [y,x] FOR OUTPUT ***
-            yx_orig = xy_orig[:, [1, 0]]
+            print(f"xy_resized_last: {xy_resized_last}")
+            # Map back to original [x,y] using simple scaling
+            xy_orig = _resized_xy_to_orig_xy(
+                xy_resized_last,
+                self._img_width,
+                self._img_height,
+                self._canvas_w,
+                self._canvas_h,
+            )  # [x,y]
+            print(f"xy_orig: {xy_orig}")
 
             # Scatter into global outputs using committed mapping
             N_model = xy_orig.shape[0]
@@ -337,9 +333,11 @@ class CoTrackerRealtimeTracker(Tracker):
                 if self._committed_indices
                 else list(range(N_model))
             )
-            tracks_out[scatter_idx] = yx_orig  # Assign flipped [y,x]
+            tracks_out[scatter_idx] = xy_orig  # Assign as [x,y]
             vis_out[scatter_idx] = vis_last
             unc_out[scatter_idx] = 1.0 - vis_last
+
+            print(f"tracks_out: {tracks_out}")
 
         return tracks_out, unc_out, vis_out
 
@@ -349,22 +347,26 @@ class CoTrackerRealtimeTracker(Tracker):
 
     def _build_query_tensor_at_query_frame(self) -> torch.Tensor:
         """
-        Build queries tensor [1, N, 3] in model format: [t, y, x] in canvas px.
-        Loads from internal [x,y] storage.
+        Build queries tensor [1, N, 3] in model format: [t, y, x] in resized px.
+        Loads from internal [x,y] storage and converts to model format.
         """
         N = len(self._q_xy_orig)
         q = np.zeros((N, 3), dtype=np.float32)
         if N > 0:
             q[:, 0] = float(self._grid_query_frame)  # constant t
 
-            query_frame_meta = self._lb_meta_buf[self._grid_query_frame]
-
-            # Convert original [x,y] (stored) to canvas [x,y]
+            # Convert original [x,y] (stored) to resized [x,y]
             xy_orig = np.array(self._q_xy_orig, dtype=np.float32)  # [x,y]
-            xy_lb = _orig_xy_to_lb_xy(xy_orig, query_frame_meta)  # [x,y]
+            xy_resized = _orig_xy_to_resized_xy(
+                xy_orig,
+                self._img_width,
+                self._img_height,
+                self._canvas_w,
+                self._canvas_h,
+            )  # [x,y]
 
-            # Model expects [t, y, x]
-            q[:, 1] = xy_lb[:, 0]  # y
-            q[:, 2] = xy_lb[:, 1]  # x
+            # Model expects [t, x, y] - note the swap here
+            q[:, 1] = xy_resized[:, 0]  # y from [x,y]
+            q[:, 2] = xy_resized[:, 1]  # x from [x,y]
 
         return torch.from_numpy(q)[None].to(self._device, dtype=torch.float32)
