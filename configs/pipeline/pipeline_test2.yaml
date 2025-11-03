@@ -11,8 +11,11 @@ pipeline:
 
 
     use_depth_estimate: false
+    depth_estimator_type: depth_anything
     device: cuda
     depth_encoder: vitl
+
+    use_graph_optimization: false
 
     debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/

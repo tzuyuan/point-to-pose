@@ -7,6 +7,8 @@ import open3d as o3d
 import torch
 from scipy.spatial.transform import Rotation as scipy_R
 
+import cv2 as cv
+
 import cupoch as cph
 
 # from point2pose.third_party.depth_anything_v2.dpt import DepthAnythingV2
@@ -109,6 +111,9 @@ class PipelineSingleProcess:
         ## TODO: make this a class
 
         self.use_depth_estimate = self.pipeline_cfg.get("use_depth_estimate", False)
+        self.depth_estimator_type = self.pipeline_cfg.get(
+            "depth_estimator_type", "depth_anything"
+        )
         self.depth_encoder = self.pipeline_cfg.get("depth_encoder", "vits")
         self._device = self.pipeline_cfg.get("device", "cpu")
         self.depth_estimator = None  # lazy init
@@ -137,6 +142,10 @@ class PipelineSingleProcess:
 
         max_num_obj = self.pipeline_cfg.get("max_num_obj", 1)
         self.optimizer = ISAM2Optimizer(cfg.optimizer)
+
+        self.use_graph_optimization = self.pipeline_cfg.get(
+            "use_graph_optimization", False
+        )
 
         self.frame_id = 0
 
@@ -307,16 +316,54 @@ class PipelineSingleProcess:
         """
         if self.use_depth_estimate:
             self._ensure_depth_model()
-            depth = self.depth_estimator.infer_image(frame.rgb)
+
+            if self.depth_estimator_type == "depth_anything":
+                depth = self.depth_estimator.infer_image(frame.rgb)
+                frame.depth_factor = 1.0
+            elif self.depth_estimator_type == "promptda":
+                print(frame.depth.shape)
+                depth_resize = cv.resize(
+                    frame.depth, (630, 476), interpolation=cv.INTER_LINEAR
+                )
+                rgb_resize = cv.resize(
+                    frame.rgb, (630, 476), interpolation=cv.INTER_LINEAR
+                )
+                depth_torch = (
+                    torch.from_numpy(depth_resize / frame.depth_factor)
+                    .unsqueeze(0)
+                    .unsqueeze(0)
+                    .to(self._device)
+                )
+                rgb_torch = (
+                    torch.from_numpy(rgb_resize)
+                    .permute(2, 0, 1)
+                    .unsqueeze(0)
+                    .to(self._device)
+                )
+                depth_troch = self.depth_estimator.predict(rgb_torch, depth_torch)
+                print("depth_troch shape: ", type(depth_troch))
+                from promptda.utils.io_wrapper import load_image, load_depth, save_depth
+
+                save_depth(depth_troch, prompt_depth=depth_torch, image=rgb_torch)
+                depth = depth_troch.squeeze(0).squeeze(0).cpu().numpy()
+                depth = depth.astype(np.float32, copy=False)
+                depth = cv.resize(
+                    depth,
+                    (frame.depth.shape[1], frame.depth.shape[0]),
+                    interpolation=cv.INTER_LINEAR,
+                )
+                print("depth shape: ", depth.shape)
+
             # depth = (depth - depth.min()) / (depth.max() - depth.min()) * 255.0
             # depth = depth.astype(np.uint8)
             if isinstance(depth, torch.Tensor):
                 depth = depth.detach().cpu().numpy()
                 depth = depth.astype(np.float32, copy=False)
 
-            frame.depth = self._fit_affine_depth_to_rs(
-                est_depth=depth, rs_depth=frame.depth
-            )
+            # frame.depth = self._fit_affine_depth_to_rs(
+            #     est_depth=depth, rs_depth=frame.depth
+            # )
+            frame.depth = depth.astype(np.float32, copy=False)
 
         # frame.depth = depth
 
@@ -483,7 +530,8 @@ class PipelineSingleProcess:
                 self.objects[obj_id].omega = xi_im1_i[:3]
                 self.objects[obj_id].v = xi_im1_i[3:]
                 self.objects[obj_id].mean_residual = mean_residual
-                if mean_residual < 0.07:
+
+                if mean_residual < 0.07 and self.use_graph_optimization:
                     pose = pose_i_0
 
                     # update object info
@@ -520,6 +568,9 @@ class PipelineSingleProcess:
                         #     f"key points after optimization: {self.objects[obj_id].key_points.shape}"
                         # )
                         # print(self.objects[obj_id].key_points)
+                elif mean_residual < 0.07:
+                    pose = pose_i_0
+                    self.objects[obj_id].pose = pose
                 else:
                     pose = self.objects[obj_id].pose
 
@@ -710,7 +761,10 @@ class PipelineSingleProcess:
                 continue
 
             ## TODO: make crit_ctx to be object-specific?
-            if self.criterion.check_sample_criterion(self.crit_ctx, obj_id):
+            if (
+                self.criterion.check_sample_criterion(self.crit_ctx, obj_id)
+                and self.objects[obj_id].mean_residual < 0.07
+            ):
                 self.is_key_frame[obj_id] = True
                 # Sample points
                 new_sampled_points = self.sampler.sample(samp_context, obj_id)
@@ -1353,18 +1407,37 @@ class PipelineSingleProcess:
     def _ensure_depth_model(self):
         if self.depth_estimator is not None:
             return
-        # local import to avoid import-time CUDA/BLAS side-effects
-        from third_party.depth_anything_v2.dpt import DepthAnythingV2
 
-        m = DepthAnythingV2(**self._depth_model_cfg[self.depth_encoder])
+        if self.depth_estimator_type == "depth_anything":
+            # local import to avoid import-time CUDA/BLAS side-effects
+            from third_party.depth_anything_v2_metric.dpt import DepthAnythingV2
 
-        # load on CPU first (faster, avoids early CUDA init), then move to device
-        state = torch.load(
-            f"checkpoints/depth_anything/depth_anything_v2_{self.depth_encoder}.pth",
-            map_location="cpu",
-        )
-        m.load_state_dict(state)
-        self.depth_estimator = m.to(self._device).eval()
+            m = DepthAnythingV2(
+                **self._depth_model_cfg[self.depth_encoder], max_depth=20
+            )
+
+            # load on CPU first (faster, avoids early CUDA init), then move to device
+            # state = torch.load(
+            #     f"checkpoints/depth_anything/depth_anything_v2_{self.depth_encoder}.pth",
+            #     map_location="cpu",
+            # )
+            state = torch.load(
+                f"checkpoints/depth_anything/depth_anything_v2_metric_hypersim_{self.depth_encoder}.pth",
+                map_location="cpu",
+            )
+            # state = state["model"]
+            m.load_state_dict(state)
+            self.depth_estimator = m.to(self._device).eval()
+        elif self.depth_estimator_type == "promptda":
+            from promptda.promptda import PromptDA
+
+            self.depth_estimator = (
+                PromptDA.from_pretrained(
+                    f"checkpoints/promptda/{self.depth_encoder}.ckpt"
+                )
+                .to(self._device)
+                .eval()
+            )
 
     def _fit_affine_depth_to_rs(
         self,
@@ -1437,6 +1510,7 @@ class PipelineSingleProcess:
 
         # Apply to full map
         d_metric = (s * est + b).astype(np.float32, copy=False)
+        # d_metric = est.astype(np.float32, copy=False)
         # Clamp tiny negatives (can happen with noise)
         np.maximum(d_metric, 0.0, out=d_metric)
         return d_metric

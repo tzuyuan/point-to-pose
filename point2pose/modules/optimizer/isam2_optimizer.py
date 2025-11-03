@@ -40,6 +40,8 @@ class ISAM2Optimizer(Optimizer):
         self._prev_pose_inv = np.eye(4)
         self._prev_frame_id = -1
 
+        self._prev_rel_T = None
+
     def optimize(self, data: ObjectFrameData):
         """Perform the optimization operation."""
         # the pose takes the first frame to the current camera frame
@@ -66,6 +68,7 @@ class ISAM2Optimizer(Optimizer):
                 gtsam.PriorFactorPose3(Xi, cur_pose_gtsam, self._prior_noise)
             )
             self._initialized = True
+            self._prev_rel_T = gtsam.Pose3(np.eye(4))
         else:
             Xim1 = gtsam.symbol("x", self._prev_frame_id)
             rel_T = gtsam.Pose3(self._prev_pose_inv @ cur_pose)
@@ -94,14 +97,18 @@ class ISAM2Optimizer(Optimizer):
             )
 
             # T_I = gtsam.Pose3(np.eye(4))
-            # between_noise_const = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
+            # get previous relative pose
+
+            between_noise_const = gtsam.noiseModel.Isotropic.Sigma(6, 0.01)
 
             # # constant velocity model
-            # self._graph.push_back(
-            #     gtsam.BetweenFactorPose3(Xim1, Xi, T_I, between_noise_const)
-            # )
-            # self._values.insert(Xi, cur_pose)
-            # self._inserted_poses.add(Xi)
+            self._graph.push_back(
+                gtsam.BetweenFactorPose3(
+                    Xim1, Xi, self._prev_rel_T, between_noise_const
+                )
+            )
+
+            self._prev_rel_T = rel_T
 
         self._prev_pose_inv = data.pose
         self._prev_frame_id = frame_id
