@@ -298,21 +298,21 @@ def create_correspondence_visualization(
     geometries.append(target_pcd)
 
     # Create lines connecting corresponding points (only for inliers)
+    all_points = np.vstack([source_points, target_points])
     lines = []
     line_colors = []
 
     for i in range(num_correspondences):
         if inliers[i]:  # Only create lines for inliers
             # Each line connects source point i to target point i
-            lines.append([i, i + num_correspondences])  # Source to target
+            # Source point is at index i, target point is at index i + num_correspondences
+            lines.append([i, i + num_correspondences])
             line_colors.append(colors[i])
 
     # Create line set only if there are inliers
     if len(lines) > 0:
         line_set = o3d.geometry.LineSet()
-        line_set.points = o3d.utility.Vector3dVector(
-            np.vstack([source_points, target_points])
-        )
+        line_set.points = o3d.utility.Vector3dVector(all_points)
         line_set.lines = o3d.utility.Vector2iVector(lines)
         line_set.colors = o3d.utility.Vector3dVector(line_colors)
         geometries.append(line_set)
@@ -432,6 +432,14 @@ def interactive_visualization(
         vis = o3d.visualization.Visualizer()
         vis.create_window(window_name=f"Object {object_number} - Frame {frame_number}")
 
+        # Debug: Check if show_all_keypoints flag is set
+        show_all_kps_flag = (
+            getattr(args, "show_all_keypoints", False) if args is not None else False
+        )
+        print(f"DEBUG: show_all_keypoints flag = {show_all_kps_flag}")
+        print(f"DEBUG: visualize_correspondence = {visualize_correspondence}")
+        print(f"DEBUG: args = {args}")
+
         if not visualize_correspondence:
             if getattr(args, "color_by_keyframe_id", False):
                 key_frame_ids = get_keyframe_ids_for_register_pointcloud(
@@ -451,23 +459,135 @@ def interactive_visualization(
                 pcd.colors = o3d.utility.Vector3dVector(colors)
             vis.add_geometry(pcd)
 
+            # Optionally show all keypoints even when not visualizing correspondences
+            if show_all_kps_flag:
+                print(
+                    "Attempting to load all keypoints from meta_data (without correspondence mode)..."
+                )
+                all_kps = load_all_key_points_from_meta(
+                    register_folder, object_number, frame_number
+                )
+                if all_kps is not None and len(all_kps) > 0:
+                    print(f"Loaded {len(all_kps)} key points from meta_data")
+                    print(f"  Keypoints shape: {all_kps.shape}")
+                    # Filter out NaN/Inf values before visualization
+                    if np.any(~np.isfinite(all_kps)):
+                        valid_mask = np.isfinite(all_kps).all(axis=1)
+                        all_kps = all_kps[valid_mask]
+                        print(
+                            f"  Filtered to {len(all_kps)} valid keypoints (removed NaN/Inf)"
+                        )
+                    if len(all_kps) > 0:
+                        print(
+                            f"  Keypoints range: x=[{all_kps[:, 0].min():.3f}, {all_kps[:, 0].max():.3f}], y=[{all_kps[:, 1].min():.3f}, {all_kps[:, 1].max():.3f}], z=[{all_kps[:, 2].min():.3f}, {all_kps[:, 2].max():.3f}]"
+                        )
+                    kps_pcd = o3d.geometry.PointCloud()
+                    kps_pcd.points = o3d.utility.Vector3dVector(all_kps)
+                    grey = np.array([[0.6, 0.6, 0.6]] * len(all_kps))
+                    kps_pcd.colors = o3d.utility.Vector3dVector(grey)
+                    vis.add_geometry(kps_pcd)
+                    vis.poll_events()
+                    vis.update_renderer()
+                    print(f"Added {len(all_kps)} key points from meta_data (grey)")
+                else:
+                    print(
+                        f"Warning: load_all_key_points_from_meta returned None or empty array"
+                    )
+
         # Load and visualize correspondence data if requested
         if visualize_correspondence:
+            # Optionally show base point cloud when showing all keypoints for context
+            if show_all_kps_flag:
+                # Add base point cloud for context
+                vis.add_geometry(pcd)
+                vis.poll_events()
+                vis.update_renderer()
+                print(f"Added base point cloud for context ({len(pcd.points)} points)")
+
             correspondence_data = load_correspondence_data(
                 register_folder, object_number, frame_number, refine
             )
             if correspondence_data is not None:
                 key_points, curr3d, inliers = correspondence_data
+
+                # Optionally add all key points from meta_data as a single color cloud first
+                # This ensures all keypoints are shown, and correspondence points will be on top
+                if show_all_kps_flag:
+                    print("Attempting to load all keypoints from meta_data...")
+                    all_kps = load_all_key_points_from_meta(
+                        register_folder, object_number, frame_number
+                    )
+                    if all_kps is not None and len(all_kps) > 0:
+                        print(f"Loaded {len(all_kps)} key points from meta_data")
+                        print(f"  Keypoints shape: {all_kps.shape}")
+                        # Filter out NaN/Inf values before visualization
+                        if np.any(~np.isfinite(all_kps)):
+                            valid_mask = np.isfinite(all_kps).all(axis=1)
+                            all_kps = all_kps[valid_mask]
+                            print(
+                                f"  Filtered to {len(all_kps)} valid keypoints (removed NaN/Inf)"
+                            )
+                        if len(all_kps) > 0:
+                            print(
+                                f"  Keypoints range: x=[{all_kps[:, 0].min():.3f}, {all_kps[:, 0].max():.3f}], y=[{all_kps[:, 1].min():.3f}, {all_kps[:, 1].max():.3f}], z=[{all_kps[:, 2].min():.3f}, {all_kps[:, 2].max():.3f}]"
+                            )
+                        kps_pcd = o3d.geometry.PointCloud()
+                        kps_pcd.points = o3d.utility.Vector3dVector(all_kps)
+                        grey = np.array([[0.6, 0.6, 0.6]] * len(all_kps))
+                        kps_pcd.colors = o3d.utility.Vector3dVector(grey)
+                        vis.add_geometry(kps_pcd)
+                        vis.poll_events()
+                        vis.update_renderer()
+                        print(f"Added {len(all_kps)} key points from meta_data (grey)")
+                        print(f"  Note: All keypoints should be visible as grey points")
+                    else:
+                        print(
+                            f"Warning: load_all_key_points_from_meta returned None or empty array"
+                        )
+                        if all_kps is None:
+                            print("  - Function returned None")
+                        elif len(all_kps) == 0:
+                            print(f"  - Function returned empty array (length 0)")
+
+                # Create correspondence visualization with lines connecting key_points to curr3d
+                print(
+                    f"Creating correspondence visualization with {len(key_points)} key_points and {len(curr3d)} curr3d points"
+                )
                 correspondence_geometries = create_correspondence_visualization(
                     key_points, curr3d, inliers
                 )
-                for geom in correspondence_geometries:
+                print(
+                    f"Created {len(correspondence_geometries)} geometry objects for correspondence"
+                )
+                for i, geom in enumerate(correspondence_geometries):
                     vis.add_geometry(geom)
+                    vis.poll_events()
+                    vis.update_renderer()
+                    if isinstance(geom, o3d.geometry.PointCloud):
+                        print(f"  Added PointCloud {i} with {len(geom.points)} points")
+                    elif isinstance(geom, o3d.geometry.LineSet):
+                        print(f"  Added LineSet {i} with {len(geom.lines)} lines")
                 num_inliers = np.sum(inliers)
                 num_outliers = len(inliers) - num_inliers
                 print(
                     f"Added correspondence visualization with {len(key_points)} correspondences ({num_inliers} inliers, {num_outliers} outliers)"
                 )
+                # Check if lines were created
+                line_set_found = any(
+                    isinstance(geom, o3d.geometry.LineSet)
+                    for geom in correspondence_geometries
+                )
+                if line_set_found:
+                    line_set = next(
+                        geom
+                        for geom in correspondence_geometries
+                        if isinstance(geom, o3d.geometry.LineSet)
+                    )
+                    print(
+                        f"Created {len(line_set.lines)} lines connecting correspondences"
+                    )
+                else:
+                    print("Warning: No LineSet found in correspondence geometries")
             else:
                 print("No correspondence data found for this frame")
 
@@ -666,6 +786,148 @@ def assign_point_colors_by_keyframe_id(points, key_frame_ids, inliers=None):
     return result
 
 
+def load_all_key_points_from_meta(
+    register_folder: str, object_number: int, frame_number: int
+):
+    # object_number is currently unused (single-object support); keep for future-proofing
+    _ = object_number
+    meata_data_paths = [
+        os.path.join(register_folder, "meata_data.npz"),
+        os.path.join(os.path.dirname(register_folder), "meata_data.npz"),
+        os.path.join(
+            os.path.dirname(os.path.dirname(register_folder)),
+            "debug",
+            "pipeline",
+            "meta_data",
+            "meata_data.npz",
+        ),
+    ]
+    meata_data_path = None
+    for path in meata_data_paths:
+        if os.path.exists(path):
+            meata_data_path = path
+            break
+    if meata_data_path is None:
+        print("No meata_data.npz found for loading all key points")
+        print(f"  Searched paths: {meata_data_paths}")
+        return None
+    print(f"Loading all keypoints from: {meata_data_path}")
+    try:
+        data = np.load(meata_data_path, allow_pickle=True)
+        print(
+            f"  Loaded NPZ file, available keys: {list(data.keys())[:10]}..."
+        )  # Show first 10 keys
+        if "frame_id" not in data:
+            print("  Error: No frame_id in meata_data.npz")
+            return None
+        frame_ids = data["frame_id"]
+        print(f"  Found {len(frame_ids)} frames in data")
+        frame_idx = None
+        for i, fid in enumerate(frame_ids):
+            if fid == frame_number:
+                frame_idx = i
+                break
+        if frame_idx is None:
+            print(
+                f"  Error: Frame {frame_number} not found in meata_data.npz for all key points"
+            )
+            print(f"  Available frames: {frame_ids[:10]}...")  # Show first 10
+            return None
+        print(f"  Found frame {frame_number} at index {frame_idx}")
+
+        # Expect ragged storage for obj_key_points
+        required_keys = [
+            "obj_key_points_data",
+            "obj_key_points_offsets",
+            "obj_key_points_lengths",
+        ]
+        missing_keys = [k for k in required_keys if k not in data]
+        if missing_keys:
+            print(f"  Error: Missing keys in meata_data.npz: {missing_keys}")
+            print(
+                f"  Available keys containing 'obj_key': {[k for k in data.keys() if 'obj_key' in k]}"
+            )
+            return None
+        offsets = data["obj_key_points_offsets"]
+        lengths = data["obj_key_points_lengths"]
+        flat = data["obj_key_points_data"]
+        print(f"  obj_key_points_data shape: {flat.shape}")
+        print(f"  obj_key_points_offsets length: {len(offsets)}")
+        print(f"  obj_key_points_lengths length: {len(lengths)}")
+
+        if frame_idx >= len(offsets):
+            print(f"  Error: frame_idx ({frame_idx}) >= len(offsets) ({len(offsets)})")
+            return None
+        start_idx = int(offsets[frame_idx])
+        end_idx = start_idx + int(lengths[frame_idx])
+        print(
+            f"  Extracting keypoints from index {start_idx} to {end_idx} (length: {lengths[frame_idx]})"
+        )
+        pts_flat = flat[start_idx:end_idx]
+        if len(pts_flat) % 3 != 0:
+            print(f"  Error: obj_key_points length {len(pts_flat)} not divisible by 3")
+            return None
+        pts = pts_flat.reshape(-1, 3)
+        print(f"  Reshaped to {pts.shape} points")
+
+        # Check for NaN in input points
+        if np.any(np.isnan(pts)):
+            nan_count = np.sum(np.isnan(pts).any(axis=1))
+            print(f"  Warning: Found {nan_count} points with NaN values in raw data")
+            # Filter out NaN points
+            valid_mask = ~np.isnan(pts).any(axis=1)
+            pts = pts[valid_mask]
+            print(f"  Filtered to {len(pts)} valid points")
+
+        # Transform to current frame using obj_pose if available
+        # obj_key_points are stored in the first frame coordinate system
+        # obj_pose transforms from first frame to current frame
+        if "obj_pose" in data:
+            obj_pose = data["obj_pose"][frame_idx]
+            print(f"  Applying obj_pose transformation (shape: {obj_pose.shape})")
+
+            # Check if pose matrix is valid
+            if np.any(np.isnan(obj_pose)) or np.any(np.isinf(obj_pose)):
+                print(
+                    f"  Error: obj_pose contains NaN or Inf values, skipping transformation"
+                )
+                print(f"  obj_pose:\n{obj_pose}")
+            else:
+                # Transform to homogeneous coordinates
+                pts_h = np.hstack([pts, np.ones((len(pts), 1))])
+                # Apply transformation: obj_pose transforms points from frame 0 to current frame
+                pts_transformed_homo = (obj_pose @ pts_h.T).T
+                # Convert back to 3D coordinates
+                pts = pts_transformed_homo[:, :3]
+
+                # Check for NaN after transformation and filter them out
+                if np.any(np.isnan(pts)):
+                    nan_count = np.sum(np.isnan(pts).any(axis=1))
+                    print(
+                        f"  Warning: Found {nan_count} points with NaN after transformation"
+                    )
+                    valid_mask = ~np.isnan(pts).any(axis=1)
+                    pts = pts[valid_mask]
+                    print(f"  Filtered to {len(pts)} valid points after transformation")
+                else:
+                    print(f"  Transformed points to current frame successfully")
+        else:
+            print(f"  Warning: obj_pose not found, using points without transformation")
+
+        print(f"  Returning {len(pts)} keypoints")
+        if len(pts) > 0:
+            print(
+                f"  Final keypoints range: x=[{pts[:, 0].min():.3f}, {pts[:, 0].max():.3f}], y=[{pts[:, 1].min():.3f}, {pts[:, 1].max():.3f}], z=[{pts[:, 2].min():.3f}, {pts[:, 2].max():.3f}]"
+            )
+        return pts
+    except (IOError, ValueError, KeyError) as e:
+        print(f"Error loading all key points: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return None
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Interactive point cloud visualization for debug/register folder"
@@ -707,6 +969,14 @@ if __name__ == "__main__":
         "--visualize_correspondence",
         "-c",
         help="visualize correspondence points with colored lines connecting them",
+        default=False,
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--show_all_keypoints",
+        "-akp",
+        help="when visualizing correspondences, also plot all object key points from meta_data as grey",
         default=False,
         action="store_true",
     )

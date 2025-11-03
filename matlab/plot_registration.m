@@ -8,12 +8,15 @@ frame_id  = getfield(D.fixed, 'frame_id');     %#ok<GFLD>
 timestamp = getfield(D.fixed, 'timestamp');    %#ok<GFLD>
 
 
-i = 25;
+i = 209;
 
 reg_key_points =  D.helpers.regroup_triples(D.ragged.reg_key_points);
 cur3d =  D.helpers.regroup_triples(D.ragged.reg_curr3d);
 track3d = D.helpers.regroup_triples(D.ragged.track3d);
 
+uncertainty_i = D.ragged.uncertainties{i};
+reg_key_points_idx_i = D.ragged.reg_key_points_idx{i};
+reg_uncertainty = uncertainty_i(reg_key_points_idx_i);
 reg_key_points_i = reg_key_points{i};
 cur3d_i = cur3d{i};
 track3d_i = track3d{i};
@@ -45,7 +48,7 @@ residuals_i = D.ragged.reg_residuals{i};
 residuals_inlier_i = residuals_i(inlier_i);
 world_pose_i = reshape(D.fixed.obj_pose(i,:,:),4,4);
 init_pose = reshape(D.fixed.obj_init_pose(i,:,:),4,4);
-pose_i = world_pose_i /init_pose;
+pose_i = world_pose_i;
 
 track2d_xy = D.helpers.regroup_pairs(D.ragged.track2d);
 

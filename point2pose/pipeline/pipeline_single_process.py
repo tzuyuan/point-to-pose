@@ -756,15 +756,12 @@ class PipelineSingleProcess:
             if (
                 omega_norm > 0.1
                 and v_norm > 1
-                and self.objects[obj_id].mean_residual > 0.07
+                and self.objects[obj_id].mean_residual > 0.05
             ):
                 continue
 
             ## TODO: make crit_ctx to be object-specific?
-            if (
-                self.criterion.check_sample_criterion(self.crit_ctx, obj_id)
-                and self.objects[obj_id].mean_residual < 0.07
-            ):
+            if self.criterion.check_sample_criterion(self.crit_ctx, obj_id):
                 self.is_key_frame[obj_id] = True
                 # Sample points
                 new_sampled_points = self.sampler.sample(samp_context, obj_id)
