@@ -751,14 +751,17 @@ class PipelineSingleProcess:
         for obj_id in range(self.num_obj):
             ## Temp outlier rejection
             ## TODO: make outlier rejection better organized
-            omega_norm = np.linalg.norm(self.objects[obj_id].omega)
-            v_norm = np.linalg.norm(self.objects[obj_id].v)
-            if (
-                omega_norm > 0.1
-                and v_norm > 1
-                and self.objects[obj_id].mean_residual > 0.05
-            ):
-                continue
+            # if self.objects[obj_id].omega is None or self.objects[obj_id].v is None:
+            #     continue
+
+            # omega_norm = np.linalg.norm(self.objects[obj_id].omega)
+            # v_norm = np.linalg.norm(self.objects[obj_id].v)
+            # if (
+            #     omega_norm > 0.1
+            #     and v_norm > 1
+            #     and self.objects[obj_id].mean_residual > 0.05
+            # ):
+            #     continue
 
             ## TODO: make crit_ctx to be object-specific?
             if self.criterion.check_sample_criterion(self.crit_ctx, obj_id):
