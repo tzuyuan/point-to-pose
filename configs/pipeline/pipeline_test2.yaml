@@ -50,8 +50,8 @@ segmenter:
 tracker:
   type: tapir
   params:
-    resize_height: 256
-    resize_width: 256
+    resize_height: 640
+    resize_width: 640
     device: cuda
     checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
  
@@ -67,17 +67,17 @@ tracker:
   #   v2: False  # keep False unless you specifically use v2 weights
   #   checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
 sampler: 
-  type: uniform_fps
+  type: random
   params:
-    num_points: 15
+    num_points: 20
     density_per_kpx: -1
 
     min_points: 5
     max_points: 50
-    edge_margin_px: 5
+    edge_margin_px: 10
     remove_convex_hull: False
-    inflate_points: True
-    inflate_radius_px: 10
+    inflate_points: False
+    inflate_radius_px: 20
 
 
     cell_size: 30
@@ -126,6 +126,6 @@ visualization:
   params:
     visualize_points: true
     # uncertainty, visible, visible_uncertainty, frame_id
-    points_vis_method: frame_id
+    points_vis_method: visible_uncertainty
     save_images: True
     output_image_dir: /home/justin/code/point-to-pose/debug/output_images
