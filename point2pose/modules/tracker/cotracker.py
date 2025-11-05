@@ -101,7 +101,7 @@ class CoTrackerRealtimeTracker(Tracker):
                 self._window_frames.append(rgb_resize_tensor)
 
             with torch.no_grad():
-                predictions, visibles = self._process_step_queries(
+                predictions, uncertainties, visibles = self._process_step_queries(
                     self._window_frames,
                     is_first_step=True,
                     queries=self._new_query_points[None],
@@ -113,7 +113,7 @@ class CoTrackerRealtimeTracker(Tracker):
             self._window_frames.append(rgb_resize_tensor)
 
             with torch.no_grad():
-                predictions, visibles = self._process_step_queries(
+                predictions, uncertainties, visibles = self._process_step_queries(
                     self._window_frames,
                     is_first_step=False,
                     queries=self._new_query_points[None],
@@ -122,10 +122,12 @@ class CoTrackerRealtimeTracker(Tracker):
                 self._need_commit = False
         if predictions is not None and visibles is not None:
             print("predictions: ", predictions.shape)
+            print("uncertainties: ", uncertainties.shape)
+            print("uncertainties: ", uncertainties)
             print("visibles: ", visibles.shape)
             return (
                 predictions.squeeze(0).cpu().numpy()[-1, :, :],
-                0.1 * np.ones((visibles.shape[-1])),
+                uncertainties.squeeze(0).cpu().numpy()[-1, :],
                 visibles.squeeze(0).cpu().numpy()[-1, :],
             )
         else:

@@ -460,7 +460,7 @@ class PipelineSingleProcess:
                             track_valid,
                             uncertainties,
                             frame.mask[obj_id, 0],
-                            uncertainty_thres=0.6,
+                            uncertainty_thres=0.1,
                         )
                     )
                     self.track_table.visible = new_visibles

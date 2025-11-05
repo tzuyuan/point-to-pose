@@ -279,7 +279,7 @@ class CoTrackerOnlinePredictor(torch.nn.Module):
                 )
 
             self.queries = queries
-            return (None, None)
+            return (None, None, None)
 
         if (queries is not None) and (queries.numel() > 0):
             q_new = queries.clone()
@@ -334,5 +334,6 @@ class CoTrackerOnlinePredictor(torch.nn.Module):
                     (H - 1) / (self.interp_shape[0] - 1),
                 ]
             ),
+            1 - confidence,
             visibilities > thr,
         )

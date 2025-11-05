@@ -309,8 +309,6 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
             if N > N_old:
                 self._ensure_capacity_for_new_N(N)
 
-        print("query frames: ", queries[0, :, 0])
-        print("online ind: ", self.online_ind)
         # B = batch size
         # S_trimmed = actual number of frames in the window
         # N = number of tracks
@@ -436,60 +434,12 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
                 sample_frames = queried_frames[:, None, :, None]  # B 1 N 1
                 # Mask is True only for points whose initial frame is the current start of the window.
                 # This ensures each point's feature is computed and committed once.
+
+                ## TODO: fix this
                 if self.online_ind == 0:
                     sample_mask = sample_frames == 0
                 else:
                     sample_mask = sample_frames == self.online_ind + 15
-                # sample_mask = sample_frames == self.online_ind
-
-            # print("queried_frames: ", queried_frames)
-            # print("self.online_ind: ", self.online_ind)
-            # print("step: ", step)
-            # print("S: ", S)
-            # print("left: ", left)
-            # print("right: ", right)
-            # print("sample_mask: ", sample_mask)
-
-        # for i in range(self.corr_levels):
-        #     track_feat, track_feat_support = self.get_track_feat(
-        #         fmaps_pyramid[i],
-        #         queried_frames - self.online_ind if is_online else queried_frames,
-        #         queried_coords / 2**i,
-        #         support_radius=self.corr_radius,
-        #     )
-
-        #     if is_online:
-        #         # 1) Initialize caches the first time
-        #         if self.online_track_feat[i] is None:
-        #             self.online_track_feat[i] = torch.zeros_like(
-        #                 track_feat, device=device
-        #             )
-        #             self.online_track_support[i] = torch.zeros_like(
-        #                 track_feat_support, device=device
-        #             )
-
-        #         # 2) Ensure capacity for new N (DO THIS EVEN IF NOT None)
-        #         if self.online_track_feat[i].size(1) < N:
-        #             self.online_track_feat[i] = self._pad_N(
-        #                 self.online_track_feat[i], N, dimN=1, fill=0.0
-        #             )
-        #             self.online_track_support[i] = self._pad_N(
-        #                 self.online_track_support[i], N, dimN=1, fill=0.0
-        #             )
-
-        #         # 3) Accumulate only for frames inside current window
-        #         self.online_track_feat[i] += track_feat * sample_mask
-        #         self.online_track_support[i] += track_feat_support * sample_mask
-
-        #         track_feat_pyramid.append(
-        #             self.online_track_feat[i].repeat(1, T_pad, 1, 1)
-        #         )
-        #         track_feat_support_pyramid.append(
-        #             self.online_track_support[i].unsqueeze(1)
-        #         )
-        #     else:
-        #         track_feat_pyramid.append(track_feat.repeat(1, T_pad, 1, 1))
-        #         track_feat_support_pyramid.append(track_feat_support.unsqueeze(1))
 
         for i in range(self.corr_levels):
             track_feat, track_feat_support = self.get_track_feat(
@@ -584,14 +534,9 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
                 conf_init = torch.where(
                     copy_over.expand_as(conf_init), conf_prev, conf_init
                 )
-            print("ind: ", ind)
-            print("self.online_ind: ", self.online_ind)
-            print("ind + S: ", ind + S)
-            print("queried_frames: ", queried_frames)
+
             attention_mask = (queried_frames < ind + S).reshape(B, 1, N)  # B S N
-            print("coords_predicted: ", coords_predicted.shape)
-            print("vis_predicted: ", vis_predicted.shape)
-            print("conf_predicted: ", conf_predicted.shape)
+
             # import ipdb; ipdb.set_trace()
             coords, viss, confs = self.forward_window(
                 fmaps_pyramid=(
@@ -613,7 +558,6 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
             S_trimmed = (
                 T if is_online else min(T - ind, S)
             )  # accounts for last window duration
-            print(coords[-1].shape, S_trimmed)
             coords_predicted[:, ind : ind + S] = coords[-1][:, :S_trimmed]
             vis_predicted[:, ind : ind + S] = viss[-1][:, :S_trimmed]
             conf_predicted[:, ind : ind + S] = confs[-1][:, :S_trimmed]
@@ -680,9 +624,6 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
         self.online_conf_predicted = self._pad_N(
             self.online_conf_predicted, N_new, dimN=2, fill=0.0
         )
-        print("padded online coords predicted: ", self.online_coords_predicted.shape)
-        print("padded online vis predicted: ", self.online_vis_predicted.shape)
-        print("padded online conf predicted: ", self.online_conf_predicted.shape)
         # per-level caches:
         #   online_track_feat[i]    ~ (B, N, latent_dim)
         #   online_track_support[i] ~ (B, N, (2r+1)^2, latent_dim)

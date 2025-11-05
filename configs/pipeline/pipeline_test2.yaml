@@ -70,13 +70,13 @@ tracker:
 sampler: 
   type: uniform_fps
   params:
-    num_points: 10
+    num_points: 15
     density_per_kpx: -1
 
     min_points: 5
     max_points: 50
     edge_margin_px: 10
-    remove_convex_hull: False
+    remove_convex_hull: false
     inflate_points: False
     inflate_radius_px: 20
 
