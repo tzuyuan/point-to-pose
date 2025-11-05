@@ -213,4 +213,5 @@ __marimo__/
 /data
 /debug
 /debug_temp
-/third_party
+/third_party/depth_anything_v2/
+/third_party/depth_anything_v2_metric/

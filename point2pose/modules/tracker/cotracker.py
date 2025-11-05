@@ -64,6 +64,9 @@ class CoTrackerRealtimeTracker(Tracker):
         self._new_query_points = new_query_points
         self._need_commit = True
 
+        print("new query points: ", new_query_points[:, 0])
+        print("_new query points: ", self._new_query_points[:, 0])
+
         print(f"Added {new_query_points.shape[0]} query points")
         print(f"Total query points: {self._query_points.shape[0]}")
         print(
@@ -91,6 +94,7 @@ class CoTrackerRealtimeTracker(Tracker):
 
         predictions = None
         visibles = None
+        print("need commit: ", self._need_commit)
         # we copy the first window_len frames to the window_frames deque
         if self._is_first_frame:
             for i in range(self._model.model.window_len):
@@ -172,8 +176,8 @@ class CoTrackerRealtimeTracker(Tracker):
         points = np.stack(points)
         query_points = np.zeros(shape=(points.shape[0], 3), dtype=np.float32)
         query_points[:, 0] = frame_id
-        query_points[:, 1] = points[:, 0] / self._img_height * self._resize_height
-        query_points[:, 2] = points[:, 1] / self._img_width * self._resize_width
+        query_points[:, 1] = points[:, 0] / self._img_width * self._resize_width
+        query_points[:, 2] = points[:, 1] / self._img_height * self._resize_height
         return query_points
 
     def _convert_track_to_image_points(self, tracks):

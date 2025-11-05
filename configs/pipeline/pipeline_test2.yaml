@@ -127,6 +127,6 @@ visualization:
   params:
     visualize_points: true
     # uncertainty, visible, visible_uncertainty, frame_id
-    points_vis_method: visible_uncertainty
+    points_vis_method: frame_id
     save_images: True
     output_image_dir: /home/justin/code/point-to-pose/debug/output_images
