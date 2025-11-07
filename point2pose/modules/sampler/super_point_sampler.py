@@ -1,31 +1,31 @@
 import numpy as np
 import cv2 as cv
+
 import torch
 from scipy.spatial import ConvexHull, QhullError
+
 
 from point2pose.core.base_sampler import Sampler
 from point2pose.core.module_registry import SAMPLER
 from point2pose.data_types.sampler_context import SamplerContext
 
 
-@SAMPLER.register_module("orb")
-class ORBSampler(Sampler):
+@SAMPLER.register_module("super_point")
+class SuperPointSampler(Sampler):
     def __init__(self, config):
         super().__init__(config)
         self.num_points = int(config.get("num_points", 200))
         self.boundary_margin = int(config.get("edge_margin_px", 5))  # square (L∞) px
         self.cell_size = int(config.get("cell_size", 8))  # one-per-cell
         self.remove_convex_hull = bool(config.get("remove_convex_hull", True))
-        # self.orb_detector = cv.ORB_create(nfeatures=int(config.get("nfeatures", 1000)))
-        self.orb_detector = cv.ORB_create(
-            nfeatures=10000,
-            scaleFactor=1.1,
-            nlevels=12,
-            edgeThreshold=5,
-            patchSize=31,
-            fastThreshold=2,
+        self.device = config.get("device", "cuda")
+
+        from lightglue import SuperPoint
+
+        self.super_point_extractor = (
+            SuperPoint(max_num_keypoints=4096).eval().to(self.device)
         )
-        # if True, compute hull only once per object (you can change this policy)
+        # if True, compute hull only once per object
         self.compute_hull_once = bool(config.get("compute_hull_once", False))
         self._initialized_obj_ids = set()
 
@@ -46,7 +46,7 @@ class ORBSampler(Sampler):
         else:
             mask_inner = mask_u8
 
-        # --- 3) Optional: subtract convex hull of existing points (in-mask)
+        # --- 3) subtract convex hull of existing points (in-mask)
         hull_xy = getattr(frame, "convex_hull_xy", None)
         need_fit = (
             (hull_xy is None)
@@ -64,73 +64,86 @@ class ORBSampler(Sampler):
         if self.remove_convex_hull and hull_xy is not None and len(hull_xy) >= 3:
             detect_mask = self.subtract_convex_hull(mask_inner, hull_xy)  # uint8 0/255
 
-        # Early out if nothing left to detect
-        if detect_mask.max() == 0:
+        # --- 4) SuperPoint
+        rgb_tensor = torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).to(self.device)
+        feats = self.super_point_extractor.extract(rgb_tensor)  # returns dict
+        # Tensors -> numpy
+        kps_xy = feats["keypoints"]  # (N, 2) in (x, y) pixel coords
+        kp_sc = feats["keypoint_scores"]  # (N,)
+        desc = feats.get("descriptors", None)  # (N, D) or None
+
+        # Move to CPU numpy
+        if torch.is_tensor(kps_xy):
+            kps_xy = kps_xy.detach().cpu().numpy()
+        if torch.is_tensor(kp_sc):
+            kp_sc = kp_sc.detach().cpu().numpy()
+        if desc is not None and torch.is_tensor(desc):
+            desc = desc.detach().cpu().numpy()
+
+        if kps_xy is None or kp_sc is None or kps_xy.shape[0] == 0:
             if self.debug_level >= 1:
-                print(
-                    f"[ORB Sampler] Detect mask empty after boundary/hull (obj {obj_id})"
-                )
+                print(f"[SuperPoint] No keypoints for object {obj_id}")
                 self._viz_hull(rgb, mask_inner, hull_xy, detect_mask, frame.id, obj_id)
             return np.empty((0, 2), dtype=np.int32), None
 
-        # --- 4) ORB detect+compute with the correct detect_mask
-        gray = cv.cvtColor(rgb, cv.COLOR_RGB2GRAY)
-        kps, des = self.orb_detector.detectAndCompute(gray, detect_mask)
-
-        if not kps or des is None or len(kps) == 0:
-            if self.debug_level >= 1:
-                print(f"[ORB Sampler] No ORB keypoints for object {obj_id}")
-                self._viz_hull(rgb, mask_inner, hull_xy, detect_mask, frame.id, obj_id)
-            return np.empty((0, 2), dtype=np.int32), None
-
-        # --- 5) To arrays + sanity filter still inside detect_mask (cheap safety)
-        pts_xy = np.array([kp.pt for kp in kps], dtype=np.float32)
-        pts_xy_int = np.round(pts_xy).astype(np.int32)
-        responses = np.array([kp.response for kp in kps], dtype=np.float32)
-
+        # --- 5) Mask filtering (keep only points inside detect_mask)
+        pts_xy_int = np.round(kps_xy).astype(np.int32)
         x = np.clip(pts_xy_int[:, 0], 0, W - 1)
         y = np.clip(pts_xy_int[:, 1], 0, H - 1)
         inside = detect_mask[y, x] > 0
 
+        kps_xy = kps_xy[inside]
+        kp_sc = kp_sc[inside]
         pts_xy_int = pts_xy_int[inside]
-        responses = responses[inside]
-        des = des[inside] if des is not None else None
+        if desc is not None:
+            desc = desc[inside]
 
         if pts_xy_int.shape[0] == 0:
             if self.debug_level >= 1:
                 print(
-                    f"[ORB Sampler] All keypoints filtered out by detect_mask (obj {obj_id})"
+                    f"[SuperPoint] All keypoints filtered out by detect_mask (obj {obj_id})"
                 )
                 self._viz_hull(rgb, mask_inner, hull_xy, detect_mask, frame.id, obj_id)
             return np.empty((0, 2), dtype=np.int32), None
 
-        # --- 6) One-per-square grid rejection (new-new spacing)
-        order = np.argsort(-responses)  # strongest first
-        pts_xy_int = pts_xy_int[order]
-        des = des[order] if des is not None else None
+        # --- 6) Top-N by score (descending)
+        n_keep = min(self.num_points, kp_sc.shape[0])
+        # argpartition is O(N); then sort that slice to keep true ordering by score
+        top_idx = np.argpartition(-kp_sc, n_keep - 1)[:n_keep]
+        top_idx = top_idx[np.argsort(-kp_sc[top_idx])]
 
-        occupied = set()
-        keep_idx = []
-        for j, (xj, yj) in enumerate(pts_xy_int):
-            cx, cy = int(xj) // self.cell_size, int(yj) // self.cell_size
-            if (cx, cy) in occupied:
-                continue
-            occupied.add((cx, cy))
-            keep_idx.append(j)
-            if len(keep_idx) >= self.num_points:
-                break
+        pts_xy_int = pts_xy_int[top_idx]
+        if desc is not None:
+            desc = desc[top_idx]
 
-        if len(keep_idx) == 0:
-            if self.debug_level >= 1:
-                print(
-                    f"[ORB Sampler] No keypoints survived grid rejection (obj {obj_id})"
-                )
-                self._viz_hull(rgb, mask_inner, hull_xy, detect_mask, frame.id, obj_id)
-            return np.empty((0, 2), dtype=np.int32), None
+        # OPTIONAL: if you still want "one-per-cell" spacing, run it AFTER top-N:
+        if self.cell_size > 1:
+            occupied = set()
+            keep_idx = []
+            for j, (xj, yj) in enumerate(pts_xy_int):
+                cx, cy = int(xj) // self.cell_size, int(yj) // self.cell_size
+                if (cx, cy) in occupied:
+                    continue
+                occupied.add((cx, cy))
+                keep_idx.append(j)
+                if len(keep_idx) >= self.num_points:
+                    break
+            if len(keep_idx) == 0:
+                if self.debug_level >= 1:
+                    print(
+                        f"[SuperPoint] No keypoints survived grid rejection (obj {obj_id})"
+                    )
+                    self._viz_hull(
+                        rgb, mask_inner, hull_xy, detect_mask, frame.id, obj_id
+                    )
+                return np.empty((0, 2), dtype=np.int32), None
+            keep_idx = np.asarray(keep_idx, dtype=np.int32)
+            pts_xy_int = pts_xy_int[keep_idx]
+            if desc is not None:
+                desc = desc[keep_idx]
 
-        keep_idx = np.asarray(keep_idx, dtype=np.int32)
-        sel_pts = pts_xy_int[keep_idx]
-        sel_des = des[keep_idx] if des is not None else None
+        sel_pts = pts_xy_int  # (M,2) int
+        sel_des = desc  # (M,D) or None
 
         # --- 7) Debug viz
         if self.debug_level >= 1:

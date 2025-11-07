@@ -435,11 +435,11 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
                 # Mask is True only for points whose initial frame is the current start of the window.
                 # This ensures each point's feature is computed and committed once.
 
-                ## TODO: fix this
+                ## TODO: make it better
                 if self.online_ind == 0:
                     sample_mask = sample_frames == 0
                 else:
-                    sample_mask = sample_frames == self.online_ind + 15
+                    sample_mask = sample_frames == self.online_ind + S - 1
 
         for i in range(self.corr_levels):
             track_feat, track_feat_support = self.get_track_feat(
@@ -469,20 +469,6 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
 
                 self.online_track_feat[i] += track_feat * sample_mask
                 self.online_track_support[i] += track_feat_support * sample_mask
-
-                # self.online_track_feat[i] = torch.where(
-                #     sample_mask.expand_as(self.online_track_feat[i]),
-                #     track_feat,
-                #     self.online_track_feat[i],
-                # )
-                # # track_feat_support shape is (B, R*R, N, D), mask needs expansion/broadcasting
-                # mask_for_support = sample_mask.unsqueeze(2).expand_as(
-                #     track_feat_support
-                # )
-
-                # self.online_track_support[i] = torch.where(
-                #     mask_for_support, track_feat_support, self.online_track_support[i]
-                # )
 
                 track_feat_pyramid.append(
                     self.online_track_feat[i].repeat(1, T_pad, 1, 1)
@@ -624,9 +610,11 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
         self.online_conf_predicted = self._pad_N(
             self.online_conf_predicted, N_new, dimN=2, fill=0.0
         )
+
         # per-level caches:
         #   online_track_feat[i]    ~ (B, N, latent_dim)
         #   online_track_support[i] ~ (B, N, (2r+1)^2, latent_dim)
+
         for i in range(self.corr_levels):
             self.online_track_feat[i] = self._pad_N(
                 self.online_track_feat[i], N_new, dimN=2, fill=0.0
