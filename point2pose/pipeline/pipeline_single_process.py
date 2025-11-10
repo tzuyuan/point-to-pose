@@ -31,6 +31,7 @@ from point2pose.data_types.sampler_context import SamplerContext
 from point2pose.data_types.point_track_table import PointTrackTable
 from point2pose.data_types.object_frame_data import ObjectFrameData
 from point2pose.modules.object.object import Object
+from point2pose.modules.segmenter.dummy_segmenter import DummySegmenter
 from point2pose.modules.optimizer.isam2_optimizer import ISAM2Optimizer
 from point2pose.data_types.optimizer_result import OptimizerResult
 from point2pose.io.outputs.logger import DataLogger
@@ -60,6 +61,9 @@ class PipelineSingleProcess:
         # Registration statistics logging
         self.reg_stats_log = None
         self.reg_stats_log_path = None
+
+        ### NOTE: if not using segmenter, we assume the mask is already in frame.mask
+        self.use_segmenter = self.pipeline_cfg.get("use_segmenter", True)
 
         if self.debug_level > 0 and self.debug_dir is not None:
             os.makedirs(self.debug_dir, exist_ok=True)
@@ -99,7 +103,11 @@ class PipelineSingleProcess:
             os.makedirs(self.key_points_save_path, exist_ok=True)
 
         self.register = build_from_cfg(cfg.register, REGISTER)
-        self.segmenter = build_from_cfg(cfg.segmenter, SEGMENTER)
+        if self.use_segmenter:
+            self.segmenter = build_from_cfg(cfg.segmenter, SEGMENTER)
+        else:
+            self.segmenter = DummySegmenter(cfg.segmenter)
+
         self.tracker = build_from_cfg(cfg.tracker, TRACKER)
         # self.state = build_from_cfg(cfg.state, STATE)
         self.criterion = build_from_cfg(cfg.criterion, CRITERION)
@@ -215,12 +223,16 @@ class PipelineSingleProcess:
         # ------------- segmentation -------------
         self.segmenter.initialize(frame.rgb)
 
-        # get number of objects
-        self.num_obj = np.sum(np.asarray(self.segmenter.input_labels) == 1)
+        ## TODO: fix this for multiple objects in dataset
+        if self.use_segmenter:
+            # get number of objects
+            self.num_obj = np.sum(np.asarray(self.segmenter.input_labels) == 1)
 
-        # get segmentation mask
-        obj_ids, mask_logits = self.segmenter.segment(frame.rgb)
-        frame.mask = mask_logits
+            # get segmentation mask
+            obj_ids, mask_logits = self.segmenter.segment(frame.rgb)
+            frame.mask = mask_logits
+        else:
+            self.num_obj = 1
 
         self.samp_ctx.frame = frame
 
@@ -376,8 +388,12 @@ class PipelineSingleProcess:
 
         # ------------- segmenter -------------
         segmenter_start = time.time()
-        _, mask_logits = self.segmenter.segment(frame.rgb)
-        frame.mask = mask_logits  # mask is a torch tensor on gpu
+
+        ### NOTE: if not using segmenter, we assume the mask is already in frame.mask
+        if self.use_segmenter:
+            _, mask_logits = self.segmenter.segment(frame.rgb)
+            frame.mask = mask_logits  # mask is a torch tensor on gpu
+
         segmenter_time = time.time() - segmenter_start
         print(f"Frame {self.frame_id} - Segmentation: {segmenter_time:.4f}s")
 

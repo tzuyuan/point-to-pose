@@ -215,3 +215,6 @@ __marimo__/
 /debug_temp
 /third_party/depth_anything_v2/
 /third_party/depth_anything_v2_metric/
+/results/
+
+.vscode/

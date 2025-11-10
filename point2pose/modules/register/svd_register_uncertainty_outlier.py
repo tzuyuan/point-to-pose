@@ -15,7 +15,7 @@ class SVDUncertaintyOutlierRegister(Register):
     def __init__(self, config=None):
         super().__init__(config or {})
 
-        self.type = "svd_uncertainty_robust"
+        self.type = "svd_uncertainty_outlier"
 
         # --- iteration / gating
         self._max_iter = int(config.get("max_iter", 10))
@@ -108,10 +108,11 @@ class SVDUncertaintyOutlierRegister(Register):
                 trim_mask[keep_idx] = True
 
             # final mask = previous inliers (start as all True), trimmed, positive weights
-            new_mask = (trim_mask) & (robust_w > 1e-12)
-            if new_mask.sum() < self._min_inliers and self._enforce_trim_floor:
-                # fall back to no trimming if it got too aggressive
-                new_mask = robust_w > 1e-12
+            new_mask = trim_mask
+            # new_mask = (trim_mask) & (robust_w > 1e-12)
+            # if new_mask.sum() < self._min_inliers and self._enforce_trim_floor:
+            #     # fall back to no trimming if it got too aggressive
+            #     new_mask = robust_w > 1e-12
 
             # spatial degeneracy check (avoid collinear/near-planar collapse without spread)
             if new_mask.sum() >= self._min_inliers:

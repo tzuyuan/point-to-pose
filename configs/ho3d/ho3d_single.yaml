@@ -1,6 +1,3 @@
-realsense:
-  params:
-    rs_serial: 941322070969
 
 
 pipeline:
@@ -9,7 +6,8 @@ pipeline:
     estimate_init_pose: true
     frame_to_map_reg: true
 
-
+    use_segmenter: false
+    
     use_depth_estimate: false
     depth_estimator_type: depth_anything
     device: cuda

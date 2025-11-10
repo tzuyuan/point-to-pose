@@ -58,7 +58,6 @@ class RealSensePipelineTracker:
 
         # Initialize pipeline
         # self.pipeline = Pipeline(self.cfg)
-        self.pipeline = PipelineSingleProcess(self.cfg)
 
         # Initialize RealSense camera
         self._init_realsense(rs_serial)
@@ -75,8 +74,11 @@ class RealSensePipelineTracker:
         self._frame_color_used_hsv = set()
 
         # Create window and set mouse callback
+        cv2.startWindowThread()
         cv2.namedWindow("RealSense Pipeline Tracker", cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback("RealSense Pipeline Tracker", self.mouse_callback)
+
+        self.pipeline = PipelineSingleProcess(self.cfg)
 
         print("Instructions:")
         print("- Left click: Add positive point")
