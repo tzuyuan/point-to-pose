@@ -71,6 +71,9 @@ class PipelineSingleProcess:
             if not os.path.exists(self._reg_debug_dir):
                 os.makedirs(self._reg_debug_dir, exist_ok=True)
 
+        self.min_depth = self.pipeline_cfg.get("min_depth", 0.05)
+        self.max_depth = self.pipeline_cfg.get("max_depth", 1.0)
+
         # Cropped point cloud debug saving
         self.save_cropped_pcd = self.pipeline_cfg.get("save_cropped_pcd", False)
         self.cropped_pcd_dir = self.pipeline_cfg.get(
@@ -412,6 +415,8 @@ class PipelineSingleProcess:
                         depth_image=frame.depth,
                         cam_intrinsics=frame.intrinsics,
                         depth_factor=frame.depth_factor,
+                        min_depth=self.min_depth,
+                        max_depth=self.max_depth,
                     )
                     if world_pts.size == 0 or not np.any(valid):
                         continue
@@ -447,6 +452,8 @@ class PipelineSingleProcess:
             depth_image=frame.depth,
             cam_intrinsics=frame.intrinsics,
             depth_factor=frame.depth_factor,
+            min_depth=self.min_depth,
+            max_depth=self.max_depth,
         )
         conversion_time = time.time() - conversion_start
         print(
@@ -541,8 +548,11 @@ class PipelineSingleProcess:
 
                 # omega_norm = np.linalg.norm(xi_im1_i[:3])
                 # v_norm = np.linalg.norm(xi_im1_i[3:])
-                inliers = reg_stats["inliers"]
-                mean_residual = np.mean(reg_stats["residuals"][inliers])
+                inliers = reg_stats.get("inliers", np.array([]))
+                residuals = reg_stats.get("residuals", np.array([]))
+                mean_residual = (
+                    np.mean(residuals[inliers]) if len(inliers) > 0 else -1.0
+                )
                 self.objects[obj_id].omega = xi_im1_i[:3]
                 self.objects[obj_id].v = xi_im1_i[3:]
                 self.objects[obj_id].mean_residual = mean_residual

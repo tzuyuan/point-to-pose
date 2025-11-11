@@ -1,6 +1,9 @@
+import os
+
 import numpy as np
 import cv2
 import torch
+
 from point2pose.utils.transform import to_homo
 
 
@@ -178,3 +181,203 @@ def draw_xyz_axis(
         tmp = cv2.cvtColor(tmp, cv2.COLOR_BGR2RGB)
 
     return tmp
+
+
+def visualize_and_save_tracking_results(
+    frame,
+    objects,
+    track_table,
+    frame_id=None,
+    visualize_points=True,
+    points_vis_method="visible_uncertainty",
+    save_images=False,
+    output_image_dir=None,
+    camera_intrinsics=np.eye(3),
+    bbox_min_max=None,
+):
+    """
+    Visualize tracking results on the frame
+    TODO: make it more general by removing track_table dependency
+    """
+    display_frame = frame.rgb.copy()
+    display_frame = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
+
+    height, width = display_frame.shape[:2]
+
+    # Draw segmentation masks if available
+    if hasattr(frame, "mask") and frame.mask is not None:
+        mask_overlay = np.zeros((height, width, 3), dtype=np.uint8)
+        mask_overlay[..., 1] = 255  # Green base
+
+        for i in range(len(frame.mask)):
+            obj_mask = frame.mask[i, 0] > 0.0
+            ## TODO: optimize this by removing the cpu().numpy()
+            obj_mask = obj_mask.cpu().numpy()
+            if np.any(obj_mask):
+                # Color each object differently
+                hue = (i + 3) / (len(frame.mask) + 3) * 255
+                mask_overlay[obj_mask, 0] = hue
+                mask_overlay[obj_mask, 2] = 255
+
+        mask_overlay = cv2.cvtColor(mask_overlay, cv2.COLOR_HSV2BGR)
+        display_frame = cv2.addWeighted(display_frame, 1, mask_overlay, 0.5, 0)
+
+    if visualize_points:
+        if points_vis_method == "uncertainty":
+
+            for i, obj in enumerate(objects):
+                if i not in track_table.obj2track_map:
+                    continue
+
+                uncertainty_color = get_n_uncertainty_colors(
+                    track_table.uncertainty[track_table.obj2track_map[i]]
+                )
+                draw_points_on_image(
+                    display_frame,
+                    track_table.track_2d[track_table.obj2track_map[i]],
+                    uncertainty_color,
+                )
+        elif points_vis_method == "visible":
+            for i, obj in enumerate(objects):
+                if i not in track_table.obj2track_map:
+                    continue
+
+                # Generate N by 3 array with (0,255,0) for each row
+                track_2d_points = track_table.track_2d[track_table.obj2track_map[i]]
+                N = len(track_2d_points)
+                visible_color = np.full((N, 3), (0, 0, 255), dtype=np.uint8)
+                visible_color[track_table.visible[track_table.obj2track_map[i]]] = (
+                    0,
+                    255,
+                    0,
+                )
+                draw_points_on_image(
+                    display_frame,
+                    track_2d_points,
+                    visible_color,
+                )
+        elif points_vis_method == "visible_uncertainty":
+            # Plot only visible points, colored by their uncertainty colors
+            for i, obj in enumerate(objects):
+                if i not in track_table.obj2track_map:
+                    continue
+
+                track_idx = track_table.obj2track_map[i]
+                track_2d_points = track_table.track_2d[track_idx]
+                visible_mask = track_table.visible[track_idx]
+
+                if np.any(visible_mask):
+                    uncertainty_color = get_n_uncertainty_colors(
+                        track_table.uncertainty[track_idx]
+                    )
+
+                    draw_points_on_image(
+                        display_frame,
+                        track_2d_points[visible_mask],
+                        uncertainty_color[visible_mask],
+                    )
+        # elif points_vis_method == "frame_id":
+        #     # Color each point based on the frame id it was first seen (object.key_point_frames)
+        #     for i, obj in enumerate(objects):
+        #         if i not in track_table.obj2track_map:
+        #             continue
+
+        #         track_idx = track_table.obj2track_map[i]
+        #         track_2d_points = track_table.track_2d[track_idx]
+        #         visible_mask = track_table.visible[track_idx]
+
+        #         # Only proceed if there are visible points
+        #         if not np.any(visible_mask):
+        #             continue
+        #         if obj.key_point_frames.shape[0] == 0:
+        #             continue
+        #         # Align per-object track order with object's key point order
+        #         # Assume key_point_frames order corresponds to obj2track_map order
+        #         num_tracks_for_obj = len(track_idx)
+        #         kp_frames_for_obj = obj.key_point_frames[:num_tracks_for_obj].astype(
+        #             np.int32
+        #         )
+
+        #         # Frame ids for visible points; replace unknown -1 with current frame id if available
+        #         frame_ids = kp_frames_for_obj[visible_mask]
+        #         if frame_id is not None:
+        #             frame_ids = frame_ids.copy()
+        #             frame_ids[frame_ids == -1] = int(frame_id)
+
+        #         # Use cached, distinctive colors per frame id
+        #         colors_bgr = self._colors_for_frame_ids(frame_ids)
+
+        #         # Draw only visible points for this object, using aligned colors
+        #         draw_points_on_image(
+        #             display_frame,
+        #             track_2d_points[visible_mask],
+        #             colors_bgr,
+        #         )
+
+    # Draw pose information
+    for i, obj in enumerate(objects):
+        if obj.pose is not None:
+            pose = obj.pose @ obj.init_pose
+            if bbox_min_max is not None:
+                bbox_min_max_local = bbox_min_max
+            else:
+                half = 0.5 * np.asarray(obj.bbox.extent, dtype=float)
+                bbox_min_max_local = np.vstack([-half, +half])  # (2,3)
+
+            display_frame = draw_posed_3d_box(
+                camera_intrinsics,
+                display_frame,
+                pose,
+                bbox_min_max_local,
+            )
+            display_frame = draw_xyz_axis(
+                image=display_frame, ob_in_cam=pose, K=camera_intrinsics
+            )
+
+    # Save image if flag is enabled and frame_id is provided
+    if save_images and frame_id is not None:
+        image_filename = os.path.join(output_image_dir, f"frame_{frame_id:06d}.png")
+        cv2.imwrite(str(image_filename), display_frame)
+
+    return display_frame
+
+
+# def colors_for_frame_ids(frame_ids: np.ndarray) -> np.ndarray:
+#     """Return consistent BGR colors for the provided frame ids."""
+#     if frame_ids.size == 0:
+#         return np.empty((0, 3), dtype=np.uint8)
+
+#     colors = np.zeros((frame_ids.shape[0], 3), dtype=np.uint8)
+#     unique_ids = np.unique(frame_ids.astype(np.int64))
+
+#     for fid in unique_ids:
+#         fid_int = int(fid)
+#         if fid_int not in self._frame_color_lookup:
+#             self._frame_color_lookup[fid_int] = generate_next_frame_color()
+
+#         colors[frame_ids == fid] = self._frame_color_lookup[fid_int]
+
+#     return colors
+
+
+# def generate_next_frame_color():
+#     """Generate a new distinctive HSV-based color and convert it to BGR."""
+#     golden_ratio_conjugate = 0.6180339887498949
+#     base_index = len(self._frame_color_lookup)
+#     saturation_cycle = (255, 230, 200, 180)
+#     value_cycle = (255, 235, 215)
+
+#     attempt = 0
+#     while True:
+#         idx = base_index + attempt
+#         hue = int(round(((idx * golden_ratio_conjugate) % 1.0) * 179)) % 180
+#         saturation = saturation_cycle[idx % len(saturation_cycle)]
+#         value = value_cycle[(idx // len(saturation_cycle)) % len(value_cycle)]
+
+#         hsv_tuple = (hue, saturation, value)
+#         if hsv_tuple not in self._frame_color_used_hsv:
+#             self._frame_color_used_hsv.add(hsv_tuple)
+#             hsv = np.array([[[hue, saturation, value]]], dtype=np.uint8)
+#             return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0]
+
+#         attempt += 1

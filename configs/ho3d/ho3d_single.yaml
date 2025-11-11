@@ -4,16 +4,20 @@ pipeline:
   params:
     max_num_obj: 2
     estimate_init_pose: true
-    frame_to_map_reg: true
+    frame_to_map_reg: false
 
     use_segmenter: false
-    
+
+    # depth related
+    min_depth: 0.05
+    max_depth: 0.5
+
     use_depth_estimate: false
     depth_estimator_type: depth_anything
     device: cuda
     depth_encoder: vitl
 
-    use_graph_optimization: true
+    use_graph_optimization: false
 
     debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/
@@ -46,35 +50,35 @@ segmenter:
     device: cuda
 
 tracker:
-  # type: tapir
-  # params:
-  #   resize_height: 256
-  #   resize_width: 256
-  #   device: cuda
-  #   checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
+  type: tapir
+  params:
+    resize_height: 256
+    resize_width: 256
+    device: cuda
+    checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
  
   
-  type: cotracker3_online
-  params:
-    img_height: 480
-    img_width: 640
-    resize_height: 480
-    resize_width: 640
-    device: cuda
-    window_len: 16
-    v2: False  # keep False unless you specifically use v2 weights
-    checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
+  # type: cotracker3_online
+  # params:
+  #   img_height: 480
+  #   img_width: 640
+  #   resize_height: 480
+  #   resize_width: 640
+  #   device: cuda
+  #   window_len: 16
+  #   v2: False  # keep False unless you specifically use v2 weights
+  #   checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
 
 sampler: 
   type: super_point
   params:
-    num_points: 100
+    num_points: 10
     density_per_kpx: -1
 
     min_points: 5
     max_points: 50
-    edge_margin_px: 5
-    remove_convex_hull: true
+    edge_margin_px: 0
+    remove_convex_hull: false
     inflate_points: False
     inflate_radius_px: 20
 
@@ -95,7 +99,7 @@ criterion:
   ###      uncertainty_ratio, uncertainty_number, 
   ###      rotation_grid, rotation_threshold
   ###      mask_area
-  type: rotation_threshold
+  type: mask_area
   params:
     # iteration criterion
     update_per_iter: 1000000
@@ -111,7 +115,7 @@ criterion:
     discretization_angle: 60
 
     # rotation threshold criterion
-    max_angle_deg: 30
+    max_angle_deg: 10
 
     # mask area criterion
     fit_mode: convex
@@ -130,6 +134,6 @@ visualization:
   params:
     visualize_points: true
     # uncertainty, visible, visible_uncertainty, frame_id
-    points_vis_method: frame_id
+    points_vis_method: visible_uncertainty
     save_images: True
     output_image_dir: /home/justin/code/point-to-pose/debug/output_images

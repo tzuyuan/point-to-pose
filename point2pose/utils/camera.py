@@ -9,6 +9,7 @@ def convert_pixel_to_world(
     cam2world=np.eye(4),
     remove_invalid=False,
     min_depth=0.05,
+    max_depth=1.0,
 ):
     """
     Convert pixel coordinates to world coordinates with optional neighbor-based depth filling.
@@ -50,7 +51,7 @@ def convert_pixel_to_world(
     # Scale
     z = z_raw / float(depth_factor)
 
-    valid_depth = np.isfinite(z) & (z > min_depth)
+    valid_depth = np.isfinite(z) & (z > min_depth) & (z < max_depth)
 
     # Final validity mask
     valid = in_bounds & valid_depth & np.isfinite(z)
