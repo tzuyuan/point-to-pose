@@ -4,20 +4,23 @@ pipeline:
   params:
     max_num_obj: 2
     estimate_init_pose: true
-    frame_to_map_reg: false
+    frame_to_map_reg: true
 
     use_segmenter: false
 
     # depth related
+    fill_missing_depth: true
+    fill_missing_depth_window_size: 3
+    fill_missing_depth_min_neighbors: 1
     min_depth: 0.05
-    max_depth: 0.5
+    max_depth: 0.8
 
     use_depth_estimate: false
     depth_estimator_type: depth_anything
     device: cuda
     depth_encoder: vitl
 
-    use_graph_optimization: false
+    use_graph_optimization: true
 
     debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/
@@ -31,11 +34,12 @@ pipeline:
     cropped_pcd_dir: /home/justin/code/point-to-pose/debug/cropped_pcd
 
 register:
-  type: svd_uncertainty_outlier
+  type: svd_residual_outlier
   params:
-    remove_outside_mask: True
+    remove_outside_mask: true
     debug_level: 0
     max_iter: 5
+    uncer_thres: 0.3
     threshold_method: mad
     inlier_thres: 0.01
     thres_reduce_factor: 0.005
@@ -72,12 +76,12 @@ tracker:
 sampler: 
   type: super_point
   params:
-    num_points: 10
+    num_points: 20
     density_per_kpx: -1
 
     min_points: 5
     max_points: 50
-    edge_margin_px: 0
+    edge_margin_px: 3
     remove_convex_hull: false
     inflate_points: False
     inflate_radius_px: 20
@@ -99,7 +103,7 @@ criterion:
   ###      uncertainty_ratio, uncertainty_number, 
   ###      rotation_grid, rotation_threshold
   ###      mask_area
-  type: mask_area
+  type: rotation_threshold
   params:
     # iteration criterion
     update_per_iter: 1000000

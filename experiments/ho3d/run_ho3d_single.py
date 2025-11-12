@@ -6,11 +6,9 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 
 import os
-import glob
 import argparse
 
 import cv2
-import time
 from omegaconf import OmegaConf
 import torch
 import numpy as np
@@ -18,7 +16,18 @@ import numpy as np
 from point2pose.io.sources.dataset.datareader import Ho3dReader
 from point2pose.pipeline.pipeline_single_process import PipelineSingleProcess
 from point2pose.data_types.frame import Frame
+from point2pose.utils.transform import inverse_SE3
 from point2pose.utils.visualization import visualize_and_save_tracking_results
+from point2pose.utils.evaluation import (
+    adi_err,
+    add_err,
+    compute_auc,
+    plot_evaluation_results,
+    plot_error_over_time,
+    plot_pose_errors,
+    plot_pose_error_comparison,
+    plot_recall_vs_threshold,
+)
 
 
 # Build a GT bbox (min/max in object frame) once per sequence
@@ -49,6 +58,7 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
     gt_bbox_minmax = gt_bbox_minmax_from_mesh(reader)
     out_poses = []
     gt_poses = []
+    gt_ids = []
 
     for i, color_file in enumerate(reader.color_files):
         color = cv2.imread(color_file)
@@ -56,7 +66,6 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
         rgb = cv2.cvtColor(color, cv2.COLOR_BGR2RGB)
         depth = reader.get_depth(i)
 
-        id_str = reader.id_strs[i]
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         mask = reader.get_mask(i)
         mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_NEAREST)
@@ -74,11 +83,13 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
 
         # get out pose from the pipeline
         out_pose = pipeline.step(frame)
-        out_poses.append(out_pose)
+        out_poses.append(out_pose.reshape(4, 4))
 
         # get gt pose from the reader
         gt_pose = reader.get_gt_pose(i)
-        gt_poses.append(gt_pose)
+        if gt_pose is not None:
+            gt_ids.append(i)
+            gt_poses.append(gt_pose)
 
         if i == 0:
             pipeline.objects[0].init_pose = gt_pose
@@ -96,13 +107,88 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
             bbox_min_max=gt_bbox_minmax,
         )
 
-    print(f"Done {video_name}")
+        # if i == 100:
+        #     break
+
+    gt_poses = np.array(gt_poses)
+    pred_poses = np.array(out_poses)[gt_ids]
+
+    ######### Align first frame
+    pred_poses = pred_poses @ inverse_SE3(pred_poses[0]) @ gt_poses[0]
+
+    adi_errs = []
+    add_errs = []
+    mesh = reader.get_gt_mesh()
+
+    for i in range(len(pred_poses)):
+        adi = adi_err(pred_poses[i], gt_poses[i], mesh.vertices.copy())
+        add = add_err(pred_poses[i], gt_poses[i], mesh.vertices.copy())
+        adi_errs.append(adi)
+        add_errs.append(add)
+
+    adi_errs = np.array(adi_errs)
+    add_errs = np.array(add_errs)
+    adds_auc = compute_auc(adi_errs) * 100
+    add_auc = compute_auc(add_errs) * 100
+
+    print(
+        f"video {video_name}, ADD-S_err: {adi_errs.mean()*100:.2f}[cm], ADD_errs: {add_errs.mean()*100:.2f}[cm], ADD-S_AUC: {adds_auc:.2f}, ADD_AUC: {add_auc:.2f}"
+    )
+
+    # Generate evaluation plots
+    plot_evaluation_results(
+        add_s_errs=adi_errs,
+        add_errs=add_errs,
+        video_name=video_name,
+        output_dir=out_folder,
+        save_plots=True,
+        show_plots=False,
+    )
+
+    plot_error_over_time(
+        add_s_errs=adi_errs,
+        add_errs=add_errs,
+        video_name=video_name,
+        output_dir=out_folder,
+        save_plots=True,
+        show_plots=False,
+    )
+
+    # Generate pose error plots
+    plot_pose_errors(
+        pred_poses=pred_poses,
+        gt_poses=gt_poses,
+        video_name=video_name,
+        output_dir=out_folder,
+        save_plots=True,
+        show_plots=False,
+    )
+
+    plot_pose_error_comparison(
+        pred_poses=pred_poses,
+        gt_poses=gt_poses,
+        video_name=video_name,
+        output_dir=out_folder,
+        save_plots=True,
+        show_plots=False,
+    )
+
+    # Generate recall vs threshold plot
+    plot_recall_vs_threshold(
+        add_s_errs=adi_errs,
+        add_errs=add_errs,
+        video_name=video_name,
+        output_dir=out_folder,
+        save_plots=True,
+        show_plots=False,
+        max_threshold=10.0,
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, default="/home/justin/data/HO3D_V3/")
-    parser.add_argument("--video_name", type=str, default="MPM10")
+    parser.add_argument("--video_name", "-v", type=str, default="MPM10")
     parser.add_argument(
         "--out_dir",
         type=str,
@@ -110,6 +196,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--config_path",
+        "-c",
         type=str,
         default="/home/justin/code/point-to-pose/configs/ho3d/ho3d_single.yaml",
     )

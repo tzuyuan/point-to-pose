@@ -8,6 +8,8 @@ class Register(ABC):
         self.debug_level = config.get("debug_level", 0)
         self.debug_dir = config.get("debug_dir", None)
 
+        self.type = config.get("type", "base_register")
+
         if self.debug_level > 0 and self.debug_dir is not None:
             os.makedirs(self.debug_dir, exist_ok=True)
 

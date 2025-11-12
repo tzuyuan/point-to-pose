@@ -74,6 +74,16 @@ class PipelineSingleProcess:
         self.min_depth = self.pipeline_cfg.get("min_depth", 0.05)
         self.max_depth = self.pipeline_cfg.get("max_depth", 1.0)
 
+        self.fill_missing_depth = self.pipeline_cfg.get("fill_missing_depth", False)
+        self.fill_missing_depth_window_size = self.pipeline_cfg.get(
+            "fill_missing_depth_window_size", 3
+        )
+        self.fill_missing_depth_min_neighbors = self.pipeline_cfg.get(
+            "fill_missing_depth_min_neighbors", 1
+        )
+
+        self.reg_uncer_thres = self.cfg.register.params.get("uncer_thres", 0.3)
+
         # Cropped point cloud debug saving
         self.save_cropped_pcd = self.pipeline_cfg.get("save_cropped_pcd", False)
         self.cropped_pcd_dir = self.pipeline_cfg.get(
@@ -204,8 +214,17 @@ class PipelineSingleProcess:
                     "reg_curr3d",
                     "reg_inliers",
                     "reg_residuals",
+                    # extract valid key points stats
+                    "extract_vis_obj_mask",
+                    "extract_val_obj_mask",
+                    "extract_uncer_obj_mask",
+                    "extract_valid_kp_mask",
+                    "extract_uncertainty_thres",
+                    "extract_obj_idx",
+                    "extract_inside_mask",
+                    "extract_finite_xy",
                 },
-                also_save_h5=True,
+                also_save_h5=False,
             )
 
     # -------- one-time init with user clicks ----------
@@ -417,6 +436,9 @@ class PipelineSingleProcess:
                         depth_factor=frame.depth_factor,
                         min_depth=self.min_depth,
                         max_depth=self.max_depth,
+                        fill_missing_depth=self.fill_missing_depth,
+                        window_size=self.fill_missing_depth_window_size,
+                        min_neighbors=self.fill_missing_depth_min_neighbors,
                     )
                     if world_pts.size == 0 or not np.any(valid):
                         continue
@@ -441,6 +463,11 @@ class PipelineSingleProcess:
         print(f"num tracks: {len(tracks)}")
         # Convert visibles to boolean since TAPIR returns float32
         # visibles = visibles.astype(bool)
+
+        if frame.id == 256 or frame.id == 257 or frame.id == 258:
+            print("frame.depth shape: ", frame.depth.shape)
+
+        visible_backup = visibles.copy()
         visibles = visibles > 0.5
         tracker_time = time.time() - tracker_start
         print(f"Frame {self.frame_id} - Tracking: {tracker_time:.4f}s")
@@ -454,6 +481,9 @@ class PipelineSingleProcess:
             depth_factor=frame.depth_factor,
             min_depth=self.min_depth,
             max_depth=self.max_depth,
+            fill_missing_depth=self.fill_missing_depth,
+            window_size=self.fill_missing_depth_window_size,
+            min_neighbors=self.fill_missing_depth_min_neighbors,
         )
         conversion_time = time.time() - conversion_start
         print(
@@ -464,6 +494,8 @@ class PipelineSingleProcess:
         register_start = time.time()
         reg_stats = {}
         reg_stats_obj0 = {}
+        valid_stats = {}
+        out_pose = np.tile(np.eye(4), (self.num_obj, 1, 1))
         for obj_id in range(self.num_obj):
 
             # check and update the keypoints from the graph optimizer
@@ -473,7 +505,7 @@ class PipelineSingleProcess:
                 t_extract_start = time.time()
 
                 if self._reg_remove_outside_mask:
-                    idx, key_points, curr3d, new_visibles = (
+                    idx, key_points, curr3d, new_visibles, valid_stats = (
                         self._extract_valid_key_points_mask_remove(
                             self.objects[obj_id],
                             self.track_table.obj2track_map[obj_id],
@@ -483,19 +515,21 @@ class PipelineSingleProcess:
                             track_valid,
                             uncertainties,
                             frame.mask[obj_id, 0],
-                            uncertainty_thres=0.1,
+                            uncertainty_thres=self.reg_uncer_thres,
                         )
                     )
                     self.track_table.visible = new_visibles
                 else:
-                    idx, key_points, curr3d = self._extract_valid_key_points(
-                        self.objects[obj_id],
-                        self.track_table.obj2track_map[obj_id],
-                        track_3d,
-                        visibles,
-                        track_valid,
-                        uncertainties,
-                        uncertainty_thres=0.2,
+                    idx, key_points, curr3d, valid_stats = (
+                        self._extract_valid_key_points(
+                            self.objects[obj_id],
+                            self.track_table.obj2track_map[obj_id],
+                            track_3d,
+                            visibles,
+                            track_valid,
+                            uncertainties,
+                            uncertainty_thres=self.reg_uncer_thres,
+                        )
                     )
 
                 t_extract_end = time.time()
@@ -600,6 +634,8 @@ class PipelineSingleProcess:
                 else:
                     pose = self.objects[obj_id].pose
 
+                out_pose[obj_id] = pose
+
                 # Log pose in TUM format
                 if self.save_pose and self.pose_log_files[obj_id] is not None:
                     tum_pose = self._pose_matrix_to_tum_format(
@@ -699,7 +735,7 @@ class PipelineSingleProcess:
                     "visibles": visibles,
                     "track3d": track_3d,
                     "valid": track_valid,
-                    "valid_depth": frame.depth,
+                    "valid_depth": track_valid,
                     "obj_init_pose": self.objects[0].init_pose,
                     "obj_pose": self.objects[0].pose,
                     "obj_key_points": self.objects[0].key_points,
@@ -707,6 +743,7 @@ class PipelineSingleProcess:
                     "obj_valid": self.objects[0].valid,
                     "obj_key_point_frames": self.objects[0].key_point_frames,
                     **reg_stats_obj0,
+                    **valid_stats,
                 }
             )
 
@@ -733,7 +770,7 @@ class PipelineSingleProcess:
         )
         print("-" * 60)
 
-        return np.tile(np.eye(4), (self.num_obj, 1, 1))
+        return out_pose
 
     def _sample_for_all_obj(self, context: SamplerContext):
         """
@@ -995,6 +1032,7 @@ class PipelineSingleProcess:
             np.asarray(cur_uncertainties, dtype=float)[obj_idx] < uncertainty_thres
         )
         both_mask = vis_obj & val_obj & valid_kp_bool & uncer_obj  # (M,)
+        # both_mask = vis_obj & val_obj & valid_kp_bool & uncer_obj  # (M,)
 
         # global indices for valid+visible points
         idx = obj_idx[both_mask]  # (K,)
@@ -1003,7 +1041,18 @@ class PipelineSingleProcess:
         key_points = obj.key_points[both_mask].copy()
         curr3d = cur_pts_3d[idx].copy()
 
-        return idx, key_points, curr3d
+        valid_stats = {
+            "extract_vis_obj_mask": vis_obj,
+            "extract_val_obj_mask": val_obj,
+            "extract_uncer_obj_mask": uncer_obj,
+            "extract_valid_kp_mask": valid_kp_bool,
+            "extract_uncertainty_thres": uncertainty_thres,
+            "extract_obj_idx": obj_idx,
+            "extract_inside_mask": np.empty(0),
+            "extract_finite_xy": np.empty(0),
+        }
+
+        return idx, key_points, curr3d, valid_stats
 
     # def _extract_valid_key_points(
     #     self,
@@ -1163,7 +1212,18 @@ class PipelineSingleProcess:
         key_points = obj.key_points[both_mask].copy()
         curr3d = cur_pts_3d[idx].copy()
 
-        return idx, key_points, curr3d, cur_visible
+        valid_stats = {
+            "extract_vis_obj_mask": vis_obj,
+            "extract_val_obj_mask": val_obj,
+            "extract_uncer_obj_mask": uncer_obj,
+            "extract_valid_kp_mask": valid_kp_obj,
+            "extract_uncertainty_thres": uncertainty_thres,
+            "extract_obj_idx": obj_idx,
+            "extract_inside_mask": inside_mask_np,
+            "extract_finite_xy": finite_xy,
+        }
+
+        return idx, key_points, curr3d, cur_visible, valid_stats
 
     def _extract_valid_idx_points_for_obj(
         self,

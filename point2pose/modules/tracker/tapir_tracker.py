@@ -265,7 +265,7 @@ class TapirTracker(Tracker):
         return query_points
 
     def _postprocess_occlusions(self, occlusions, expected_dist):
-        visibles = (1 - F.sigmoid(occlusions)) * (1 - F.sigmoid(expected_dist)) > 0.5
+        visibles = (1 - F.sigmoid(occlusions)) * (1 - F.sigmoid(expected_dist))
         return visibles
 
     def _online_model_init(self, model, frames, query_points):

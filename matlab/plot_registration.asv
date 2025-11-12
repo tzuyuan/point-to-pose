@@ -35,8 +35,7 @@ pose_i = world_pose_i;
 track2d_xy = D.helpers.regroup_pairs(D.ragged.track2d);
 
 track2d_xy_i = track2d_xy{i};
-track_valid_i = D.fixed.valid{i};
-track3d_vis_i = track3d_i(visible_i,:);
+track_valid_i = D.fixed.validPiu
 
 extract_vis_obj_mask_i     = D.ragged.extract_vis_obj_mask{i};
 extract_val_obj_mask_i     = D.ragged.extract_val_obj_mask{i};
