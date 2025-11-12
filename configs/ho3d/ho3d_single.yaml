@@ -74,7 +74,7 @@ tracker:
   #   checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
 
 sampler: 
-  type: super_point
+  type: uniform_fps
   params:
     num_points: 20
     density_per_kpx: -1
