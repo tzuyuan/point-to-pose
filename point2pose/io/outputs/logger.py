@@ -154,6 +154,19 @@ class DataLogger:
             lengths = np.fromiter(
                 (a.size for a in norm), dtype=np.int64, count=len(norm)
             )
+
+            if len(lengths) == 0:
+                lengths = np.array([0], dtype=np.int64)
+                offsets = np.array([0], dtype=np.int64)
+                data = np.array([], dtype=dt)
+                packed_npz[f"{k}_data"] = data
+                packed_npz[f"{k}_offsets"] = offsets
+                packed_npz[f"{k}_lengths"] = lengths
+                packed_mat[f"{k}_data"] = data
+                packed_mat[f"{k}_offsets"] = offsets
+                packed_mat[f"{k}_lengths"] = lengths
+                continue
+
             offsets = np.empty_like(lengths)
             offsets[0] = 0
             if len(lengths) > 1:

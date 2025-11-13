@@ -77,7 +77,7 @@ class ISAM2Optimizer(Optimizer):
             sigma_between = (
                 float(max(1e-4, np.mean(residuals))) if residuals.size else 0.01
             )
-            sigma_between = 0.1
+            # sigma_between = 0.01
             between_noise = gtsam.noiseModel.Isotropic.Sigma(6, sigma_between)
             # between_noise = gtsam.noiseModel.Diagonal.Sigmas(
             #     np.array(
@@ -99,14 +99,14 @@ class ISAM2Optimizer(Optimizer):
             # T_I = gtsam.Pose3(np.eye(4))
             # get previous relative pose
 
-            between_noise_const = gtsam.noiseModel.Isotropic.Sigma(6, 0.01)
+            # between_noise_const = gtsam.noiseModel.Isotropic.Sigma(6, 0.01)
 
-            # # constant velocity model
-            self._graph.push_back(
-                gtsam.BetweenFactorPose3(
-                    Xim1, Xi, self._prev_rel_T, between_noise_const
-                )
-            )
+            # # # constant velocity model
+            # self._graph.push_back(
+            #     gtsam.BetweenFactorPose3(
+            #         Xim1, Xi, self._prev_rel_T, between_noise_const
+            #     )
+            # )
 
             self._prev_rel_T = rel_T
 

@@ -1,3 +1,4 @@
 from .svd_register import SVDRegister
 from .svd_residual_outlier import SVDResidualOutlierRegister
 from .svd_register_uncertainty_outlier import SVDUncertaintyOutlierRegister
+from .svd_register_irls_uncertainty import SVDUncertaintyIRLSRegister

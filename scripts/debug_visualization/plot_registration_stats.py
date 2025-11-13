@@ -57,10 +57,31 @@ def unpack_ragged(name: str, store: dict, dim: int = -1) -> list:
     out = []
     for off, L in zip(offsets, lengths):
         flat_data = data[off : off + L]
-        # Reshape based on dim
+
+        # Handle empty or invalid data
+        if L == 0 or len(flat_data) == 0:
+            # Return empty array with appropriate shape
+            if dim == 3:
+                out.append(np.array([]).reshape(0, 3))
+            elif dim == 2:
+                out.append(np.array([]).reshape(0, 2))
+            else:
+                out.append(np.array([]))
+            continue
+
+        # Check if data is valid (not just placeholder values like -1)
+        # If it's a single element that can't be reshaped, return empty array
         if dim == 3:
+            if len(flat_data) < 3 or len(flat_data) % 3 != 0:
+                # Can't reshape to 3D, return empty array
+                out.append(np.array([]).reshape(0, 3))
+                continue
             reshaped_data = flat_data.reshape(-1, 3)
         elif dim == 2:
+            if len(flat_data) < 2 or len(flat_data) % 2 != 0:
+                # Can't reshape to 2D, return empty array
+                out.append(np.array([]).reshape(0, 2))
+                continue
             reshaped_data = flat_data.reshape(-1, 2)
         else:
             reshaped_data = flat_data  # Keep as 1D
@@ -69,7 +90,7 @@ def unpack_ragged(name: str, store: dict, dim: int = -1) -> list:
 
 
 def load_registration_stats(
-    register_folder: str, object_number: int, frame_number: int
+    register_folder: str, object_number: int, frame_number: int, mode: str = "auto"
 ) -> Optional[
     Tuple[
         np.ndarray,
@@ -78,6 +99,8 @@ def load_registration_stats(
         Optional[np.ndarray],
         Optional[np.ndarray],
         Optional[np.ndarray],
+        Optional[np.ndarray],
+        str,
     ]
 ]:
     """Load registration statistics for a given frame.
@@ -86,10 +109,12 @@ def load_registration_stats(
         register_folder: Path to register folder
         object_number: Object number (currently only supports object 0, kept for compatibility)
         frame_number: Frame number to extract stats for
+        mode: Registration mode ("f2f", "f2m", or "auto" to auto-detect)
 
     Returns:
-        Tuple of (residuals, inliers, uncertainties, key_points, curr3d, keyframe_ids) if data is found, None otherwise.
+        Tuple of (residuals, inliers, uncertainties, key_points/prev3d, curr3d, keyframe_ids, reg_key_points_idx, mode) if data is found, None otherwise.
         All arrays have the same length (number of registration points).
+        mode is either "f2f" or "f2m".
     """
     _ = object_number  # Currently unused, kept for compatibility
     meata_data_path = find_meata_data_path(register_folder)
@@ -121,10 +146,50 @@ def load_registration_stats(
 
         print(f"Found frame {frame_number} at index {frame_idx}")
 
+        # Detect mode: check which fields are present
+        reg_prev3d_list = unpack_ragged("reg_prev3d", data, dim=3)
+        reg_key_points_list = unpack_ragged("reg_key_points", data, dim=3)
+
+        if mode == "auto":
+            # Auto-detect mode based on which field has data at this frame
+            has_prev3d = (
+                frame_idx < len(reg_prev3d_list)
+                and reg_prev3d_list[frame_idx] is not None
+                and len(reg_prev3d_list[frame_idx]) > 0
+                and reg_prev3d_list[frame_idx].size > 0
+                and not (
+                    reg_prev3d_list[frame_idx].ndim > 0
+                    and np.all(reg_prev3d_list[frame_idx].flatten() == -1)
+                )
+            )
+            has_key_points = (
+                frame_idx < len(reg_key_points_list)
+                and reg_key_points_list[frame_idx] is not None
+                and len(reg_key_points_list[frame_idx]) > 0
+                and reg_key_points_list[frame_idx].size > 0
+                and not (
+                    reg_key_points_list[frame_idx].ndim > 0
+                    and np.all(reg_key_points_list[frame_idx].flatten() == -1)
+                )
+            )
+
+            if has_prev3d and not has_key_points:
+                detected_mode = "f2f"
+            elif has_key_points and not has_prev3d:
+                detected_mode = "f2m"
+            elif has_prev3d and has_key_points:
+                # If both exist, prefer the one with valid data (not all -1)
+                detected_mode = "f2f"  # Default to f2f if both present
+            else:
+                detected_mode = "f2m"  # Default to f2m
+        else:
+            detected_mode = mode
+
+        print(f"Using registration mode: {detected_mode}")
+
         # Use unpack_ragged to extract data (following notebook pattern)
         reg_residuals_list = unpack_ragged("reg_residuals", data, dim=-1)
         reg_inliers_list = unpack_ragged("reg_inliers", data, dim=-1)
-        reg_key_points_list = unpack_ragged("reg_key_points", data, dim=3)
         reg_curr3d_list = unpack_ragged("reg_curr3d", data, dim=3)
         reg_key_points_idx_list = unpack_ragged("reg_key_points_idx", data, dim=-1)
         uncertainties_list = unpack_ragged("uncertainties", data, dim=-1)
@@ -141,11 +206,21 @@ def load_registration_stats(
             if frame_idx < len(reg_inliers_list)
             else np.ones(len(residuals), dtype=bool)
         )
-        key_points = (
-            reg_key_points_list[frame_idx]
-            if frame_idx < len(reg_key_points_list)
-            else None
-        )
+
+        # Load source points based on mode
+        if detected_mode == "f2f":
+            key_points = (
+                reg_prev3d_list[frame_idx] if frame_idx < len(reg_prev3d_list) else None
+            )
+            print("Loaded f2f mode: using reg_prev3d as source points")
+        else:  # f2m mode
+            key_points = (
+                reg_key_points_list[frame_idx]
+                if frame_idx < len(reg_key_points_list)
+                else None
+            )
+            print("Loaded f2m mode: using reg_key_points as source points")
+
         curr3d = (
             reg_curr3d_list[frame_idx] if frame_idx < len(reg_curr3d_list) else None
         )
@@ -219,17 +294,21 @@ def load_registration_stats(
         if keyframe_ids is None:
             print("Warning: Could not extract keyframe_ids")
 
-        # Transform key_points (already extracted above via unpack_ragged)
+        # Transform key_points based on mode
         # Note: curr3d should NOT be transformed - it's already in the current frame coordinate system
         obj_pose = None
         if "obj_pose" in data:
             obj_pose = data["obj_pose"][frame_idx]
 
-        # Transform key_points with obj_pose (first->current), matches visualize_register_pcd -c
-        if key_points is not None and obj_pose is not None:
+        # For f2m mode: transform key_points with obj_pose (first->current)
+        # For f2f mode: prev3d is already in current frame coordinates, no transformation needed
+        if detected_mode == "f2m" and key_points is not None and obj_pose is not None:
             if not (np.any(np.isnan(obj_pose)) or np.any(np.isinf(obj_pose))):
                 kp_h = np.hstack([key_points, np.ones((len(key_points), 1))])
                 key_points = (obj_pose @ kp_h.T).T[:, :3]
+                print("Transformed key_points (f2m mode) using obj_pose")
+        elif detected_mode == "f2f":
+            print("Using prev3d directly (f2f mode, no transformation needed)")
 
         # Note: curr3d should NOT be transformed - it's already in the current frame coordinate system
 
@@ -283,7 +362,8 @@ def load_registration_stats(
             print(f"  - Mean residual (outliers): {np.mean(residuals[~inliers]):.4f}")
 
         # Note: curr3d are already in the current frame coordinate system and should NOT be transformed.
-        # The registration transformation (obj_pose) transforms key_points from first frame to current frame.
+        # For f2m: The registration transformation (obj_pose) transforms key_points from first frame to current frame.
+        # For f2f: prev3d is already in the current frame coordinate system.
         # curr3d are the target points in the current frame and remain as-is for visualization.
 
         return (
@@ -294,6 +374,7 @@ def load_registration_stats(
             curr3d,
             keyframe_ids,
             reg_key_points_idx,
+            detected_mode,
         )
 
     except (IOError, ValueError, KeyError) as e:
@@ -312,6 +393,7 @@ def plot_registration_stats(
     frame_number: int,
     reg_key_points_idx: Optional[np.ndarray],
     output_path: Optional[str] = None,
+    mode: str = "f2m",
 ):
     """Create plots showing registration statistics.
 
@@ -323,6 +405,7 @@ def plot_registration_stats(
         frame_number: Frame number for title
         reg_key_points_idx: Optional array of indices of registration key points
         output_path: Optional path to save the figure
+        mode: Registration mode ("f2f" or "f2m") for title
     """
     num_points = len(residuals)
     num_inliers = np.sum(inliers)
@@ -369,7 +452,8 @@ def plot_registration_stats(
         axes = axes.flatten()
 
     fig.suptitle(
-        f"Registration Statistics - Frame {frame_number} (N={num_points})", fontsize=14
+        f"Registration Statistics ({mode.upper()}) - Frame {frame_number} (N={num_points})",
+        fontsize=14,
     )
 
     # 1. Inlier/Outlier distribution
@@ -807,6 +891,7 @@ def plot_3d_correspondences(
     pair_keyframe_ids: Optional[np.ndarray],
     inliers: Optional[np.ndarray],
     output_path: Optional[str] = None,
+    mode: str = "f2m",
 ):
     """Create a 3D plot showing registered points, all key points (colored by frame ID), and correspondences.
 
@@ -814,12 +899,14 @@ def plot_3d_correspondences(
         register_folder: Path to register folder
         object_number: Object number
         frame_number: Frame number
-        key_points: Registration key points (N, 3)
+        key_points: Registration key points (N, 3) - for f2m mode, or prev3d (N, 3) for f2f mode
         curr3d: Current 3D points (N, 3)
         all_key_points: All key points (M, 3)
         all_key_point_frame_ids: Frame IDs for all key points (M,)
+        pair_keyframe_ids: Optional keyframe IDs for registration pairs (N,)
         inliers: Optional inlier mask (N,)
         output_path: Optional path to save the figure
+        mode: Registration mode ("f2f" or "f2m")
     """
     fig = plt.figure(figsize=(15, 10))
     ax = fig.add_subplot(111, projection="3d")
@@ -1045,9 +1132,10 @@ def plot_3d_correspondences(
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
+    source_label = "prev3d" if mode == "f2f" else "key_points"
     ax.set_title(
-        f"3D Registration Visualization - Frame {frame_number}\n"
-        f"Key Points Colored by Keyframe ID, Lines Show Correspondences"
+        f"3D Registration Visualization ({mode.upper()}) - Frame {frame_number}\n"
+        f"Source Points ({source_label}) Colored by Keyframe ID, Lines Show Correspondences"
     )
 
     # Limit legend to first 10 frames for readability
@@ -1062,22 +1150,29 @@ def plot_3d_correspondences(
     if pcd_points is not None:
         all_points = np.vstack([all_points, pcd_points])
     if len(all_points) > 0:
-        max_range = (
-            np.array(
-                [
-                    all_points[:, 0].max() - all_points[:, 0].min(),
-                    all_points[:, 1].max() - all_points[:, 1].min(),
-                    all_points[:, 2].max() - all_points[:, 2].min(),
-                ]
-            ).max()
-            / 2.0
-        )
+        # Calculate ranges for each axis
+        x_range = all_points[:, 0].max() - all_points[:, 0].min()
+        y_range = all_points[:, 1].max() - all_points[:, 1].min()
+        z_range = all_points[:, 2].max() - all_points[:, 2].min()
+        max_range = max(x_range, y_range, z_range) / 2.0
+
+        # Calculate midpoints
         mid_x = (all_points[:, 0].max() + all_points[:, 0].min()) * 0.5
         mid_y = (all_points[:, 1].max() + all_points[:, 1].min()) * 0.5
         mid_z = (all_points[:, 2].max() + all_points[:, 2].min()) * 0.5
+
+        # Set equal limits for all axes
         ax.set_xlim(mid_x - max_range, mid_x + max_range)
         ax.set_ylim(mid_y - max_range, mid_y + max_range)
         ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+        # Set equal aspect ratio using set_box_aspect (if available, matplotlib >= 3.3.0)
+        try:
+            ax.set_box_aspect([1, 1, 1])
+        except AttributeError:
+            # Fallback for older matplotlib versions - manually set aspect
+            # The equal limits above should help, but we can't guarantee perfect aspect
+            pass
 
     plt.tight_layout()
 
@@ -1101,6 +1196,8 @@ def plot_3d_correspondences_uncertainty(
     uncertainties: Optional[np.ndarray],
     inliers: Optional[np.ndarray],
     output_path: Optional[str] = None,
+    mode: str = "f2m",
+    reg_key_points_idx: Optional[np.ndarray] = None,
 ):
     """Create a 3D plot showing registered points colored by uncertainty, similar to plot_3d_correspondences.
 
@@ -1108,13 +1205,14 @@ def plot_3d_correspondences_uncertainty(
         register_folder: Path to register folder
         object_number: Object number
         frame_number: Frame number
-        key_points: Registration key points (N, 3)
+        key_points: Registration key points (N, 3) - for f2m mode, or prev3d (N, 3) for f2f mode
         curr3d: Current 3D points (N, 3)
         all_key_points: All key points (M, 3)
         all_key_point_frame_ids: Frame IDs for all key points (M,)
         uncertainties: Array of uncertainties for each registration point (N,)
         inliers: Optional inlier mask (N,)
         output_path: Optional path to save the figure
+        mode: Registration mode ("f2f" or "f2m")
     """
     fig = plt.figure(figsize=(15, 10))
     ax = fig.add_subplot(111, projection="3d")
@@ -1132,7 +1230,12 @@ def plot_3d_correspondences_uncertainty(
             label="Registered Point Cloud",
         )
 
-    # Plot all key points colored by frame ID (same as original)
+    # Determine which key points are used in registration
+    reg_indices_set = set()
+    if reg_key_points_idx is not None:
+        reg_indices_set = set(reg_key_points_idx.flatten())
+
+    # Plot all key points - color by frame ID if used in registration, grey otherwise
     unique_frames = np.unique(all_key_point_frame_ids)
 
     # Create color map for keyframe IDs
@@ -1161,22 +1264,51 @@ def plot_3d_correspondences_uncertainty(
             for i, fid in enumerate(sorted(unique_frames))
         }
 
-    # Plot key points grouped by frame ID
+    # Plot key points grouped by frame ID, but color non-registration points grey
+    grey_color = (0.5, 0.5, 0.5)  # Grey color
+    grey_labeled = False  # Track if we've added grey to legend
+
     for fid in sorted(unique_frames):
         mask = all_key_point_frame_ids == fid
         if np.any(mask):
-            ax.scatter(
-                all_key_points[mask, 0],
-                all_key_points[mask, 1],
-                all_key_points[mask, 2],
-                c=[frame_to_color[fid]],
-                alpha=0.7,
-                s=30,
-                label=f"Keyframe {fid}",
-                marker="o",
-                edgecolors="black",
-                linewidths=0.5,
-            )
+            # Separate points used in registration from those not used
+            frame_indices = np.where(mask)[0]
+            reg_mask = np.array([idx in reg_indices_set for idx in frame_indices])
+            non_reg_mask = ~reg_mask
+
+            # Plot registration points colored by frame ID
+            if np.any(reg_mask):
+                reg_frame_indices = frame_indices[reg_mask]
+                ax.scatter(
+                    all_key_points[reg_frame_indices, 0],
+                    all_key_points[reg_frame_indices, 1],
+                    all_key_points[reg_frame_indices, 2],
+                    c=[frame_to_color[fid]],
+                    alpha=0.7,
+                    s=30,
+                    label=f"Keyframe {fid}",
+                    marker="o",
+                    edgecolors="black",
+                    linewidths=0.5,
+                )
+
+            # Plot non-registration points in grey
+            if np.any(non_reg_mask):
+                non_reg_frame_indices = frame_indices[non_reg_mask]
+                label = "Other key points" if not grey_labeled else ""
+                ax.scatter(
+                    all_key_points[non_reg_frame_indices, 0],
+                    all_key_points[non_reg_frame_indices, 1],
+                    all_key_points[non_reg_frame_indices, 2],
+                    c=[grey_color],
+                    alpha=0.5,
+                    s=20,
+                    label=label,
+                    marker="o",
+                    edgecolors="black",
+                    linewidths=0.3,
+                )
+                grey_labeled = True
 
     # Draw correspondence lines (same as original)
     if len(key_points) == len(curr3d):
@@ -1334,7 +1466,7 @@ def plot_3d_correspondences_uncertainty(
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
     ax.set_title(
-        f"3D Registration Visualization - Frame {frame_number}\n"
+        f"3D Registration Visualization ({mode.upper()}) - Frame {frame_number}\n"
         f"Points Colored by Uncertainty, Lines Show Correspondences"
     )
 
@@ -1350,22 +1482,29 @@ def plot_3d_correspondences_uncertainty(
     if pcd_points is not None:
         all_points = np.vstack([all_points, pcd_points])
     if len(all_points) > 0:
-        max_range = (
-            np.array(
-                [
-                    all_points[:, 0].max() - all_points[:, 0].min(),
-                    all_points[:, 1].max() - all_points[:, 1].min(),
-                    all_points[:, 2].max() - all_points[:, 2].min(),
-                ]
-            ).max()
-            / 2.0
-        )
+        # Calculate ranges for each axis
+        x_range = all_points[:, 0].max() - all_points[:, 0].min()
+        y_range = all_points[:, 1].max() - all_points[:, 1].min()
+        z_range = all_points[:, 2].max() - all_points[:, 2].min()
+        max_range = max(x_range, y_range, z_range) / 2.0
+
+        # Calculate midpoints
         mid_x = (all_points[:, 0].max() + all_points[:, 0].min()) * 0.5
         mid_y = (all_points[:, 1].max() + all_points[:, 1].min()) * 0.5
         mid_z = (all_points[:, 2].max() + all_points[:, 2].min()) * 0.5
+
+        # Set equal limits for all axes
         ax.set_xlim(mid_x - max_range, mid_x + max_range)
         ax.set_ylim(mid_y - max_range, mid_y + max_range)
         ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+        # Set equal aspect ratio using set_box_aspect (if available, matplotlib >= 3.3.0)
+        try:
+            ax.set_box_aspect([1, 1, 1])
+        except AttributeError:
+            # Fallback for older matplotlib versions - manually set aspect
+            # The equal limits above should help, but we can't guarantee perfect aspect
+            pass
 
     plt.tight_layout()
 
@@ -1388,6 +1527,8 @@ def plot_3d_correspondences_residuals(
     residuals: Optional[np.ndarray],
     inliers: Optional[np.ndarray],
     output_path: Optional[str] = None,
+    mode: str = "f2m",
+    reg_key_points_idx: Optional[np.ndarray] = None,
 ):
     """Create a 3D plot showing registered points colored by residuals, similar to plot_3d_correspondences.
 
@@ -1395,13 +1536,14 @@ def plot_3d_correspondences_residuals(
         register_folder: Path to register folder
         object_number: Object number
         frame_number: Frame number
-        key_points: Registration key points (N, 3)
+        key_points: Registration key points (N, 3) - for f2m mode, or prev3d (N, 3) for f2f mode
         curr3d: Current 3D points (N, 3)
         all_key_points: All key points (M, 3)
         all_key_point_frame_ids: Frame IDs for all key points (M,)
         residuals: Array of residuals for each registration point (N,)
         inliers: Optional inlier mask (N,)
         output_path: Optional path to save the figure
+        mode: Registration mode ("f2f" or "f2m")
     """
     fig = plt.figure(figsize=(15, 10))
     ax = fig.add_subplot(111, projection="3d")
@@ -1419,7 +1561,12 @@ def plot_3d_correspondences_residuals(
             label="Registered Point Cloud",
         )
 
-    # Plot all key points colored by frame ID (same as original)
+    # Determine which key points are used in registration
+    reg_indices_set = set()
+    if reg_key_points_idx is not None:
+        reg_indices_set = set(reg_key_points_idx.flatten())
+
+    # Plot all key points - color by frame ID if used in registration, grey otherwise
     unique_frames = np.unique(all_key_point_frame_ids)
 
     # Create color map for keyframe IDs
@@ -1448,22 +1595,51 @@ def plot_3d_correspondences_residuals(
             for i, fid in enumerate(sorted(unique_frames))
         }
 
-    # Plot key points grouped by frame ID
+    # Plot key points grouped by frame ID, but color non-registration points grey
+    grey_color = (0.5, 0.5, 0.5)  # Grey color
+    grey_labeled = False  # Track if we've added grey to legend
+
     for fid in sorted(unique_frames):
         mask = all_key_point_frame_ids == fid
         if np.any(mask):
-            ax.scatter(
-                all_key_points[mask, 0],
-                all_key_points[mask, 1],
-                all_key_points[mask, 2],
-                c=[frame_to_color[fid]],
-                alpha=0.7,
-                s=30,
-                label=f"Keyframe {fid}",
-                marker="o",
-                edgecolors="black",
-                linewidths=0.5,
-            )
+            # Separate points used in registration from those not used
+            frame_indices = np.where(mask)[0]
+            reg_mask = np.array([idx in reg_indices_set for idx in frame_indices])
+            non_reg_mask = ~reg_mask
+
+            # Plot registration points colored by frame ID
+            if np.any(reg_mask):
+                reg_frame_indices = frame_indices[reg_mask]
+                ax.scatter(
+                    all_key_points[reg_frame_indices, 0],
+                    all_key_points[reg_frame_indices, 1],
+                    all_key_points[reg_frame_indices, 2],
+                    c=[frame_to_color[fid]],
+                    alpha=0.7,
+                    s=30,
+                    label=f"Keyframe {fid}",
+                    marker="o",
+                    edgecolors="black",
+                    linewidths=0.5,
+                )
+
+            # Plot non-registration points in grey
+            if np.any(non_reg_mask):
+                non_reg_frame_indices = frame_indices[non_reg_mask]
+                label = "Other key points" if not grey_labeled else ""
+                ax.scatter(
+                    all_key_points[non_reg_frame_indices, 0],
+                    all_key_points[non_reg_frame_indices, 1],
+                    all_key_points[non_reg_frame_indices, 2],
+                    c=[grey_color],
+                    alpha=0.5,
+                    s=20,
+                    label=label,
+                    marker="o",
+                    edgecolors="black",
+                    linewidths=0.3,
+                )
+                grey_labeled = True
 
     # Filter to inliers only if available
     if inliers is not None:
@@ -1556,12 +1732,12 @@ def plot_3d_correspondences_residuals(
     ax.set_zlabel("Z")
     if inliers is not None:
         ax.set_title(
-            f"3D Registration Visualization - Frame {frame_number}\n"
+            f"3D Registration Visualization ({mode.upper()}) - Frame {frame_number}\n"
             f"Points Colored by Residual (Inliers Only), Lines Show Correspondences"
         )
     else:
         ax.set_title(
-            f"3D Registration Visualization - Frame {frame_number}\n"
+            f"3D Registration Visualization ({mode.upper()}) - Frame {frame_number}\n"
             f"Points Colored by Residual, Lines Show Correspondences"
         )
 
@@ -1577,28 +1753,270 @@ def plot_3d_correspondences_residuals(
     if pcd_points is not None:
         all_points = np.vstack([all_points, pcd_points])
     if len(all_points) > 0:
-        max_range = (
-            np.array(
-                [
-                    all_points[:, 0].max() - all_points[:, 0].min(),
-                    all_points[:, 1].max() - all_points[:, 1].min(),
-                    all_points[:, 2].max() - all_points[:, 2].min(),
-                ]
-            ).max()
-            / 2.0
-        )
+        # Calculate ranges for each axis
+        x_range = all_points[:, 0].max() - all_points[:, 0].min()
+        y_range = all_points[:, 1].max() - all_points[:, 1].min()
+        z_range = all_points[:, 2].max() - all_points[:, 2].min()
+        max_range = max(x_range, y_range, z_range) / 2.0
+
+        # Calculate midpoints
         mid_x = (all_points[:, 0].max() + all_points[:, 0].min()) * 0.5
         mid_y = (all_points[:, 1].max() + all_points[:, 1].min()) * 0.5
         mid_z = (all_points[:, 2].max() + all_points[:, 2].min()) * 0.5
+
+        # Set equal limits for all axes
         ax.set_xlim(mid_x - max_range, mid_x + max_range)
         ax.set_ylim(mid_y - max_range, mid_y + max_range)
         ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+        # Set equal aspect ratio using set_box_aspect (if available, matplotlib >= 3.3.0)
+        try:
+            ax.set_box_aspect([1, 1, 1])
+        except AttributeError:
+            # Fallback for older matplotlib versions - manually set aspect
+            # The equal limits above should help, but we can't guarantee perfect aspect
+            pass
 
     plt.tight_layout()
 
     if isinstance(output_path, str) and len(output_path) > 0:
         plt.savefig(output_path, dpi=150, bbox_inches="tight")
         print(f"Saved 3D residual plot to: {output_path}")
+        plt.close()
+    else:
+        pass
+
+
+def plot_3d_registration_points_only(
+    register_folder: str,
+    object_number: int,
+    frame_number: int,
+    key_points: np.ndarray,
+    curr3d: np.ndarray,
+    inliers: Optional[np.ndarray],
+    output_path: Optional[str] = None,
+    mode: str = "f2m",
+):
+    """Create a 3D plot showing only the registration points (source and target) with correspondences.
+
+    Args:
+        register_folder: Path to register folder
+        object_number: Object number
+        frame_number: Frame number
+        key_points: Registration key points (N, 3) - for f2m mode, or prev3d (N, 3) for f2f mode
+        curr3d: Current 3D points (N, 3)
+        inliers: Optional inlier mask (N,)
+        output_path: Optional path to save the figure
+        mode: Registration mode ("f2f" or "f2m")
+    """
+    fig = plt.figure(figsize=(15, 10))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # Load registered point cloud if available (for context)
+    pcd_points = load_point_cloud(register_folder, object_number, frame_number)
+    if pcd_points is not None:
+        ax.scatter(
+            pcd_points[:, 0],
+            pcd_points[:, 1],
+            pcd_points[:, 2],
+            c="lightgray",
+            alpha=0.2,
+            s=1,
+            label="Point Cloud (context)",
+        )
+
+    # Ensure arrays have the same length
+    min_len = min(len(key_points), len(curr3d))
+    key_points = key_points[:min_len]
+    curr3d = curr3d[:min_len]
+    if inliers is not None:
+        inliers = inliers[:min_len]
+
+    # Draw correspondence lines
+    if inliers is not None:
+        inlier_mask = inliers
+        outlier_mask = ~inliers
+
+        # Draw lines for inliers (green) and outliers (red) separately
+        for i in range(len(key_points)):
+            if inlier_mask[i]:
+                # Green line for inliers
+                ax.plot(
+                    [key_points[i, 0], curr3d[i, 0]],
+                    [key_points[i, 1], curr3d[i, 1]],
+                    [key_points[i, 2], curr3d[i, 2]],
+                    "g-",
+                    alpha=0.6,
+                    linewidth=1.5,
+                )
+            else:
+                # Red line for outliers
+                ax.plot(
+                    [key_points[i, 0], curr3d[i, 0]],
+                    [key_points[i, 1], curr3d[i, 1]],
+                    [key_points[i, 2], curr3d[i, 2]],
+                    "r-",
+                    alpha=0.6,
+                    linewidth=1.5,
+                )
+    else:
+        # If no inliers info, draw all lines in green
+        for i in range(len(key_points)):
+            ax.plot(
+                [key_points[i, 0], curr3d[i, 0]],
+                [key_points[i, 1], curr3d[i, 1]],
+                [key_points[i, 2], curr3d[i, 2]],
+                "g-",
+                alpha=0.6,
+                linewidth=1.5,
+            )
+
+    # Plot source points (key_points or prev3d)
+    if inliers is not None:
+        inlier_mask = inliers
+        outlier_mask = ~inliers
+
+        # Plot inliers for source points
+        if np.any(inlier_mask):
+            ax.scatter(
+                key_points[inlier_mask, 0],
+                key_points[inlier_mask, 1],
+                key_points[inlier_mask, 2],
+                c="green",
+                s=80,
+                marker="o",
+                edgecolors="black",
+                linewidths=1.0,
+                alpha=0.9,
+                label="Source (inliers)",
+            )
+
+        # Plot outliers for source points with different marker
+        if np.any(outlier_mask):
+            ax.scatter(
+                key_points[outlier_mask, 0],
+                key_points[outlier_mask, 1],
+                key_points[outlier_mask, 2],
+                c="red",
+                s=100,
+                marker="X",
+                edgecolors="black",
+                linewidths=1.2,
+                alpha=0.9,
+                label="Source (outliers)",
+            )
+    else:
+        # If no inliers info, plot all source points
+        ax.scatter(
+            key_points[:, 0],
+            key_points[:, 1],
+            key_points[:, 2],
+            c="blue",
+            s=80,
+            marker="o",
+            edgecolors="black",
+            linewidths=1.0,
+            alpha=0.9,
+            label="Source",
+        )
+
+    # Plot target points (curr3d)
+    if inliers is not None:
+        inlier_mask = inliers
+        outlier_mask = ~inliers
+
+        # Plot inliers for target points
+        if np.any(inlier_mask):
+            ax.scatter(
+                curr3d[inlier_mask, 0],
+                curr3d[inlier_mask, 1],
+                curr3d[inlier_mask, 2],
+                c="green",
+                s=80,
+                marker="^",
+                edgecolors="black",
+                linewidths=1.0,
+                alpha=0.9,
+                label="Target (inliers)",
+            )
+
+        # Plot outliers for target points with different marker
+        if np.any(outlier_mask):
+            ax.scatter(
+                curr3d[outlier_mask, 0],
+                curr3d[outlier_mask, 1],
+                curr3d[outlier_mask, 2],
+                c="red",
+                s=100,
+                marker="s",
+                edgecolors="black",
+                linewidths=1.2,
+                alpha=0.9,
+                label="Target (outliers)",
+            )
+    else:
+        # If no inliers info, plot all target points
+        ax.scatter(
+            curr3d[:, 0],
+            curr3d[:, 1],
+            curr3d[:, 2],
+            c="orange",
+            s=80,
+            marker="^",
+            edgecolors="black",
+            linewidths=1.0,
+            alpha=0.9,
+            label="Target",
+        )
+
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    source_label = "prev3d" if mode == "f2f" else "key_points"
+    num_inliers = np.sum(inliers) if inliers is not None else len(key_points)
+    num_outliers = np.sum(~inliers) if inliers is not None else 0
+    ax.set_title(
+        f"Registration Points Only ({mode.upper()}) - Frame {frame_number}\n"
+        f"Source ({source_label}) ↔ Target (curr3d) | "
+        f"Inliers: {num_inliers}, Outliers: {num_outliers}"
+    )
+
+    ax.legend(loc="upper left", fontsize=10)
+
+    # Set equal aspect ratio
+    all_points = np.vstack([key_points, curr3d])
+    if pcd_points is not None:
+        all_points = np.vstack([all_points, pcd_points])
+    if len(all_points) > 0:
+        # Calculate ranges for each axis
+        x_range = all_points[:, 0].max() - all_points[:, 0].min()
+        y_range = all_points[:, 1].max() - all_points[:, 1].min()
+        z_range = all_points[:, 2].max() - all_points[:, 2].min()
+        max_range = max(x_range, y_range, z_range) / 2.0
+
+        # Calculate midpoints
+        mid_x = (all_points[:, 0].max() + all_points[:, 0].min()) * 0.5
+        mid_y = (all_points[:, 1].max() + all_points[:, 1].min()) * 0.5
+        mid_z = (all_points[:, 2].max() + all_points[:, 2].min()) * 0.5
+
+        # Set equal limits for all axes
+        ax.set_xlim(mid_x - max_range, mid_x + max_range)
+        ax.set_ylim(mid_y - max_range, mid_y + max_range)
+        ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+        # Set equal aspect ratio using set_box_aspect (if available, matplotlib >= 3.3.0)
+        try:
+            ax.set_box_aspect([1, 1, 1])
+        except AttributeError:
+            # Fallback for older matplotlib versions - manually set aspect
+            # The equal limits above should help, but we can't guarantee perfect aspect
+            pass
+
+    plt.tight_layout()
+
+    if isinstance(output_path, str) and len(output_path) > 0:
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"Saved 3D registration points only plot to: {output_path}")
         plt.close()
     else:
         pass
@@ -1621,8 +2039,9 @@ def main(args):
         return
 
     # Load registration statistics
+    mode = getattr(args, "mode", "auto")
     result = load_registration_stats(
-        register_folder, args.object_number, args.frame_number
+        register_folder, args.object_number, args.frame_number, mode=mode
     )
 
     if result is None:
@@ -1637,6 +2056,7 @@ def main(args):
         curr3d,
         keyframe_ids,
         reg_key_points_idx,
+        detected_mode,
     ) = result
     # key_points and curr3d are currently unused but kept for future use
     # _ = (
@@ -1676,10 +2096,12 @@ def main(args):
         plot_3d_output_path = f"{base_path}_3d.png"
         plot_3d_uncertainty_output_path = f"{base_path}_3d_uncertainty.png"
         plot_3d_residuals_output_path = f"{base_path}_3d_residuals.png"
+        plot_3d_points_only_output_path = f"{base_path}_3d_points_only.png"
     else:
         plot_3d_output_path = None
         plot_3d_uncertainty_output_path = None
         plot_3d_residuals_output_path = None
+        plot_3d_points_only_output_path = None
 
     # Create statistics plot (don't show yet)
     plot_registration_stats(
@@ -1690,6 +2112,7 @@ def main(args):
         args.frame_number,
         reg_key_points_idx=reg_key_points_idx,
         output_path=stats_output_path,
+        mode=detected_mode,
     )
 
     # Load data for 3D visualization
@@ -1733,6 +2156,7 @@ def main(args):
                 pair_keyframe_ids,
                 inliers,
                 plot_3d_output_path,
+                mode=detected_mode,
             )
 
             # Create uncertainty-colored 3D visualization
@@ -1747,6 +2171,8 @@ def main(args):
                 uncertainties,
                 inliers,
                 plot_3d_uncertainty_output_path,
+                mode=detected_mode,
+                reg_key_points_idx=reg_key_points_idx,
             )
 
             # Create residual-colored 3D visualization
@@ -1761,11 +2187,37 @@ def main(args):
                 residuals,
                 inliers,
                 plot_3d_residuals_output_path,
+                mode=detected_mode,
+                reg_key_points_idx=reg_key_points_idx,
+            )
+
+            # Create registration points only visualization
+            plot_3d_registration_points_only(
+                register_folder,
+                args.object_number,
+                args.frame_number,
+                key_points,
+                curr3d,
+                inliers,
+                plot_3d_points_only_output_path,
+                mode=detected_mode,
             )
         else:
             print("Warning: Could not load all key points for 3D visualization")
     else:
         print("Warning: key_points or curr3d not available for 3D visualization")
+        # Still try to create registration points only plot if we have the data
+        if key_points is not None and curr3d is not None:
+            plot_3d_registration_points_only(
+                register_folder,
+                args.object_number,
+                args.frame_number,
+                key_points,
+                curr3d,
+                inliers,
+                plot_3d_points_only_output_path if output_path else None,
+                mode=detected_mode,
+            )
 
     # Show all figures at once if not saving
     if not output_path:
@@ -1813,6 +2265,15 @@ if __name__ == "__main__":
         "-s",
         action="store_true",
         help="Save plot to default location in debug folder",
+    )
+
+    parser.add_argument(
+        "--mode",
+        "-m",
+        type=str,
+        default="auto",
+        choices=["auto", "f2f", "f2m"],
+        help="Registration mode: 'auto' to auto-detect, 'f2f' for frame-to-frame, 'f2m' for frame-to-map (default: auto)",
     )
 
     parsed_args = parser.parse_args()

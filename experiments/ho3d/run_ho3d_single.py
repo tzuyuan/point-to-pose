@@ -107,7 +107,7 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
             bbox_min_max=gt_bbox_minmax,
         )
 
-        # if i == 100:
+        # if i == 10:
         #     break
 
     gt_poses = np.array(gt_poses)

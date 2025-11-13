@@ -42,7 +42,7 @@ from point2pose.utils.se3_low_pass_filter import SE3LowPassFilter
 from point2pose.utils.lie import se3_to_vec, log_SE3
 
 
-class PipelineSingleProcess:
+class PipelineLocalMap:
     """
     Note: This version supports a single object only for now.
     """
@@ -83,7 +83,6 @@ class PipelineSingleProcess:
         )
 
         self.reg_uncer_thres = self.cfg.register.params.get("uncer_thres", 0.3)
-        self.reg_residual_thres = self.cfg.register.params.get("residual_thres", 0.07)
 
         # Cropped point cloud debug saving
         self.save_cropped_pcd = self.pipeline_cfg.get("save_cropped_pcd", False)
@@ -183,7 +182,7 @@ class PipelineSingleProcess:
         self.pose_log_files = []
 
         self._estimate_init_pose = self.pipeline_cfg.get("estimate_init_pose", False)
-        self._frame_reg_mode = self.pipeline_cfg.get("frame_reg_mode", "f2m")
+        self._frame2map_reg = self.pipeline_cfg.get("frame_to_map_reg", False)
         self._reg_remove_outside_mask = self.cfg.register.params.get(
             "remove_outside_mask", False
         )
@@ -209,12 +208,9 @@ class PipelineSingleProcess:
                     "obj_uncertainties",
                     "obj_valid",
                     "obj_key_point_frames",
-                    # key frame flag
-                    "is_key_frame",
                     # registeration stats
                     "reg_key_points_idx",
                     "reg_key_points",
-                    "reg_prev3d",  # For f2f mode
                     "reg_curr3d",
                     "reg_inliers",
                     "reg_residuals",
@@ -498,24 +494,14 @@ class PipelineSingleProcess:
         register_start = time.time()
         reg_stats = {}
         reg_stats_obj0 = {}
-        reg_stats_obj0.update(
-            {
-                "reg_key_points_idx": np.array([-1]),
-                "reg_key_points": np.array([-1]),
-                "reg_prev3d": np.array([-1]),  # For f2f mode
-                "reg_curr3d": np.array([-1]),
-                "too_few_points": 0,
-            }
-        )
         valid_stats = {}
         out_pose = np.tile(np.eye(4), (self.num_obj, 1, 1))
-
         for obj_id in range(self.num_obj):
 
             # check and update the keypoints from the graph optimizer
 
             # frame to map registration
-            if self._frame_reg_mode == "f2m":
+            if self._frame2map_reg:
                 t_extract_start = time.time()
 
                 if self._reg_remove_outside_mask:
@@ -552,6 +538,7 @@ class PipelineSingleProcess:
                 )
 
                 # TODO: put it at better place
+
                 if self.save_meta_data and obj_id == 0:
                     reg_stats_obj0.update(
                         {
@@ -568,6 +555,9 @@ class PipelineSingleProcess:
                         f"Frame {self.frame_id} - Object {obj_id} - Too few points: {key_points.shape[0]}"
                     )
                     continue
+
+                # self.data_logger.log({"too_few_points": 0})
+                reg_stats_obj0.update({"too_few_points": 0})
 
                 # TODO optimize this by saving the previous pose directly
                 prev_pose = self.objects[obj_id].pose
@@ -587,22 +577,72 @@ class PipelineSingleProcess:
                         key_points, curr3d, init_pose=prev_pose
                     )
 
-                # x_im1_i = se3_to_vec(log_SE3(inverse_SE3(pose_i_0) @ prev_pose))
+                # xi se(3) lie algebra. (omega, v)
+                xi_im1_i = se3_to_vec(log_SE3(inverse_SE3(pose_i_0) @ prev_pose))
 
+                # omega_norm = np.linalg.norm(xi_im1_i[:3])
+                # v_norm = np.linalg.norm(xi_im1_i[3:])
                 inliers = reg_stats.get("inliers", np.array([]))
                 residuals = reg_stats.get("residuals", np.array([]))
                 mean_residual = (
                     np.mean(residuals[inliers]) if len(inliers) > 0 else -1.0
                 )
-                # self.objects[obj_id].omega = x_im1_i[:3]
-                # self.objects[obj_id].v = x_im1_i[3:]
+                self.objects[obj_id].omega = xi_im1_i[:3]
+                self.objects[obj_id].v = xi_im1_i[3:]
                 self.objects[obj_id].mean_residual = mean_residual
 
-                if (
-                    mean_residual < self.reg_residual_thres
-                    and self.use_graph_optimization
-                ):
-                    self.objects[obj_id].pose = pose_i_0
+                if mean_residual < 0.07 and self.use_graph_optimization:
+                    pose = pose_i_0
+
+                    # update object info
+                    self.objects[obj_id].pose = pose
+
+                    # update object frame data and send to optimizer manager
+                    object_frame_data = ObjectFrameData(
+                        obj_id=obj_id,
+                        frame_id=self.frame_id,
+                        pose=pose,
+                        cur_3d=curr3d,
+                        cur_3d_idx=idx,
+                        inliers=reg_stats.get("inliers", np.array([])),
+                        residuals=reg_stats.get("residuals", np.array([])),
+                        uncertainties=uncertainties[idx],
+                    )
+
+                    # once the input is set, the optimizer manager will start the optimization process
+                    opt_results = self.optimizer.optimize(object_frame_data)
+
+                    # if we have optmized results, update the object info
+                    if opt_results is not None:
+                        ## TODO: do we update pose here...?
+                        # self.objects[obj_id].pose = opt_results.pose_optimized
+                        # print(
+                        #     f"key points before optimization: {self.objects[obj_id].key_points.shape}"
+                        # )
+                        # print(self.objects[obj_id].key_points)
+                        kp_idx = opt_results.key_points_idx_optimized
+                        # kp_idx = self.track_table.obj2track_map[obj_id][kp_idx]
+                        kp_optimized = opt_results.key_points_optimized
+                        self.objects[obj_id].key_points[kp_idx] = kp_optimized
+                        # print(
+                        #     f"key points after optimization: {self.objects[obj_id].key_points.shape}"
+                        # )
+                        # print(self.objects[obj_id].key_points)
+                elif mean_residual < 0.07:
+                    pose = pose_i_0
+                    self.objects[obj_id].pose = pose
+                else:
+                    pose = self.objects[obj_id].pose
+
+                out_pose[obj_id] = pose
+
+                # Log pose in TUM format
+                if self.save_pose and self.pose_log_files[obj_id] is not None:
+                    tum_pose = self._pose_matrix_to_tum_format(
+                        self.objects[obj_id].pose, timestamp=time.time()
+                    )
+                    self.pose_log_files[obj_id].write(tum_pose)
+                    self.pose_log_files[obj_id].flush()
 
                 # Log registration statistics
                 self._log_registration_stats(
@@ -620,9 +660,11 @@ class PipelineSingleProcess:
                         }
                     )
 
-                print(f"pose at frame {self.frame_id}: {self.objects[obj_id].pose}")
+                print(f"pose at frame {self.frame_id}: {pose}")
 
                 if self.debug_level > 1:
+
+                    self.save_optimizer_key_points(obj_id)
 
                     save_reg_pcd(
                         key_points,
@@ -634,56 +676,17 @@ class PipelineSingleProcess:
                     )
 
             # frame to frame registration
-            elif self._frame_reg_mode == "f2f":
+            else:
                 idx, prev3d, curr3d = self._extract_valid_idx_points_for_obj(
                     obj_id, self.track_table, track_3d, track_valid, visibles
                 )
-
-                # TODO: put it at better place
-                if self.save_meta_data and obj_id == 0:
-                    reg_stats_obj0.update(
-                        {
-                            "reg_key_points_idx": idx,
-                            "reg_prev3d": prev3d,  # For f2f mode, prev3d is equivalent to key_points
-                            "reg_curr3d": curr3d,
-                        }
-                    )
-
-                if prev3d.shape[0] < 3 or curr3d.shape[0] < 3:
-                    reg_stats_obj0.update({"too_few_points": 1})
-                    print(
-                        f"Frame {self.frame_id} - Object {obj_id} - Too few points: {prev3d.shape[0]}"
-                    )
-                    continue
+                # self.prev3d_before = self.track_table.track_3d
+                # self.curr3d_before = track_3d
+                # self.prev3d_after = prev3d
+                # self.curr3d_after = curr3d
 
                 pose, reg_stats = self.register.register(prev3d, curr3d)
-
-                inliers = reg_stats.get("inliers", np.array([]))
-                residuals = reg_stats.get("residuals", np.array([]))
-                mean_residual = (
-                    np.mean(residuals[inliers]) if len(inliers) > 0 else -1.0
-                )
-
-                self.objects[obj_id].mean_residual = mean_residual
-
-                if mean_residual < self.reg_residual_thres:
-                    self.objects[obj_id].pose = pose @ self.objects[obj_id].pose
-
-                # Log registration statistics
-                self._log_registration_stats(
-                    self.frame_id, obj_id, prev3d.shape[0], reg_stats
-                )
-
-                # TODO: put it at better place
-                if self.save_meta_data and obj_id == 0:
-                    reg_stats_obj0.update(
-                        {
-                            "reg_iter": reg_stats.get("iter", -1),
-                            "reg_thr": reg_stats.get("thr", -1.0),
-                            "reg_residuals": reg_stats.get("residuals", np.array([])),
-                            "reg_inliers": reg_stats.get("inliers", np.array([])),
-                        }
-                    )
+                self.objects[obj_id].pose = pose @ self.objects[obj_id].pose
 
                 # Log pose in TUM format
                 if self.save_pose and self.pose_log_files[obj_id] is not None:
@@ -693,6 +696,12 @@ class PipelineSingleProcess:
                     self.pose_log_files[obj_id].write(tum_pose)
                     self.pose_log_files[obj_id].flush()
 
+                # Log registration statistics
+                if self.debug_level > 0:
+                    self._log_registration_stats(
+                        self.frame_id, obj_id, prev3d.shape[0], reg_stats
+                    )
+
                 print(f"Frame {self.frame_id} - Object {obj_id} - Pose: {pose}")
                 if self.debug_level > 1:
                     save_reg_pcd(
@@ -701,70 +710,8 @@ class PipelineSingleProcess:
                         pose,
                         self._reg_debug_dir,
                         f"obj_{obj_id}_frame_{self.frame_id}",
-                        reg_stats,
                     )
-            elif self._frame_reg_mode == "hybrid":
-                pass
-            else:
-                raise ValueError(
-                    f"Invalid frame registration mode: {self._frame_reg_mode}. Please choose from f2f, f2m, or hybrid."
-                )
-
-            # -------------- graph optimization --------------
-            if (
-                self.objects[obj_id].mean_residual < self.reg_residual_thres
-                and self.use_graph_optimization
-            ):
-
-                # update object frame data and send to optimizer manager
-                object_frame_data = ObjectFrameData(
-                    obj_id=obj_id,
-                    frame_id=self.frame_id,
-                    pose=self.objects[obj_id].pose,
-                    cur_3d=curr3d,
-                    cur_3d_idx=idx,
-                    inliers=reg_stats.get("inliers", np.array([])),
-                    residuals=reg_stats.get("residuals", np.array([])),
-                    uncertainties=uncertainties[idx],
-                )
-
-                # once the input is set, the optimizer manager will start the optimization process
-                opt_results = self.optimizer.optimize(object_frame_data)
-
-                # if we have optmized results, update the object info
-                if opt_results is not None:
-                    ## TODO: do we update pose here...?
-                    # self.objects[obj_id].pose = opt_results.pose_optimized
-                    # print(
-                    #     f"key points before optimization: {self.objects[obj_id].key_points.shape}"
-                    # )
-                    # print(self.objects[obj_id].key_points)
-                    kp_idx = opt_results.key_points_idx_optimized
-                    # kp_idx = self.track_table.obj2track_map[obj_id][kp_idx]
-                    kp_optimized = opt_results.key_points_optimized
-                    self.objects[obj_id].key_points[kp_idx] = kp_optimized
-
-                    self.objects[obj_id].pose = opt_results.pose_optimized
-
-                    print(f"pose at frame {self.frame_id}: {self.objects[obj_id].pose}")
-                    # print(
-                    #     f"key points after optimization: {self.objects[obj_id].key_points.shape}"
-                    # )
-                    # print(self.objects[obj_id].key_points)
-
-                    if self.debug_level > 1:
-                        self.save_optimizer_key_points(obj_id)
-
-            # Log pose in TUM format
-            if self.save_pose and self.pose_log_files[obj_id] is not None:
-                tum_pose = self._pose_matrix_to_tum_format(
-                    self.objects[obj_id].pose, timestamp=time.time()
-                )
-                self.pose_log_files[obj_id].write(tum_pose)
-                self.pose_log_files[obj_id].flush()
-
         register_time = time.time() - register_start
-
         # print(f"Frame {self.frame_id} - Registration: {register_time:.4f}s")
 
         # update track table to the current frame info
@@ -775,29 +722,10 @@ class PipelineSingleProcess:
         table_update_time = time.time() - table_update_start
         # print(f"Frame {self.frame_id} - Track table update: {table_update_time:.4f}s")
 
-        # ------------- criterion and sample -------------
-        sampling_start = time.time()
-        self.crit_ctx.update_criterion_context(
-            cur_iter=self.frame_id,
-            uncertainty=uncertainties,
-            reg_stats=reg_stats,
-            track_table=self.track_table,
-            frame=frame,
-        )
-        self.samp_ctx.update_sampler_context(frame=frame, track_table=self.track_table)
-        # Reset key frame flag before sampling (it will be set during sampling if needed)
-        self.is_key_frame[0] = False
-        self._check_and_sample_for_all_obj(self.samp_ctx)
-        sampling_time = time.time() - sampling_start
-        # print(f"Frame {self.frame_id} - Criterion and sampling: {sampling_time:.4f}s")
-
         # ---------------- log meta data ----------------
         if self.save_meta_data:
             print("obj_id: 0---------------------------")
             print(self.objects[0].pose)
-            # Get key frame status for object 0 (set during sampling above)
-            is_key_frame_obj0 = self.is_key_frame.get(0, False)
-
             self.data_logger.log(
                 {
                     "timestamp": frame.timestamp,
@@ -814,11 +742,24 @@ class PipelineSingleProcess:
                     "obj_uncertainties": self.objects[0].uncertainties,
                     "obj_valid": self.objects[0].valid,
                     "obj_key_point_frames": self.objects[0].key_point_frames,
-                    "is_key_frame": is_key_frame_obj0,
                     **reg_stats_obj0,
                     **valid_stats,
                 }
             )
+
+        # ------------- criterion and sample -------------
+        sampling_start = time.time()
+        self.crit_ctx.update_criterion_context(
+            cur_iter=self.frame_id,
+            uncertainty=uncertainties,
+            reg_stats=reg_stats,
+            track_table=self.track_table,
+            frame=frame,
+        )
+        self.samp_ctx.update_sampler_context(frame=frame, track_table=self.track_table)
+        self._check_and_sample_for_all_obj(self.samp_ctx)
+        sampling_time = time.time() - sampling_start
+        # print(f"Frame {self.frame_id} - Criterion and sampling: {sampling_time:.4f}s")
 
         self.frame_id += 1
 
@@ -828,9 +769,6 @@ class PipelineSingleProcess:
             f"Frame {self.frame_id-1} - Total step time: {total_step_time:.4f}s - Breakdown: seg={segmenter_time:.3f}s, track={tracker_time:.3f}s, conv={conversion_time:.3f}s, reg={register_time:.3f}s, table={table_update_time:.3f}s, sample={sampling_time:.3f}s"
         )
         print("-" * 60)
-
-        for obj_id in range(self.num_obj):
-            out_pose[obj_id, :, :] = self.objects[obj_id].pose
 
         return out_pose
 
@@ -1407,7 +1345,6 @@ class PipelineSingleProcess:
 
     def _log_registration_stats(self, frame_id, obj_id, num_points, reg_stats):
         """
-        ### TODO: remove this legacy code
         Log registration statistics to file
         Args:
             frame_id: int current frame ID
