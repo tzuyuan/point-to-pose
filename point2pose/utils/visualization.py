@@ -342,6 +342,134 @@ def visualize_and_save_tracking_results(
     return display_frame
 
 
+def visualize_and_save_tracking_results_with_gt(
+    frame,
+    objects,
+    track_table,
+    est_result_frame=None,
+    gt_pose=None,
+    frame_id=None,
+    visualize_points=True,
+    points_vis_method="visible_uncertainty",
+    save_images=False,
+    output_image_dir=None,
+    camera_intrinsics=np.eye(3),
+    bbox_min_max=None,
+    gt_bbox_min_max=None,
+    pred_pose_color=(0, 255, 0),  # Green for predicted pose
+    gt_pose_color=(0, 0, 255),  # Red for GT pose
+):
+    """
+    Visualize tracking results on the frame with ground truth pose and bounding box overlay.
+
+    This function extends visualize_and_save_tracking_results by also drawing the GT pose
+    and bounding box in a different color to allow comparison with the predicted pose.
+
+    Args:
+        frame: Frame object containing RGB image
+        objects: List of tracked objects
+        track_table: Track table containing point tracks
+        gt_pose: Ground truth pose (4x4 transformation matrix) in camera frame. If None, GT won't be drawn.
+        frame_id: Frame identifier for saving images
+        visualize_points: Whether to visualize tracked points
+        points_vis_method: Method for visualizing points ("uncertainty", "visible", "visible_uncertainty")
+        save_images: Whether to save visualization images
+        output_image_dir: Directory to save images
+        camera_intrinsics: Camera intrinsic matrix (3x3)
+        bbox_min_max: Bounding box min/max for predicted pose (2x3 array)
+        gt_bbox_min_max: Bounding box min/max for GT pose (2x3 array). If None, uses bbox_min_max.
+        pred_pose_color: BGR color for predicted pose visualization (default: green)
+        gt_pose_color: BGR color for GT pose visualization (default: red)
+
+    Returns:
+        display_frame: Image with visualizations overlaid
+    """
+    # First, call the original function to get the base visualization
+    if est_result_frame is not None:
+        display_frame = est_result_frame
+    else:
+        display_frame = visualize_and_save_tracking_results(
+            frame=frame,
+            objects=objects,
+            track_table=track_table,
+            frame_id=None,  # Don't save yet, we'll save after adding GT
+            visualize_points=visualize_points,
+            points_vis_method=points_vis_method,
+            save_images=False,  # Don't save yet
+            output_image_dir=None,
+            camera_intrinsics=camera_intrinsics,
+            bbox_min_max=bbox_min_max,
+        )
+
+    # Now overlay GT pose and bounding box if provided
+    if gt_pose is not None:
+        # Use GT bbox if provided, otherwise use the same bbox as prediction
+        if gt_bbox_min_max is not None:
+            gt_bbox_min_max_local = gt_bbox_min_max
+        elif bbox_min_max is not None:
+            gt_bbox_min_max_local = bbox_min_max
+        else:
+            # Fallback: try to get bbox from first object
+            if len(objects) > 0 and hasattr(objects[0], "bbox"):
+                half = 0.5 * np.asarray(objects[0].bbox.extent, dtype=float)
+                gt_bbox_min_max_local = np.vstack([-half, +half])  # (2,3)
+            else:
+                gt_bbox_min_max_local = None
+
+        if gt_bbox_min_max_local is not None:
+            # Draw GT bounding box in red
+            display_frame = draw_posed_3d_box(
+                camera_intrinsics,
+                display_frame,
+                gt_pose,
+                gt_bbox_min_max_local,
+                line_color=gt_pose_color,
+                linewidth=2,
+            )
+            # Draw GT coordinate axes in red
+            display_frame = draw_xyz_axis(
+                image=display_frame,
+                ob_in_cam=gt_pose,
+                K=camera_intrinsics,
+                thickness=3,
+            )
+
+    # # Re-draw predicted pose with specified color to ensure it's visible
+    # # (in case GT was drawn on top)
+    # for obj in objects:
+    #     if obj.pose is not None:
+    #         pose = obj.pose @ obj.init_pose
+    #         if bbox_min_max is not None:
+    #             bbox_min_max_local = bbox_min_max
+    #         else:
+    #             half = 0.5 * np.asarray(obj.bbox.extent, dtype=float)
+    #             bbox_min_max_local = np.vstack([-half, +half])  # (2,3)
+
+    #         # Re-draw predicted bounding box with specified color
+    #         display_frame = draw_posed_3d_box(
+    #             camera_intrinsics,
+    #             display_frame,
+    #             pose,
+    #             bbox_min_max_local,
+    #             line_color=pred_pose_color,
+    #             linewidth=2,
+    #         )
+    #         # Re-draw predicted coordinate axes
+    #         display_frame = draw_xyz_axis(
+    #             image=display_frame,
+    #             ob_in_cam=pose,
+    #             K=camera_intrinsics,
+    #             thickness=3,
+    #         )
+
+    # Save image if flag is enabled and frame_id is provided
+    if save_images and frame_id is not None:
+        image_filename = os.path.join(output_image_dir, f"frame_{frame_id:06d}.png")
+        cv2.imwrite(str(image_filename), display_frame)
+
+    return display_frame
+
+
 # def colors_for_frame_ids(frame_ids: np.ndarray) -> np.ndarray:
 #     """Return consistent BGR colors for the provided frame ids."""
 #     if frame_ids.size == 0:

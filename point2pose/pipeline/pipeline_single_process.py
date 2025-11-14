@@ -39,7 +39,7 @@ from point2pose.io.outputs.point_cloud_io import save_reg_pcd, save_pcd
 from point2pose.utils.camera import convert_pixel_to_world
 from point2pose.utils.transform import transform_pts, inverse_SE3
 from point2pose.utils.se3_low_pass_filter import SE3LowPassFilter
-from point2pose.utils.lie import se3_to_vec, log_SE3
+from point2pose.utils.lie import se3_to_vec, log_SE3, exp_se3, vec_to_se3
 
 
 class PipelineSingleProcess:
@@ -464,6 +464,8 @@ class PipelineSingleProcess:
         tracker_start = time.time()
         tracks, uncertainties, visibles = self.tracker.track_once(frame)
 
+        # print("track: ", tracks)
+
         print(f"num tracks: {len(tracks)}")
         # Convert visibles to boolean since TAPIR returns float32
         # visibles = visibles.astype(bool)
@@ -655,8 +657,12 @@ class PipelineSingleProcess:
                         f"Frame {self.frame_id} - Object {obj_id} - Too few points: {prev3d.shape[0]}"
                     )
                     continue
-
-                pose, reg_stats = self.register.register(prev3d, curr3d)
+                if self.register.type == "svd_uncertainty_outlier":
+                    pose, reg_stats = self.register.register(
+                        prev3d, curr3d, sigma_tgt=uncertainties[idx]
+                    )
+                else:
+                    pose, reg_stats = self.register.register(prev3d, curr3d)
 
                 inliers = reg_stats.get("inliers", np.array([]))
                 residuals = reg_stats.get("residuals", np.array([]))
@@ -704,7 +710,188 @@ class PipelineSingleProcess:
                         reg_stats,
                     )
             elif self._frame_reg_mode == "hybrid":
-                pass
+                # --- 1) F2F odometry (relative transform) ---
+                idx_f2f, prev3d, curr3d_f2f = self._extract_valid_idx_points_for_obj(
+                    obj_id, self.track_table, track_3d, track_valid, visibles
+                )
+
+                stats_f2f = {}
+                T_rel = None
+                mean_res_f2f = -1.0
+
+                if prev3d.shape[0] >= 3 and curr3d_f2f.shape[0] >= 3:
+                    if self.register.type == "svd_uncertainty_outlier":
+                        T_rel, stats_f2f = self.register.register(
+                            prev3d, curr3d_f2f, sigma_tgt=uncertainties[idx_f2f]
+                        )
+                    else:
+                        T_rel, stats_f2f = self.register.register(prev3d, curr3d_f2f)
+
+                    inliers_f2f = stats_f2f.get("inliers", np.array([]))
+                    residuals_f2f = stats_f2f.get("residuals", np.array([]))
+                    if len(residuals_f2f) > 0:
+                        if len(inliers_f2f) == len(residuals_f2f) and np.any(
+                            inliers_f2f
+                        ):
+                            mean_res_f2f = float(np.mean(residuals_f2f[inliers_f2f]))
+                        else:
+                            mean_res_f2f = float(np.mean(residuals_f2f))
+
+                # Predict odom pose even if we won't use it finally
+                T_prev = self.objects[obj_id].pose.copy()
+                if T_rel is not None and mean_res_f2f > 0 and mean_res_f2f < 10.0:
+                    T_odom = T_rel @ T_prev
+                else:
+                    # if F2F failed badly, just use previous pose
+                    T_odom = T_prev
+
+                # --- 2) F2M registration (absolute to map / first frame) ---
+                # (only if we have keypoints)
+                stats_f2m = {}
+                T_map = None
+                idx_f2m = np.array([], dtype=int)
+                curr3d_f2m = np.zeros((0, 3), dtype=float)
+                key_points_f2m = np.zeros((0, 3), dtype=float)
+
+                if len(self.track_table.obj2track_map[obj_id]) > 0:
+                    t_extract_start = time.time()
+                    if self._reg_remove_outside_mask:
+                        (
+                            idx_f2m,
+                            key_points_f2m,
+                            curr3d_f2m,
+                            new_visibles,
+                            valid_stats,
+                        ) = self._extract_valid_key_points_mask_remove(
+                            self.objects[obj_id],
+                            self.track_table.obj2track_map[obj_id],
+                            tracks,
+                            track_3d,
+                            visibles,
+                            track_valid,
+                            uncertainties,
+                            frame.mask[obj_id, 0],
+                            uncertainty_thres=self.reg_uncer_thres,
+                        )
+                        self.track_table.visible = new_visibles
+                    else:
+                        (
+                            idx_f2m,
+                            key_points_f2m,
+                            curr3d_f2m,
+                            valid_stats,
+                        ) = self._extract_valid_key_points(
+                            self.objects[obj_id],
+                            self.track_table.obj2track_map[obj_id],
+                            track_3d,
+                            visibles,
+                            track_valid,
+                            uncertainties,
+                            uncertainty_thres=self.reg_uncer_thres,
+                        )
+                    t_extract_end = time.time()
+                    print(
+                        f"[Hybrid] Extract valid key points time: {t_extract_end - t_extract_start:.4f}s"
+                    )
+
+                    # run F2M only if enough points
+                    if key_points_f2m.shape[0] >= 3 and curr3d_f2m.shape[0] >= 3:
+                        if self.register.type == "svd_uncertainty_outlier":
+                            T_map, stats_f2m = self.register.register(
+                                key_points_f2m,
+                                curr3d_f2m,
+                                init_pose=T_odom,
+                                sigma_tgt=uncertainties[idx_f2m],
+                            )
+                        else:
+                            T_map, stats_f2m = self.register.register(
+                                key_points_f2m,
+                                curr3d_f2m,
+                                init_pose=T_odom,
+                            )
+
+                        # meta-data logging hook for obj 0
+                        if self.save_meta_data and obj_id == 0:
+                            reg_stats_obj0.update(
+                                {
+                                    "reg_key_points_idx": idx_f2m,
+                                    "reg_key_points": key_points_f2m,
+                                    "reg_curr3d": curr3d_f2m,
+                                }
+                            )
+
+                # --- 3) Fuse T_odom and T_map ---
+                T_fused, mean_res_used = self._fuse_f2f_f2m(
+                    T_odom,
+                    stats_f2f,
+                    T_map,
+                    stats_f2m,
+                    min_inliers=10,
+                )
+
+                self.objects[obj_id].pose = T_fused
+                self.objects[obj_id].mean_residual = mean_res_used
+
+                # For graph optimization later, pick the set of points that contributed more
+                # Simple policy: if T_map was used (i.e., F2M passed gating in fusion),
+                # the weights will push alpha > 0.5. We can check that indirectly.
+                used_f2m = (
+                    T_map is not None
+                    and mean_res_used > 0
+                    and stats_f2m.get("residuals", np.array([])).size > 0
+                )
+
+                if used_f2m:
+                    idx = idx_f2m
+                    curr3d = curr3d_f2m
+                    reg_stats = stats_f2m
+                else:
+                    idx = idx_f2f
+                    curr3d = curr3d_f2f
+                    reg_stats = stats_f2f
+
+                # Logging for obj0
+                if self.save_meta_data and obj_id == 0:
+                    reg_stats_obj0.update(
+                        {
+                            "reg_iter": reg_stats.get("iter", -1),
+                            "reg_thr": reg_stats.get("thr", -1.0),
+                            "reg_residuals": reg_stats.get("residuals", np.array([])),
+                            "reg_inliers": reg_stats.get("inliers", np.array([])),
+                        }
+                    )
+
+                # Log registration statistics to txt
+                self._log_registration_stats(
+                    self.frame_id,
+                    obj_id,
+                    int(idx.shape[0]),
+                    reg_stats,
+                )
+
+                print(
+                    f"[Hybrid] Frame {self.frame_id} - Object {obj_id} - mean_residual_used: {mean_res_used:.4f}"
+                )
+
+                if self.debug_level > 1:
+                    if used_f2m:
+                        save_reg_pcd(
+                            key_points_f2m,
+                            curr3d_f2m,
+                            T_map,
+                            self._reg_debug_dir,
+                            f"obj_{obj_id}_frame_{self.frame_id}_hybrid_f2m",
+                            stats_f2m,
+                        )
+                    else:
+                        save_reg_pcd(
+                            prev3d,
+                            curr3d_f2f,
+                            T_rel if T_rel is not None else np.eye(4),
+                            self._reg_debug_dir,
+                            f"obj_{obj_id}_frame_{self.frame_id}_hybrid_f2f",
+                            stats_f2f,
+                        )
             else:
                 raise ValueError(
                     f"Invalid frame registration mode: {self._frame_reg_mode}. Please choose from f2f, f2m, or hybrid."
@@ -738,12 +925,35 @@ class PipelineSingleProcess:
                     # print(
                     #     f"key points before optimization: {self.objects[obj_id].key_points.shape}"
                     # )
-                    # print(self.objects[obj_id].key_points)
-                    kp_idx = opt_results.key_points_idx_optimized
-                    # kp_idx = self.track_table.obj2track_map[obj_id][kp_idx]
-                    kp_optimized = opt_results.key_points_optimized
-                    self.objects[obj_id].key_points[kp_idx] = kp_optimized
+                    # Vectorized remapping from track IDs -> object-local keypoint indices
+                    track_ids_opt = np.asarray(
+                        opt_results.key_points_idx_optimized, dtype=int
+                    )
+                    pts_opt = np.asarray(opt_results.key_points_optimized, dtype=float)
 
+                    obj_track_ids = np.asarray(
+                        self.track_table.obj2track_map[obj_id], dtype=int
+                    )
+
+                    # Build vectorized lookup:
+                    # For each optimized track_id, find its index in obj_track_ids.
+                    # local_kp_idx[i] = j  where  obj_track_ids[j] == track_ids_opt[i]
+                    #
+                    # Fully vectorized via broadcasting:
+                    # shape (num_kp_obj, 1) == shape (1, num_landmarks)
+                    matches = obj_track_ids[:, None] == track_ids_opt[None, :]
+
+                    # Convert boolean matrix to indices (rows where match=True)
+                    # If a track_id doesn't exist for this object, it will have no match.
+                    local_kp_idx, opt_col_idx = np.where(matches)
+
+                    # Select the optimized points that correspond to matched columns
+                    pts_to_update = pts_opt[opt_col_idx]
+
+                    # Update object keypoints in one shot
+                    self.objects[obj_id].key_points[local_kp_idx] = pts_to_update
+
+                    # Finally update pose
                     self.objects[obj_id].pose = opt_results.pose_optimized
 
                     print(f"pose at frame {self.frame_id}: {self.objects[obj_id].pose}")
@@ -1663,3 +1873,113 @@ class PipelineSingleProcess:
         # Clamp tiny negatives (can happen with noise)
         np.maximum(d_metric, 0.0, out=d_metric)
         return d_metric
+
+    def _fuse_f2f_f2m(
+        self,
+        T_odom,
+        stats_f2f,
+        T_map,
+        stats_f2m,
+        min_inliers=10,
+    ):
+        """
+        Fuse frame-to-frame (odom) and frame-to-map (map) estimates in SE(3).
+
+        Args:
+            T_odom: (4,4) np.array, pose from chaining F2F
+            stats_f2f: reg_stats from F2F register (may be {})
+            T_map: (4,4) np.array or None, pose from F2M (absolute in map)
+            stats_f2m: reg_stats from F2M register (may be {})
+            min_inliers: minimum inliers to consider a measurement useful
+
+        Returns:
+            T_fused: (4,4) fused pose
+            mean_res_used: float, effective residual used (for logging / gating)
+        """
+        # --- if no F2M, just return odom ---
+        if T_map is None or stats_f2m is None:
+            # fallback: pure odom
+            residuals_f2f = stats_f2f.get("residuals", np.array([]))
+            inliers_f2f = stats_f2f.get("inliers", np.array([], dtype=bool))
+            if len(residuals_f2f) > 0 and len(inliers_f2f) == len(residuals_f2f):
+                mean_res_f2f = float(
+                    np.mean(residuals_f2f[inliers_f2f])
+                    if np.any(inliers_f2f)
+                    else np.mean(residuals_f2f)
+                )
+            else:
+                mean_res_f2f = -1.0
+            return T_odom, mean_res_f2f
+
+        # --- compute mean residuals and inlier ratios ---
+        def _residual_stats(stats):
+            res = stats.get("residuals", np.array([]))
+            inl = stats.get("inliers", np.array([], dtype=bool))
+            if len(res) == 0:
+                return -1.0, 0.0, 0
+            if len(inl) == len(res):
+                if np.any(inl):
+                    mean_res = float(np.mean(res[inl]))
+                    inlier_ratio = float(np.mean(inl))
+                    n_inliers = int(np.sum(inl))
+                else:
+                    mean_res = float(np.mean(res))
+                    inlier_ratio = 0.0
+                    n_inliers = 0
+            else:
+                mean_res = float(np.mean(res))
+                inlier_ratio = 0.0
+                n_inliers = 0
+            return mean_res, inlier_ratio, n_inliers
+
+        mean_res_f2f, inlier_ratio_f2f, n_inl_f2f = _residual_stats(stats_f2f)
+        mean_res_f2m, inlier_ratio_f2m, n_inl_f2m = _residual_stats(stats_f2m)
+
+        # --- basic gating for F2M ---
+        # 1) enough inliers
+        if n_inl_f2m < min_inliers:
+            return T_odom, mean_res_f2f
+
+        # 2) residual not insane
+        if mean_res_f2m < 0 or mean_res_f2m > self.reg_residual_thres:
+            return T_odom, mean_res_f2f
+
+        # 3) relative transform between odom and map not crazy
+        T_rel = inverse_SE3(T_odom) @ T_map  # odom -> map
+        xi_rel = se3_to_vec(log_SE3(T_rel))  # (6,)
+        rot_norm = np.linalg.norm(xi_rel[:3])
+        trans_norm = np.linalg.norm(xi_rel[3:])
+        if rot_norm > np.deg2rad(10.0) or trans_norm > 0.1:
+            # If F2M disagrees by >20deg or >10cm, treat as outlier
+            return T_odom, mean_res_f2f
+
+        # --- construct weights from residuals & inliers ---
+        # smaller residual, more inliers => higher weight
+        def _weight(mean_res, inlier_ratio, min_res=1e-4):
+            if mean_res <= 0:
+                return 0.0
+            return 1.0 / max(mean_res, min_res)
+
+        w_odom = _weight(mean_res_f2f, inlier_ratio_f2f)
+        w_map = _weight(mean_res_f2m, inlier_ratio_f2m)
+
+        # If F2M is not at least somewhat better, just keep odom
+        if w_map <= 0 or w_map < 0.1 * w_odom:
+            return T_odom, mean_res_f2f
+
+        alpha = w_map / (w_map + w_odom)  # in (0,1)
+
+        # --- SE(3) fusion: T_fused = T_odom * exp(alpha * log(T_odom^{-1} T_map)) ---
+        xi_fuse = alpha * xi_rel
+        # You likely already have an SE3 exp; if not, implement or reuse your lie utils.
+        # Here I'll assume you have `exp_SE3` that maps 6D -> 4x4.
+
+        T_corr = exp_se3(vec_to_se3(xi_fuse))
+        T_fused = T_odom @ T_corr
+
+        # Effective residual (for downstream gating) - you can pick map or weighted
+        mean_res_used = (w_odom * mean_res_f2f + w_map * mean_res_f2m) / (
+            w_odom + w_map
+        )
+
+        return T_fused, mean_res_used

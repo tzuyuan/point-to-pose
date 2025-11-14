@@ -70,7 +70,7 @@ tracker:
 sampler: 
   type: super_point
   params:
-    num_points: 100
+    num_points: 20
     density_per_kpx: -1
 
     min_points: 5

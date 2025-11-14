@@ -35,16 +35,16 @@ pipeline:
     cropped_pcd_dir: /home/justin/code/point-to-pose/debug/cropped_pcd
 
 register:
-  type: svd_uncertainty_outlier
+  type: svd_residual_outlier
   params:
     remove_outside_mask: true
     debug_level: 0
-    max_iter: 5
+    max_iter: 15
     uncer_thres: 0.3
     threshold_method: mad
     inlier_thres: 0.01
     thres_reduce_factor: 0.005
-    mad_scale: 1.0
+    mad_scale: 5
     min_inliers: 3
 
     # outlier pose
@@ -80,15 +80,15 @@ tracker:
 sampler: 
   type: super_point
   params:
-    num_points: 30
+    num_points: 20
     density_per_kpx: -1
 
     min_points: 5
     max_points: 50
     edge_margin_px: 3
     remove_convex_hull: false
-    inflate_points: True
-    inflate_radius_px: 10
+    inflate_points: false
+    inflate_radius_px: 20
 
     cell_size: -1
 

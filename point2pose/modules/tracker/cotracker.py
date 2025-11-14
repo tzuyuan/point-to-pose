@@ -54,6 +54,7 @@ class CoTrackerRealtimeTracker(Tracker):
         Returns:
             indices: [num_points], indices of the newly added points
         """
+        # print("new points: ", new_points)
         new_query_points = self._convert_select_points_to_query_points(
             frame.id, new_points
         )
@@ -64,14 +65,14 @@ class CoTrackerRealtimeTracker(Tracker):
         self._new_query_points = new_query_points
         self._need_commit = True
 
-        print("new query points: ", new_query_points[:, 0])
-        print("_new query points: ", self._new_query_points[:, 0])
+        # print("new query points: ", new_query_points)
+        # print("_new query points: ", self._new_query_points[:, 0])
 
-        print(f"Added {new_query_points.shape[0]} query points")
-        print(f"Total query points: {self._query_points.shape[0]}")
-        print(
-            f"return indices: {np.arange(self._query_points.shape[0] - new_query_points.shape[0], self._query_points.shape[0])}"
-        )
+        # print(f"Added {new_query_points.shape[0]} query points")
+        # print(f"Total query points: {self._query_points.shape[0]}")
+        # print(
+        #     f"return indices: {np.arange(self._query_points.shape[0] - new_query_points.shape[0], self._query_points.shape[0])}"
+        # )
 
         return np.arange(
             self._query_points.shape[0] - new_query_points.shape[0],
@@ -94,7 +95,7 @@ class CoTrackerRealtimeTracker(Tracker):
 
         predictions = None
         visibles = None
-        print("need commit: ", self._need_commit)
+        # print("need commit: ", self._need_commit)
         # we copy the first window_len frames to the window_frames deque
         if self._is_first_frame:
             for i in range(self._model.model.window_len):
@@ -121,10 +122,10 @@ class CoTrackerRealtimeTracker(Tracker):
                 )
                 self._need_commit = False
         if predictions is not None and visibles is not None:
-            print("predictions: ", predictions.shape)
-            print("uncertainties: ", uncertainties.shape)
-            print("uncertainties: ", uncertainties)
-            print("visibles: ", visibles.shape)
+            # print("predictions: ", predictions)
+            # print("uncertainties: ", uncertainties.shape)
+            # print("uncertainties: ", uncertainties)
+            # print("visibles: ", visibles.shape)
             return (
                 predictions.squeeze(0).cpu().numpy()[-1, :, :],
                 uncertainties.squeeze(0).cpu().numpy()[-1, :],
@@ -132,7 +133,7 @@ class CoTrackerRealtimeTracker(Tracker):
             )
         else:
             return (
-                self._query_points.cpu().numpy(),
+                self._query_points[:, 1:].cpu().numpy(),
                 0.1 * np.ones((self._query_points.shape[0])),
                 np.ones((self._query_points.shape[0])),
             )

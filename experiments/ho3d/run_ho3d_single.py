@@ -17,7 +17,10 @@ from point2pose.io.sources.dataset.datareader import Ho3dReader
 from point2pose.pipeline.pipeline_single_process import PipelineSingleProcess
 from point2pose.data_types.frame import Frame
 from point2pose.utils.transform import inverse_SE3
-from point2pose.utils.visualization import visualize_and_save_tracking_results
+from point2pose.utils.visualization import (
+    visualize_and_save_tracking_results,
+    visualize_and_save_tracking_results_with_gt,
+)
 from point2pose.utils.evaluation import (
     adi_err,
     add_err,
@@ -47,9 +50,11 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
 
     out_folder = os.path.join(out_dir, video_name, "")
     vis_folder = os.path.join(out_folder, "output_images")
+    with_gt_folder = os.path.join(out_folder, "with_gt")
 
     os.system(f"rm -rf {out_folder} && mkdir -p {out_folder}")
     os.system(f"rm -rf {vis_folder} && mkdir -p {vis_folder}")
+    os.system(f"rm -rf {with_gt_folder} && mkdir -p {with_gt_folder}")
 
     cfg = OmegaConf.load(config_path)
     vis_cfg = cfg.visualization.params
@@ -94,7 +99,7 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
         if i == 0:
             pipeline.objects[0].init_pose = gt_pose
 
-        visualize_and_save_tracking_results(
+        display_frame = visualize_and_save_tracking_results(
             frame=frame,
             objects=pipeline.objects,
             track_table=pipeline.track_table,
@@ -105,6 +110,23 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
             output_image_dir=vis_folder,
             camera_intrinsics=reader.K,
             bbox_min_max=gt_bbox_minmax,
+        )
+
+        visualize_and_save_tracking_results_with_gt(
+            frame=frame,
+            objects=pipeline.objects,
+            track_table=pipeline.track_table,
+            est_result_frame=display_frame,
+            gt_pose=gt_pose,
+            frame_id=i,
+            visualize_points=vis_cfg.visualize_points,
+            points_vis_method=vis_cfg.points_vis_method,
+            save_images=vis_cfg.save_images,
+            output_image_dir=with_gt_folder,
+            camera_intrinsics=reader.K,
+            bbox_min_max=gt_bbox_minmax,
+            gt_bbox_min_max=gt_bbox_minmax,
+            pred_pose_color=(0, 255, 0),
         )
 
         # if i == 10:

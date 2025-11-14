@@ -76,7 +76,7 @@ class SVDUncertaintyOutlierRegister(Register):
             if self._threshold_method == "mad":
                 med = np.median(residuals)
                 mad = np.median(np.abs(residuals - med)) + 1e-12
-                thr = med + self._mad_scale * 1.4826 * mad  # 1.4826 ~ std for Gaussian
+                thr = med + self._mad_scale * mad  # 1.4826 ~ std for Gaussian
             elif self._threshold_method == "fixed":
                 thr = float(self._inlier_thres)
             elif self._threshold_method == "reduce":
