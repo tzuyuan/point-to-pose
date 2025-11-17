@@ -48,24 +48,24 @@ segmenter:
     device: cuda
 
 tracker:
-  # type: tapir
-  # params:
-  #   resize_height: 256
-  #   resize_width: 256
-  #   device: cuda
-  #   checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
+  type: tapir
+  params:
+    resize_height: 256
+    resize_width: 256
+    device: cuda
+    checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
  
   
-  type: cotracker3_online
-  params:
-    img_height: 480
-    img_width: 640
-    resize_height: 480
-    resize_width: 640
-    device: cuda
-    window_len: 16
-    v2: False  # keep False unless you specifically use v2 weights
-    checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
+  # type: cotracker3_online
+  # params:
+  #   img_height: 480
+  #   img_width: 640
+  #   resize_height: 480
+  #   resize_width: 640
+  #   device: cuda
+  #   window_len: 16
+  #   v2: False  # keep False unless you specifically use v2 weights
+  #   checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
 
 sampler: 
   type: super_point

@@ -89,8 +89,8 @@ def convert_pixel_to_world(
     min_depth=0.05,
     max_depth=1.0,
     fill_missing_depth=False,  # NEW: if True, fill NaN depth with n×n neighbor mean
-    window_size=3,  # NEW: odd integer window size (3,5,7,...)
-    min_neighbors=1,  # NEW: require at least this many valid neighbors to fill
+    window_size=3,  # odd integer window size (3,5,7,...)
+    min_neighbors=1,  # require at least this many valid neighbors to fill
 ):
     """
     Convert pixel coordinates to world coordinates with optional neighbor-based depth filling.
@@ -267,3 +267,81 @@ def convert_pixel_within_mask_to_world(
     )
 
     return world_pts, valid
+
+
+def compute_normals_from_depth(
+    depth,
+    depth_factor=1.0,
+    cam_intrinsics=np.eye(3),
+    min_depth=0.05,
+    max_depth=1.0,
+    fill_missing_depth=False,  # NEW: if True, fill NaN depth with n×n neighbor mean
+    window_size=3,  # NEW: odd integer window size (3,5,7,...)
+    min_neighbors=1,  # NEW: require at least this many valid neighbors to fill
+):
+    """
+    depth: (H, W) depth map in meters
+    K: (3, 3) intrinsics
+
+    returns:
+        normals: (H, W, 3) unit normals in camera frame
+        points:  (H, W, 3) 3D points in camera frame
+    """
+    H, W = depth.shape
+    # Create all pixel coordinates using meshgrid
+    xs, ys = np.meshgrid(np.arange(W), np.arange(H), indexing="xy")
+    pixels = np.stack([xs.ravel(), ys.ravel()], axis=1)
+    pts, _ = convert_pixel_to_world(
+        pixel=pixels,
+        depth_image=depth,
+        cam_intrinsics=cam_intrinsics,
+        depth_factor=depth_factor,
+        remove_invalid=False,
+        min_depth=min_depth,
+        max_depth=max_depth,
+        fill_missing_depth=fill_missing_depth,  # if True, fill NaN depth with n×n neighbor mean
+        window_size=window_size,  # odd integer window size (3,5,7,...)
+        min_neighbors=min_neighbors,  # require at least this many valid neighbors to fill
+    )  # (N, 3)
+
+    pts = pts.reshape(H, W, 3)
+
+    # mask invalid depths
+    invalid = (depth == 0.0) | ~np.isfinite(depth)
+
+    # we compute normals for interior pixels [1:-1, 1:-1]
+    P = pts[1:-1, 1:-1]  # (H-2, W-2, 3)
+    Px = pts[1:-1, 2:]  # (H-2, W-2, 3) right neighbor
+    Py = pts[2:, 1:-1]  # (H-2, W-2, 3) down neighbor
+
+    Tu = Px - P  # tangent along +u
+    Tv = Py - P  # tangent along +v
+
+    # cross product Tu x Tv
+    N = np.cross(Tu, Tv)  # (H-2, W-2, 3)
+
+    # normalize
+    norm = np.linalg.norm(N, axis=-1, keepdims=True)
+    eps = 1e-8
+    N = N / (norm + eps)
+
+    # full-sized normal image, initialize with zeros
+    normals = np.zeros((H, W, 3), dtype=np.float32)
+    normals[1:-1, 1:-1] = N
+
+    # invalidate normals where any of the 3 depth samples are invalid
+    inv_center = invalid[1:-1, 1:-1]
+    inv_right = invalid[1:-1, 2:]
+    inv_down = invalid[2:, 1:-1]
+    bad = inv_center | inv_right | inv_down
+
+    normals[1:-1, 1:-1][bad] = 0.0  # or np.nan if you prefer
+
+    # (Optional) orient normals to face the camera (assuming camera at origin, looking +Z)
+    # If dot(n, p) > 0, flip it so it roughly points towards the camera.
+    P_full = pts
+    dots = (normals * P_full).sum(axis=-1)  # (H, W)
+    flip_mask = dots > 0
+    normals[flip_mask] *= -1.0
+
+    return normals, pts

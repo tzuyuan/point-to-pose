@@ -5,7 +5,7 @@ pipeline:
     max_num_obj: 2
     estimate_init_pose: true
     # frame_reg_mode: f2f, f2m, hybrid
-    frame_reg_mode: f2f
+    frame_reg_mode: f2m
 
     use_segmenter: false
 
@@ -21,7 +21,7 @@ pipeline:
     device: cuda
     depth_encoder: vitl
 
-    use_graph_optimization: false
+    use_graph_optimization: true
 
     debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/
@@ -58,24 +58,24 @@ segmenter:
     device: cuda
 
 tracker:
-  type: tapir
-  params:
-    resize_height: 480
-    resize_width: 480
-    device: cuda
-    checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
+  # type: tapir
+  # params:
+  #   resize_height: 480
+  #   resize_width: 480
+  #   device: cuda
+  #   checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
  
   
-  # type: cotracker3_online
-  # params:
-  #   img_height: 480
-  #   img_width: 640
-  #   resize_height: 480
-  #   resize_width: 640
-  #   device: cuda
-  #   window_len: 16
-  #   v2: False  # keep False unless you specifically use v2 weights
-  #   checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
+  type: cotracker3_online
+  params:
+    img_height: 480
+    img_width: 640
+    resize_height: 480
+    resize_width: 640
+    device: cuda
+    window_len: 16
+    v2: False  # keep False unless you specifically use v2 weights
+    checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
 
 sampler: 
   type: super_point
