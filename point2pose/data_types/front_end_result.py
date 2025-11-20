@@ -12,6 +12,9 @@ class FrontEndResult:
     frame_id: int
     # Per-object results, keyed by obj_id
     obj_poses: Dict[int, np.ndarray] = field(default_factory=dict)  # 4x4 pose matrices
+    rel_poses: Dict[int, np.ndarray] = field(
+        default_factory=dict
+    )  # 4x4 relative pose matrices
 
     # Registration stats per object
     # Key: obj_id, Value: Dict with stats (inliers, residuals, etc.)
@@ -25,6 +28,10 @@ class FrontEndResult:
     valid_indices: Dict[int, np.ndarray] = field(default_factory=dict)
     valid_key_points: Dict[int, np.ndarray] = field(default_factory=dict)
     valid_curr_3d: Dict[int, np.ndarray] = field(default_factory=dict)
+
+    # Extra debug/validation stats from extraction (e.g. masks)
+    # Key: obj_id, Value: Dict of arrays
+    valid_stats: Dict[int, Dict[str, Any]] = field(default_factory=dict)
 
     # Track table update data
     tracks: Optional[np.ndarray] = None

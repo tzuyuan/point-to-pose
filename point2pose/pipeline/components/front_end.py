@@ -145,8 +145,10 @@ class FrontEnd:
                 continue
 
             # ----------- Registration Logic -----------
-            idx_f2f, prev3d, curr3d_f2f = self._extract_valid_idx_points_for_obj(
-                obj_id, track_table, track_3d, track_valid, current_visibles
+            idx_f2f, prev3d, curr3d_f2f, valid_stats = (
+                self._extract_valid_idx_points_for_obj(
+                    obj_id, track_table, track_3d, track_valid, current_visibles
+                )
             )
 
             stats_f2f = {}
@@ -173,11 +175,13 @@ class FrontEnd:
                 result,
                 obj_id,
                 T_odom,
+                T_rel,
                 idx_f2f,
                 prev3d,
                 curr3d_f2f,
                 mean_res_f2f,
                 stats_f2f,
+                valid_stats,
             )
 
             # debug save
@@ -208,18 +212,22 @@ class FrontEnd:
         result: FrontEndResult,
         obj_id: int,
         pose: np.ndarray,
+        rel_pose: np.ndarray,
         idx: np.ndarray,
         key_points: np.ndarray,
         curr3d: np.ndarray,
         mean_res: float,
         stats: dict,
+        valid_stats: dict,
     ):
         result.obj_poses[obj_id] = pose
+        result.rel_poses[obj_id] = rel_pose
         result.valid_indices[obj_id] = idx
         result.valid_key_points[obj_id] = key_points
         result.valid_curr_3d[obj_id] = curr3d
         result.reg_stats[obj_id] = stats
         result.mean_residuals[obj_id] = mean_res
+        result.valid_stats[obj_id] = valid_stats
 
     def _compute_mean_residual(self, stats: dict):
         residuals = stats.get("residuals", np.array([]))
@@ -278,6 +286,7 @@ class FrontEnd:
             idx:     (M,) int indices where correspondence holds and both frames say valid&visible
             prev3d:  (M,3) 3D points from previous frame
             curr3d:  (M,3) 3D points from current frame
+            valid_stats: dict with extra masks for debugging
         """
         obj_idx = track_table.obj2track_map[obj_id]
 
@@ -285,17 +294,37 @@ class FrontEnd:
         n_curr = len(curr_valid)
         common_idx = obj_idx[(obj_idx < n_prev) & (obj_idx < n_curr)]
 
+        # Ensure boolean masks
+        curr_vis_arr = np.asarray(curr_visible, dtype=bool)
+        curr_val_arr = np.asarray(curr_valid, dtype=bool)
+        track_vis_arr = np.asarray(track_table.visible, dtype=bool)
+        track_val_arr = np.asarray(track_table.valid, dtype=bool)
+
         both_mask = (
-            curr_visible[common_idx]
-            & curr_valid[common_idx]
-            & track_table.visible[common_idx]
-            & track_table.valid[common_idx]
+            curr_vis_arr[common_idx]
+            & curr_val_arr[common_idx]
+            & track_vis_arr[common_idx]
+            & track_val_arr[common_idx]
         )
 
         idx = common_idx[both_mask]
         prev3d = track_table.track_3d[idx].copy()
         curr3d = curr_pts_3d[idx].copy()
-        return idx, prev3d, curr3d
+
+        valid_stats = {
+            "extract_vis_obj_mask": curr_vis_arr[common_idx],
+            "extract_val_obj_mask": curr_val_arr[common_idx],
+            "extract_valid_kp_mask": track_val_arr[common_idx]
+            & track_vis_arr[common_idx],
+            "extract_obj_idx": common_idx,
+            # Not used in F2F but kept for compatibility
+            "extract_uncer_obj_mask": np.empty(0),
+            "extract_uncertainty_thres": 0.0,
+            "extract_inside_mask": np.empty(0),
+            "extract_finite_xy": np.empty(0),
+        }
+
+        return idx, prev3d, curr3d, valid_stats
 
     def _extract_valid_key_points(
         self,
@@ -326,6 +355,10 @@ class FrontEnd:
             "extract_val_obj_mask": val_obj,
             "extract_uncer_obj_mask": uncer_obj,
             "extract_valid_kp_mask": valid_kp_bool,
+            "extract_uncertainty_thres": uncertainty_thres,
+            "extract_obj_idx": obj_idx,
+            "extract_inside_mask": np.empty(0),
+            "extract_finite_xy": np.empty(0),
         }
 
         return idx, key_points, curr3d, valid_stats
@@ -398,6 +431,10 @@ class FrontEnd:
             "extract_val_obj_mask": val_obj,
             "extract_uncer_obj_mask": uncer_obj,
             "extract_valid_kp_mask": valid_kp_obj,
+            "extract_uncertainty_thres": uncertainty_thres,
+            "extract_obj_idx": obj_idx,
+            "extract_inside_mask": inside_mask_np,
+            "extract_finite_xy": finite_xy,
         }
 
         return idx, key_points, curr3d, cur_visible, valid_stats

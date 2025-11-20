@@ -1297,7 +1297,7 @@ def main():
     )
     parser.add_argument(
         "--meta_data_path",
-        default="/home/justin/code/point-to-pose/debug/pipeline/meta_data/meata_data.npz",
+        default="/home/justin/code/point-to-pose/debug/pipeline/meta_data/meta_data.npz",
         type=str,
         help="Path to meta_data.npz file or pose file (obj_i_pose.txt)",
     )

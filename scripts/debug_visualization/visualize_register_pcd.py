@@ -68,7 +68,7 @@ def load_point_cloud(
 def load_correspondence_data(
     register_folder: str, object_number: int, frame_number: int, refine: bool = False
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    """Load correspondence data from meata_data.npz file.
+    """Load correspondence data from meta_data.npz file.
 
     Extracts key_points and curr3d from reg_stats to establish correspondences.
     The key_points (previous frame) and curr3d (current frame) are already in correspondence.
@@ -83,7 +83,18 @@ def load_correspondence_data(
         Tuple of (key_points, curr3d, inliers) if data is found, None otherwise.
         inliers is a boolean array indicating which correspondences are inliers.
     """
-    # Look for meata_data.npz in the register folder or parent directories
+    # Look for meta_data.npz in the register folder or parent directories (also check meata_data.npz for backward compatibility)
+    meta_data_paths = [
+        os.path.join(register_folder, "meta_data.npz"),
+        os.path.join(os.path.dirname(register_folder), "meta_data.npz"),
+        os.path.join(
+            os.path.dirname(os.path.dirname(register_folder)),
+            "meta_data",
+            "meta_data.npz",
+        ),
+    ]
+
+    # Backward compatibility: also check old typo
     meata_data_paths = [
         os.path.join(register_folder, "meata_data.npz"),
         os.path.join(os.path.dirname(register_folder), "meata_data.npz"),
@@ -96,24 +107,24 @@ def load_correspondence_data(
         ),
     ]
 
-    meata_data_path = None
-    for path in meata_data_paths:
+    meta_data_path = None
+    for path in meta_data_paths + meata_data_paths:
         if os.path.exists(path):
-            meata_data_path = path
+            meta_data_path = path
             break
 
-    if meata_data_path is None:
-        print("No meata_data.npz found in expected locations")
+    if meta_data_path is None:
+        print("No meta_data.npz found in expected locations")
         return None
 
     try:
         # Load the NPZ file
-        data = np.load(meata_data_path, allow_pickle=True)
-        print(f"Loaded meata_data.npz from: {meata_data_path}")
+        data = np.load(meta_data_path, allow_pickle=True)
+        print(f"Loaded meta_data.npz from: {meta_data_path}")
 
         # Extract frame_id array to find the correct frame
         if "frame_id" not in data:
-            print("No frame_id field found in meata_data.npz")
+            print("No frame_id field found in meta_data.npz")
             return None
 
         frame_ids = data["frame_id"]
@@ -126,7 +137,7 @@ def load_correspondence_data(
                 break
 
         if frame_idx is None:
-            print(f"Frame {frame_number} not found in meata_data.npz")
+            print(f"Frame {frame_number} not found in meta_data.npz")
             print(f"Available frames: {frame_ids}")
             return None
 
@@ -252,7 +263,7 @@ def load_correspondence_data(
         return key_points, curr3d, inliers
 
     except (IOError, ValueError, KeyError) as e:
-        print(f"Error loading correspondence data from {meata_data_path}: {e}")
+        print(f"Error loading correspondence data from {meta_data_path}: {e}")
         return None
 
 
@@ -719,7 +730,19 @@ def get_keyframe_ids_for_register_pointcloud(
     # object_number and refine are unused, kept for compatibility but suppressed linter
     _ = object_number
     _ = refine
+    # Try meta_data.npz first (correct spelling)
     meta_paths = [
+        os.path.join(register_folder, "meta_data.npz"),
+        os.path.join(os.path.dirname(register_folder), "meta_data.npz"),
+        os.path.join(
+            os.path.dirname(os.path.dirname(register_folder)),
+            "meta_data",
+            "meta_data.npz",
+        ),
+    ]
+
+    # Backward compatibility: also check old typo
+    meata_data_paths = [
         os.path.join(register_folder, "meata_data.npz"),
         os.path.join(os.path.dirname(register_folder), "meata_data.npz"),
         os.path.join(
@@ -730,17 +753,18 @@ def get_keyframe_ids_for_register_pointcloud(
             "meata_data.npz",
         ),
     ]
+
     meta_path = None
-    for path in meta_paths:
+    for path in meta_paths + meata_data_paths:
         if os.path.exists(path):
             meta_path = path
             break
     if meta_path is None:
-        print("No meata_data.npz found for coloring by keyframe id")
+        print("No meta_data.npz found for coloring by keyframe id")
         return None
     data = np.load(meta_path, allow_pickle=True)
     if "frame_id" not in data:
-        print("No frame_id field in meata_data.npz")
+        print("No frame_id field in meta_data.npz")
         return None
     frame_ids = data["frame_id"]
     frame_idx = None
@@ -791,6 +815,19 @@ def load_all_key_points_from_meta(
 ):
     # object_number is currently unused (single-object support); keep for future-proofing
     _ = object_number
+
+    # Try meta_data.npz first (correct spelling)
+    meta_data_paths = [
+        os.path.join(register_folder, "meta_data.npz"),
+        os.path.join(os.path.dirname(register_folder), "meta_data.npz"),
+        os.path.join(
+            os.path.dirname(os.path.dirname(register_folder)),
+            "meta_data",
+            "meta_data.npz",
+        ),
+    ]
+
+    # Backward compatibility: also check old typo
     meata_data_paths = [
         os.path.join(register_folder, "meata_data.npz"),
         os.path.join(os.path.dirname(register_folder), "meata_data.npz"),
@@ -802,23 +839,24 @@ def load_all_key_points_from_meta(
             "meata_data.npz",
         ),
     ]
-    meata_data_path = None
-    for path in meata_data_paths:
+
+    meta_data_path = None
+    for path in meta_data_paths + meata_data_paths:
         if os.path.exists(path):
-            meata_data_path = path
+            meta_data_path = path
             break
-    if meata_data_path is None:
-        print("No meata_data.npz found for loading all key points")
-        print(f"  Searched paths: {meata_data_paths}")
+    if meta_data_path is None:
+        print("No meta_data.npz found for loading all key points")
+        print(f"  Searched paths: {meta_data_paths + meata_data_paths}")
         return None
-    print(f"Loading all keypoints from: {meata_data_path}")
+    print(f"Loading all keypoints from: {meta_data_path}")
     try:
-        data = np.load(meata_data_path, allow_pickle=True)
+        data = np.load(meta_data_path, allow_pickle=True)
         print(
             f"  Loaded NPZ file, available keys: {list(data.keys())[:10]}..."
         )  # Show first 10 keys
         if "frame_id" not in data:
-            print("  Error: No frame_id in meata_data.npz")
+            print("  Error: No frame_id in meta_data.npz")
             return None
         frame_ids = data["frame_id"]
         print(f"  Found {len(frame_ids)} frames in data")
@@ -829,7 +867,7 @@ def load_all_key_points_from_meta(
                 break
         if frame_idx is None:
             print(
-                f"  Error: Frame {frame_number} not found in meata_data.npz for all key points"
+                f"  Error: Frame {frame_number} not found in meta_data.npz for all key points"
             )
             print(f"  Available frames: {frame_ids[:10]}...")  # Show first 10
             return None
@@ -843,7 +881,7 @@ def load_all_key_points_from_meta(
         ]
         missing_keys = [k for k in required_keys if k not in data]
         if missing_keys:
-            print(f"  Error: Missing keys in meata_data.npz: {missing_keys}")
+            print(f"  Error: Missing keys in meta_data.npz: {missing_keys}")
             print(
                 f"  Available keys containing 'obj_key': {[k for k in data.keys() if 'obj_key' in k]}"
             )

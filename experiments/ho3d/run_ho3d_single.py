@@ -136,8 +136,8 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
             pred_pose_color=(0, 255, 0),
         )
 
-        if i == 100:
-            break
+        # if i == 100:
+        #     break
 
     gt_poses = np.array(gt_poses)
     pred_poses = np.array(out_poses)[gt_ids]

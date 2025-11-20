@@ -11,11 +11,72 @@ import matplotlib.pyplot as plt
 from typing import Optional, Tuple
 
 
-def find_meata_data_path(register_folder: str) -> Optional[str]:
-    """Find meata_data.npz file in expected locations."""
+def find_meata_data_path(
+    register_folder: str, meta_data_path_override: Optional[str] = None
+) -> Optional[str]:
+    """Find meta_data.npz file in expected locations (also checks meata_data.npz for backward compatibility)."""
+    # If override path is provided, use it directly
+    if meta_data_path_override is not None:
+        if os.path.exists(meta_data_path_override):
+            return meta_data_path_override
+        else:
+            print(
+                f"Warning: Specified meta_data_path does not exist: {meta_data_path_override}"
+            )
+            # Continue to search in other locations
+
+    # Get project root by finding the scripts directory's parent
+    # __file__ is scripts/debug_visualization/plot_registration_stats.py
+    # script_dir is scripts/debug_visualization
+    # os.path.dirname(script_dir) is scripts
+    # os.path.dirname(os.path.dirname(script_dir)) is point-to-pose (project root)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(
+        os.path.dirname(script_dir)
+    )  # This gives point-to-pose
+
+    # Try meta_data.npz first (correct spelling)
+    meta_data_paths = [
+        # Relative to register folder
+        os.path.join(register_folder, "meta_data.npz"),
+        os.path.join(os.path.dirname(register_folder), "meta_data.npz"),
+        # Relative to project root (common output location)
+        os.path.join(project_root, "meta_data", "meta_data.npz"),
+        os.path.join(project_root, "debug", "meta_data", "meta_data.npz"),
+        os.path.join(
+            project_root, "debug", "pipeline", "meta_data", "meta_data.npz"
+        ),  # The actual location
+        # Relative paths from register folder
+        os.path.join(
+            os.path.dirname(os.path.dirname(register_folder)),
+            "meta_data",
+            "meta_data.npz",
+        ),
+        os.path.join(
+            os.path.dirname(os.path.dirname(register_folder)),
+            "debug",
+            "meta_data",
+            "meta_data.npz",
+        ),
+        os.path.join(
+            os.path.dirname(os.path.dirname(register_folder)),
+            "debug",
+            "pipeline",
+            "meta_data",
+            "meta_data.npz",
+        ),
+        # Current working directory (where pipeline might have been run)
+        os.path.join(os.getcwd(), "meta_data", "meta_data.npz"),
+        os.path.join(os.getcwd(), "debug", "pipeline", "meta_data", "meta_data.npz"),
+    ]
+
+    # Also check old typo for backward compatibility
     meata_data_paths = [
         os.path.join(register_folder, "meata_data.npz"),
         os.path.join(os.path.dirname(register_folder), "meata_data.npz"),
+        os.path.join(project_root, "meta_data", "meata_data.npz"),
+        os.path.join(project_root, "debug", "meta_data", "meata_data.npz"),
+        os.path.join(project_root, "debug", "pipeline", "meta_data", "meata_data.npz"),
         os.path.join(
             os.path.dirname(os.path.dirname(register_folder)),
             "debug",
@@ -23,12 +84,25 @@ def find_meata_data_path(register_folder: str) -> Optional[str]:
             "meta_data",
             "meata_data.npz",
         ),
+        os.path.join(
+            os.path.dirname(os.path.dirname(register_folder)),
+            "meta_data",
+            "meata_data.npz",
+        ),
     ]
 
-    for path in meata_data_paths:
+    all_paths = meta_data_paths + meata_data_paths
+    for path in all_paths:
         if os.path.exists(path):
+            print(f"Found meta_data.npz at: {path}")
             return path
 
+    # Print debug info if not found
+    print(
+        f"Debug: Searched {len(all_paths)} locations, register_folder={register_folder}"
+    )
+    print(f"  Project root: {project_root}")
+    print(f"  Current working directory: {os.getcwd()}")
     return None
 
 
@@ -90,7 +164,11 @@ def unpack_ragged(name: str, store: dict, dim: int = -1) -> list:
 
 
 def load_registration_stats(
-    register_folder: str, object_number: int, frame_number: int, mode: str = "auto"
+    register_folder: str,
+    object_number: int,
+    frame_number: int,
+    mode: str = "auto",
+    meta_data_path_override: Optional[str] = None,
 ) -> Optional[
     Tuple[
         np.ndarray,
@@ -117,18 +195,23 @@ def load_registration_stats(
         mode is either "f2f" or "f2m".
     """
     _ = object_number  # Currently unused, kept for compatibility
-    meata_data_path = find_meata_data_path(register_folder)
-    if meata_data_path is None:
-        print("No meata_data.npz found in expected locations")
+    meta_data_path = find_meata_data_path(register_folder)
+    if meta_data_path is None:
+        print("No meta_data.npz found in expected locations")
+        print(f"  Searched relative to register_folder: {register_folder}")
+        print(f"  Current working directory: {os.getcwd()}")
+        print(
+            "  Please ensure meta_data.npz exists, or specify --register_folder with the correct path"
+        )
         return None
 
     try:
-        data = np.load(meata_data_path, allow_pickle=True)
-        print(f"Loaded meata_data.npz from: {meata_data_path}")
+        data = np.load(meta_data_path, allow_pickle=True)
+        print(f"Loaded meta_data.npz from: {meta_data_path}")
 
         # Find frame index
         if "frame_id" not in data:
-            print("No frame_id field found in meata_data.npz")
+            print("No frame_id field found in meta_data.npz")
             return None
 
         frame_ids = data["frame_id"]
@@ -140,7 +223,7 @@ def load_registration_stats(
                 break
 
         if frame_idx is None:
-            print(f"Frame {frame_number} not found in meata_data.npz")
+            print(f"Frame {frame_number} not found in meta_data.npz")
             print(f"Available frames: {frame_ids[:10]}...")  # Show first 10
             return None
 
@@ -766,13 +849,13 @@ def load_all_key_point_frame_ids_raw(
     can be used directly without bounds issues from filtering.
     Uses unpack_ragged following notebook pattern.
     """
-    meata_data_path = find_meata_data_path(register_folder)
-    if meata_data_path is None:
-        print("No meata_data.npz found for loading raw key point frame ids")
+    meta_data_path = find_meata_data_path(register_folder, meta_data_path_override=None)
+    if meta_data_path is None:
+        print("No meta_data.npz found for loading raw key point frame ids")
         return None
 
     try:
-        data = np.load(meata_data_path, allow_pickle=True)
+        data = np.load(meta_data_path, allow_pickle=True)
         if "frame_id" not in data:
             return None
 
@@ -799,7 +882,7 @@ def load_all_key_point_frame_ids_raw(
 def load_all_key_points_with_frame_ids(
     register_folder: str, object_number: int, frame_number: int
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-    """Load all key points and their frame IDs from meata_data.npz.
+    """Load all key points and their frame IDs from meta_data.npz.
 
     Uses unpack_ragged following notebook pattern.
 
@@ -809,16 +892,16 @@ def load_all_key_points_with_frame_ids(
         frame_ids: (N,) array of frame IDs for each point
     """
     _ = object_number  # Currently unused, kept for compatibility
-    meata_data_path = find_meata_data_path(register_folder)
-    if meata_data_path is None:
-        print("No meata_data.npz found for loading all key points")
+    meta_data_path = find_meata_data_path(register_folder, meta_data_path_override=None)
+    if meta_data_path is None:
+        print("No meta_data.npz found for loading all key points")
         return None
 
     try:
-        data = np.load(meata_data_path, allow_pickle=True)
+        data = np.load(meta_data_path, allow_pickle=True)
 
         if "frame_id" not in data:
-            print("Error: No frame_id in meata_data.npz")
+            print("Error: No frame_id in meta_data.npz")
             return None
 
         frame_ids = data["frame_id"]
@@ -829,7 +912,7 @@ def load_all_key_points_with_frame_ids(
                 break
 
         if frame_idx is None:
-            print(f"Error: Frame {frame_number} not found in meata_data.npz")
+            print(f"Error: Frame {frame_number} not found in meta_data.npz")
             return None
 
         # Use unpack_ragged to extract data (following notebook pattern)
@@ -2040,8 +2123,13 @@ def main(args):
 
     # Load registration statistics
     mode = getattr(args, "mode", "auto")
+    meta_data_path = getattr(args, "meta_data_path", None)
     result = load_registration_stats(
-        register_folder, args.object_number, args.frame_number, mode=mode
+        register_folder,
+        args.object_number,
+        args.frame_number,
+        mode=mode,
+        meta_data_path_override=meta_data_path,
     )
 
     if result is None:
@@ -2251,6 +2339,14 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Path to register folder (optional, defaults to project_root/debug/register)",
+    )
+
+    parser.add_argument(
+        "--meta_data_path",
+        "-d",
+        type=str,
+        default=None,
+        help="Direct path to meta_data.npz file (optional, will auto-search if not provided)",
     )
 
     parser.add_argument(

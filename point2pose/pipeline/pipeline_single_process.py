@@ -195,7 +195,7 @@ class PipelineSingleProcess:
             os.makedirs(self.meta_data_save_path, exist_ok=True)
             self.data_logger = DataLogger(
                 out_dir=self.meta_data_save_path,
-                base_name="meata_data",
+                base_name="meta_data",
                 # ragged fields include data that is not fixed shape
                 ragged_fields={
                     # tracker stats

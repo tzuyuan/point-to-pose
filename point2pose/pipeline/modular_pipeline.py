@@ -103,6 +103,7 @@ class ModularPipeline:
                     obj_id=obj_id,
                     frame_id=0,
                     pose=np.eye(4),
+                    rel_pose=np.eye(4),
                     cur_3d=self.objects[obj_id].key_points,
                     cur_3d_idx=np.arange(len(self.objects[obj_id].key_points)),
                     inliers=np.ones(len(self.objects[obj_id].key_points), dtype=bool),
@@ -125,8 +126,18 @@ class ModularPipeline:
                     "timestamp": frame.timestamp,
                     "frame_id": 0,
                     "track2d": self.track_table.track_2d,
+                    "uncertainties": self.track_table.uncertainty,
+                    "visibles": self.track_table.visible,
+                    "track3d": self.track_table.track_3d,
+                    "valid": self.track_table.valid,
+                    "valid_depth": frame.depth,
+                    "obj_init_pose": self.objects[0].init_pose,
                     "obj_pose": self.objects[0].pose,
-                    # Add other fields as needed
+                    "obj_key_point_frames": self.objects[0].key_point_frames,
+                    "obj_key_points": self.objects[0].key_points,
+                    "obj_uncertainties": self.objects[0].uncertainties,
+                    "obj_valid": self.objects[0].valid,
+                    "is_key_frame": False,
                 }
             )
 
@@ -173,12 +184,14 @@ class ModularPipeline:
                     continue
 
                 # Only optimize if registration was good enough
-                if self.objects[obj_id].mean_residual < self.reg_residual_thres:
+                # if self.objects[obj_id].mean_residual < self.reg_residual_thres:
+                if True:
 
                     object_frame_data = ObjectFrameData(
                         obj_id=obj_id,
                         frame_id=self.frame_id,
                         pose=self.objects[obj_id].pose,
+                        rel_pose=fe_result.rel_poses[obj_id],
                         cur_3d=fe_result.valid_curr_3d[obj_id],
                         cur_3d_idx=fe_result.valid_indices[obj_id],
                         inliers=fe_result.reg_stats[obj_id].get(
@@ -217,25 +230,45 @@ class ModularPipeline:
                     f.flush()
 
         if self.save_meta_data:
+            # ---------------- log meta data ----------------
+            # Assuming logging for obj_id=0 as in pipeline_single_process.py
+            # TODO: Extend to support multi-object logging if needed
+            obj_id = 0
+
+            reg_stats = fe_result.reg_stats.get(obj_id, {})
+            valid_stats = fe_result.valid_stats.get(obj_id, {})
+
             log_payload = {
                 "timestamp": frame.timestamp,
                 "frame_id": self.frame_id,
                 "track2d": fe_result.tracks,
-                "track3d": fe_result.track_3d,
-                "valid": fe_result.track_valid,
                 "uncertainties": fe_result.uncertainties,
                 "visibles": fe_result.visibles,
-                "obj_pose": self.objects[0].pose,
-                "is_key_frame": self.kf_manager.is_key_frame.get(0, False),
+                "track3d": fe_result.track_3d,
+                "valid": fe_result.track_valid,
+                "valid_depth": fe_result.track_valid,  # Assuming this meant track_valid in single_process
+                "obj_init_pose": self.objects[obj_id].init_pose,
+                "obj_pose": self.objects[obj_id].pose,
+                "obj_key_points": self.objects[obj_id].key_points,
+                "obj_uncertainties": self.objects[obj_id].uncertainties,
+                "obj_valid": self.objects[obj_id].valid,
+                "obj_key_point_frames": self.objects[obj_id].key_point_frames,
+                "is_key_frame": self.kf_manager.is_key_frame.get(obj_id, False),
+                # Registration stats
+                "reg_key_points_idx": fe_result.valid_indices.get(obj_id),
+                "reg_key_points": fe_result.valid_key_points.get(
+                    obj_id
+                ),  # Not exactly same but conceptually
+                "reg_prev3d": fe_result.valid_key_points.get(
+                    obj_id
+                ),  # For f2f, prev3d is key_points
+                "reg_curr3d": fe_result.valid_curr_3d.get(obj_id),
+                "reg_residuals": reg_stats.get("residuals", np.array([])),
+                "reg_inliers": reg_stats.get("inliers", np.array([])),
+                "iter": reg_stats.get("iter", -1),
+                # Valid extraction stats
+                **valid_stats,
             }
-
-            reg_stats = fe_result.reg_stats.get(0)
-            if reg_stats:
-                log_payload["reg_stats_obj0"] = {
-                    "residuals": reg_stats.get("residuals", np.array([])),
-                    "inliers": reg_stats.get("inliers", np.array([])),
-                    "iter": reg_stats.get("iter", -1),
-                }
 
             if new_keyframes:
                 log_payload["new_keyframes"] = [

@@ -11,6 +11,8 @@ class ObjectFrameData:
     # pose of the object
     pose: np.ndarray
 
+    rel_pose: np.ndarray
+
     # registration stats
     cur_3d: np.ndarray
     cur_3d_idx: np.ndarray

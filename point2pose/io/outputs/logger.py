@@ -25,7 +25,7 @@ class DataLogger:
     Usage:
         saver = DataLogger(
             out_dir="logs",
-            base_name="meata_data",
+            base_name="meta_data",
             ragged_fields={"residuals","inliers"},
             also_save_h5=False,
         )
@@ -36,7 +36,7 @@ class DataLogger:
     def __init__(
         self,
         out_dir: str,
-        base_name: str = "meata_data",
+        base_name: str = "meta_data",
         ragged_fields: Iterable[str] = (),
         *,
         also_save_h5: bool = False,

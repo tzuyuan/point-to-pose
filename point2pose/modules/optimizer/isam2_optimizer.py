@@ -70,26 +70,21 @@ class ISAM2Optimizer(Optimizer):
             self._prev_rel_T = gtsam.Pose3(np.eye(4))
         else:
             Xim1 = gtsam.symbol("x", self._prev_frame_id)
-            rel_T = gtsam.Pose3(self._prev_pose_inv @ cur_pose)
+            # rel_T = gtsam.Pose3(self._prev_pose_inv @ cur_pose)
+            rel_T = gtsam.Pose3(inverse_SE3(data.rel_pose))
 
             # noise scaled by the residuals
-            sigma_between = (
+            base_sigma = (
                 float(max(1e-4, np.mean(residuals))) if residuals.size else 0.01
             )
-            # sigma_between = 0.01
-            between_noise = gtsam.noiseModel.Isotropic.Sigma(6, sigma_between)
-            # between_noise = gtsam.noiseModel.Diagonal.Sigmas(
-            #     np.array(
-            #         [
-            #             50 * sigma_between,
-            #             50 * sigma_between,
-            #             50 * sigma_between,
-            #             50 * sigma_between,
-            #             50 * sigma_between,
-            #             50 * sigma_between,
-            #         ]
-            #     )
-            # )
+
+            # Relax odometry to trust landmarks more
+            odom_relax_factor = 10.0
+            sigma_between = base_sigma * odom_relax_factor
+
+            between_noise = gtsam.noiseModel.Diagonal.Sigmas(
+                np.array([sigma_between] * 6)
+            )
 
             self._graph.push_back(
                 gtsam.BetweenFactorPose3(Xim1, Xi, rel_T, between_noise)
@@ -129,7 +124,13 @@ class ISAM2Optimizer(Optimizer):
                     continue
                 z_cam = cur_3d[m]  # 3D point in camera_i frame
                 Lj = gtsam.symbol("l", int(lid))
-                point_noise = gtsam.noiseModel.Isotropic.Sigma(3, residuals[m])
+                sigma_point = float(max(1e-4, residuals[m]))
+                base_point_noise = gtsam.noiseModel.Isotropic.Sigma(3, sigma_point)
+                # Use Robust (Huber) noise model to handle outliers
+                point_noise = gtsam.noiseModel.Robust(
+                    gtsam.noiseModel.mEstimator.Huber(1.345), base_point_noise
+                )
+
                 # Seed landmark once (in world), using Xi_seed * z_cam
                 if Lj not in self._inserted_landmarks:
                     p_w = Xi_seed.transformFrom(gtsam.Point3(*z_cam))
@@ -149,7 +150,10 @@ class ISAM2Optimizer(Optimizer):
                 )
 
         # --- Incremental update ---
-        self._isam.update(self._graph, self._values)
+        try:
+            self._isam.update(self._graph, self._values)
+        except RuntimeError:
+            return None
 
         # (Optional) occasionally force an extra relinearization sweep
         # if i % 10 == 0:
@@ -163,7 +167,10 @@ class ISAM2Optimizer(Optimizer):
 
         if self._initialized:
             # Get rolling estimate if you want to use it online
-            current_estimate = self._isam.calculateEstimate()
+            try:
+                current_estimate = self._isam.calculateEstimate()
+            except RuntimeError:
+                return None
 
             # Example: read back pose_i now
             Xi_hat = current_estimate.atPose3(Xi)
