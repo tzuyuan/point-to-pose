@@ -227,10 +227,11 @@ class CoTrackerOnlinePredictor(torch.nn.Module):
         self.support_grid_size = 6
         model = build_cotracker(checkpoint, v2=v2, offline=False, window_len=window_len)
         self.interp_shape = model.model_resolution
-        # self.step = model.window_len // 2
         self.step = 1
         self.model = model
         self.model.eval()
+        self.queries = None
+        self.N = 0
 
     @torch.no_grad()
     def forward(
@@ -240,54 +241,49 @@ class CoTrackerOnlinePredictor(torch.nn.Module):
         queries: torch.Tensor = None,
         grid_size: int = 5,
         grid_query_frame: int = 0,
-        add_support_grid=False,
+        add_support_grid: bool = False,
     ):
         B, T, C, H, W = video_chunk.shape
-        # Initialize online video processing and save queried points
-        # This needs to be done before processing *each new video*
+
+        # ---- 1) (Re-)initialize online processing for a new video ----
         if is_first_step:
             self.model.init_video_online_processing()
-            if queries is not None:
-                B, N, D = queries.shape
-                self.N = N
+            self.queries = None
+            self.N = 0
+
+            # Initialize queries (either sparse or grid)
+            if (queries is not None) and (queries.numel() > 0):
+                Bq, N, D = queries.shape
                 assert D == 3
                 queries = queries.clone()
+                # scale x,y from ORIGINAL (W,H) to interp_shape
                 queries[:, :, 1:] *= queries.new_tensor(
                     [
                         (self.interp_shape[1] - 1) / (W - 1),
                         (self.interp_shape[0] - 1) / (H - 1),
                     ]
                 )
-                if add_support_grid:
-                    grid_pts = get_points_on_a_grid(
-                        self.support_grid_size,
-                        self.interp_shape,
-                        device=video_chunk.device,
-                    )
-                    grid_pts = torch.cat(
-                        [torch.zeros_like(grid_pts[:, :, :1]), grid_pts], dim=2
-                    )
-                    queries = torch.cat([queries, grid_pts], dim=1)
+                self.queries = queries
+                self.N = N
             elif grid_size > 0:
                 grid_pts = get_points_on_a_grid(
                     grid_size, self.interp_shape, device=video_chunk.device
                 )
                 self.N = grid_size**2
                 queries = torch.cat(
-                    [torch.ones_like(grid_pts[:, :, :1]) * grid_query_frame, grid_pts],
+                    [
+                        torch.ones_like(grid_pts[:, :, :1]) * grid_query_frame,
+                        grid_pts,
+                    ],
                     dim=2,
                 )
+                self.queries = queries
 
-            self.queries = queries
-            return (None, None, None)
-
-        if (queries is not None) and (queries.numel() > 0):
+        # ---- 2) Add NEW queries mid-stream (do NOT re-init) ----
+        if (queries is not None) and (queries.numel() > 0) and (not is_first_step):
             q_new = queries.clone()
-            # Anchor new points to the *current* absolute frame (last index of this chunk)
             cur_abs_t = self.model.online_ind + (T - 1)
             q_new[:, :, 0] = float(cur_abs_t)
-
-            # scale x,y from ORIGINAL (W,H) -> interp_shape
             q_new[:, :, 1:] *= q_new.new_tensor(
                 [
                     (self.interp_shape[1] - 1) / (W - 1),
@@ -302,6 +298,7 @@ class CoTrackerOnlinePredictor(torch.nn.Module):
                 self.queries = torch.cat([self.queries, q_new], dim=1)
                 self.N += q_new.shape[1]
 
+        # ---- 3) Resize video to model resolution ----
         video_chunk = video_chunk.reshape(B * T, C, H, W)
         video_chunk = F.interpolate(
             video_chunk, tuple(self.interp_shape), mode="bilinear", align_corners=True
@@ -309,31 +306,41 @@ class CoTrackerOnlinePredictor(torch.nn.Module):
         video_chunk = video_chunk.reshape(
             B, T, 3, self.interp_shape[0], self.interp_shape[1]
         )
+
+        # ---- 4) Run the model ----
         if self.v2:
             tracks, visibilities, __ = self.model(
                 video=video_chunk, queries=self.queries, iters=6, is_online=True
             )
+            confidence = None
         else:
             tracks, visibilities, confidence, __ = self.model(
                 video=video_chunk, queries=self.queries, iters=6, is_online=True
             )
+
         if add_support_grid:
             tracks = tracks[:, :, : self.N]
             visibilities = visibilities[:, :, : self.N]
-            if not self.v2:
+            if (not self.v2) and (confidence is not None):
                 confidence = confidence[:, :, : self.N]
 
-        if not self.v2:
-            visibilities = visibilities * confidence
+        # ---- 5) Combine visibility + confidence, compute uncertainty ----
+        if self.v2:
+            # v2 typically only has one visibility-like score
+            visibility_score = visibilities
+        else:
+            visibility_score = visibilities * confidence
+
         thr = 0.6
-        return (
-            tracks
-            * tracks.new_tensor(
-                [
-                    (W - 1) / (self.interp_shape[1] - 1),
-                    (H - 1) / (self.interp_shape[0] - 1),
-                ]
-            ),
-            1 - confidence,
-            visibilities > thr,
+        visible_mask = visibility_score > thr
+        uncertainty = 1.0 - visibility_score  # lower = more confident
+
+        # ---- 6) Rescale tracks back to original (W, H) ----
+        tracks = tracks * tracks.new_tensor(
+            [
+                (W - 1) / (self.interp_shape[1] - 1),
+                (H - 1) / (self.interp_shape[0] - 1),
+            ]
         )
+
+        return tracks, uncertainty, visible_mask

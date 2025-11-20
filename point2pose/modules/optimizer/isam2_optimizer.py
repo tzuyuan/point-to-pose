@@ -63,11 +63,10 @@ class ISAM2Optimizer(Optimizer):
             self._values.insert(Xi, cur_pose_gtsam)
             self._inserted_poses.add(Xi)
 
-        if frame_id == 0:
+        if not self._initialized:
             self._graph.push_back(
                 gtsam.PriorFactorPose3(Xi, cur_pose_gtsam, self._prior_noise)
             )
-            self._initialized = True
             self._prev_rel_T = gtsam.Pose3(np.eye(4))
         else:
             Xim1 = gtsam.symbol("x", self._prev_frame_id)
@@ -124,7 +123,7 @@ class ISAM2Optimizer(Optimizer):
             Xi_seed = gtsam.Pose3(cur_pose)
 
         # Loop over measurements
-        if inliers.size > 0 and frame_id > 0:
+        if inliers.size > 0 and self._initialized:
             for m, lid in enumerate(cur_3d_idx):
                 if not inliers[m] or np.isnan(cur_3d[m]).any():
                     continue
@@ -162,7 +161,7 @@ class ISAM2Optimizer(Optimizer):
         self._graph.resize(0)
         self._values.clear()
 
-        if frame_id > 0:
+        if self._initialized:
             # Get rolling estimate if you want to use it online
             current_estimate = self._isam.calculateEstimate()
 
@@ -184,4 +183,5 @@ class ISAM2Optimizer(Optimizer):
                 key_points_idx_optimized=self.inserted_landmark_ids,
             )
         else:
+            self._initialized = True
             return None

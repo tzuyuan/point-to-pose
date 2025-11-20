@@ -7,7 +7,8 @@ pipeline:
   params:
     max_num_obj: 2
     estimate_init_pose: true
-    frame_to_map_reg: true
+    # frame_reg_mode: f2f, f2m, hybrid
+    frame_reg_mode: f2f
 
 
     use_depth_estimate: false

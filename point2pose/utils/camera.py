@@ -1,5 +1,7 @@
 import numpy as np
 
+from typing import Tuple
+
 
 # def convert_pixel_to_world(
 #     pixel,
@@ -345,3 +347,45 @@ def compute_normals_from_depth(
     normals[flip_mask] *= -1.0
 
     return normals, pts
+
+
+def extract_masked_region(
+    img: np.ndarray, mask: np.ndarray, padding: int = 10
+) -> Tuple[np.ndarray, np.ndarray, Tuple[int, int]]:
+    """
+    Extract the bounding box region containing the mask from an image.
+
+    Args:
+        img: Image as numpy array (H, W, 3) RGB
+        mask: Binary mask (H, W)
+        padding: Additional padding around the bounding box
+
+    Returns:
+        cropped_image: Cropped image containing the masked region
+        cropped_mask: Cropped mask aligned with the image
+        bbox: Bounding box (x_min, y_min, x_max, y_max) in original image coordinates
+    """
+    # Ensure mask is binary
+    if mask.max() > 1:
+        mask_binary = (mask > 128).astype(np.uint8)
+    else:
+        mask_binary = mask.astype(np.uint8)
+
+    # Find bounding box
+    coords = np.where(mask_binary > 0)
+    if len(coords[0]) == 0:
+        # No mask found, return original image
+        return img, mask, (0, 0, img.shape[1], img.shape[0])
+
+    y_min, y_max = max(0, coords[0].min() - padding), min(
+        img.shape[0], coords[0].max() + padding + 1
+    )
+    x_min, x_max = max(0, coords[1].min() - padding), min(
+        img.shape[1], coords[1].max() + padding + 1
+    )
+
+    # Crop image and mask
+    cropped_img = img[y_min:y_max, x_min:x_max].copy()
+    cropped_mask = mask_binary[y_min:y_max, x_min:x_max].copy()
+
+    return cropped_img, cropped_mask, (x_min, y_min, x_max, y_max)

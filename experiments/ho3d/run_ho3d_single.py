@@ -15,6 +15,7 @@ import numpy as np
 
 from point2pose.io.sources.dataset.datareader import Ho3dReader
 from point2pose.pipeline.pipeline_single_process import PipelineSingleProcess
+from point2pose.pipeline.modular_pipeline import ModularPipeline
 from point2pose.data_types.frame import Frame
 from point2pose.utils.transform import inverse_SE3
 from point2pose.utils.visualization import (
@@ -58,7 +59,13 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
 
     cfg = OmegaConf.load(config_path)
     vis_cfg = cfg.visualization.params
-    pipeline = PipelineSingleProcess(cfg)
+
+    if cfg.pipeline.type == "single_process":
+        pipeline = PipelineSingleProcess(cfg)
+    elif cfg.pipeline.type == "modular":
+        pipeline = ModularPipeline(cfg)
+    else:
+        raise ValueError(f"Invalid pipeline type: {cfg.pipeline.type}")
 
     gt_bbox_minmax = gt_bbox_minmax_from_mesh(reader)
     out_poses = []
@@ -129,8 +136,8 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
             pred_pose_color=(0, 255, 0),
         )
 
-        # if i == 10:
-        #     break
+        if i == 100:
+            break
 
     gt_poses = np.array(gt_poses)
     pred_poses = np.array(out_poses)[gt_ids]

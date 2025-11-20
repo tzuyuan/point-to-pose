@@ -27,6 +27,7 @@ class CoTrackerRealtimeTracker(Tracker):
         self._window_len = config.get("window_len", 16)
         self._v2 = config.get("v2", False)
         self._checkpoint_path = config.get("checkpoint_path", "cotracker3_online.pth")
+        self._debug = bool(config.get("debug", False))
 
         # Build predictor and set FP32
         self._model = CoTrackerOnlinePredictor(
@@ -42,6 +43,11 @@ class CoTrackerRealtimeTracker(Tracker):
         self._need_commit = False
 
     def initialize(self, frame):
+        self._img_height = frame.rgb.shape[0]
+        self._img_width = frame.rgb.shape[1]
+        print(
+            f"[CoTracker] Initialized with image size {self._img_height}x{self._img_width}."
+        )
         return True
 
     def add_query_points(self, frame, new_points: np.ndarray) -> np.ndarray:
@@ -54,7 +60,7 @@ class CoTrackerRealtimeTracker(Tracker):
         Returns:
             indices: [num_points], indices of the newly added points
         """
-        # print("new points: ", new_points)
+
         new_query_points = self._convert_select_points_to_query_points(
             frame.id, new_points
         )
@@ -64,15 +70,6 @@ class CoTrackerRealtimeTracker(Tracker):
         self._query_points = torch.cat((self._query_points, new_query_points), axis=0)
         self._new_query_points = new_query_points
         self._need_commit = True
-
-        # print("new query points: ", new_query_points)
-        # print("_new query points: ", self._new_query_points[:, 0])
-
-        # print(f"Added {new_query_points.shape[0]} query points")
-        # print(f"Total query points: {self._query_points.shape[0]}")
-        # print(
-        #     f"return indices: {np.arange(self._query_points.shape[0] - new_query_points.shape[0], self._query_points.shape[0])}"
-        # )
 
         return np.arange(
             self._query_points.shape[0] - new_query_points.shape[0],
@@ -193,6 +190,6 @@ class CoTrackerRealtimeTracker(Tracker):
             image_points: [num_points, 2], [x, y]
         """
         return (
-            tracks[:, 0] * self._img_height / self._resize_height,
-            tracks[:, 1] * self._img_width / self._resize_width,
+            tracks[:, 0] * self._img_width / self._resize_width,
+            tracks[:, 1] * self._img_height / self._resize_height,
         )

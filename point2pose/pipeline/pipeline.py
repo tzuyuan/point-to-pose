@@ -173,11 +173,11 @@ class Pipeline:
 
         self.samp_ctx.frame = frame
 
-        # ------------- sampler -------------
-        self._sample_for_all_obj(self.samp_ctx)
-
         # ------------- tracker -------------
         self.tracker.initialize(frame)
+
+        # ------------- sampler -------------
+        self._sample_for_all_obj(self.samp_ctx)
 
         # initialize objects
         for obj_id in range(self.num_obj):

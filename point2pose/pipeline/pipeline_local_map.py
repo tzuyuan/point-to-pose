@@ -358,52 +358,12 @@ class PipelineLocalMap:
             if self.depth_estimator_type == "depth_anything":
                 depth = self.depth_estimator.infer_image(frame.rgb)
                 frame.depth_factor = 1.0
-            elif self.depth_estimator_type == "promptda":
-                print(frame.depth.shape)
-                depth_resize = cv.resize(
-                    frame.depth, (630, 476), interpolation=cv.INTER_LINEAR
-                )
-                rgb_resize = cv.resize(
-                    frame.rgb, (630, 476), interpolation=cv.INTER_LINEAR
-                )
-                depth_torch = (
-                    torch.from_numpy(depth_resize / frame.depth_factor)
-                    .unsqueeze(0)
-                    .unsqueeze(0)
-                    .to(self._device)
-                )
-                rgb_torch = (
-                    torch.from_numpy(rgb_resize)
-                    .permute(2, 0, 1)
-                    .unsqueeze(0)
-                    .to(self._device)
-                )
-                depth_troch = self.depth_estimator.predict(rgb_torch, depth_torch)
-                print("depth_troch shape: ", type(depth_troch))
-                from promptda.utils.io_wrapper import load_image, load_depth, save_depth
 
-                save_depth(depth_troch, prompt_depth=depth_torch, image=rgb_torch)
-                depth = depth_troch.squeeze(0).squeeze(0).cpu().numpy()
-                depth = depth.astype(np.float32, copy=False)
-                depth = cv.resize(
-                    depth,
-                    (frame.depth.shape[1], frame.depth.shape[0]),
-                    interpolation=cv.INTER_LINEAR,
-                )
-                print("depth shape: ", depth.shape)
-
-            # depth = (depth - depth.min()) / (depth.max() - depth.min()) * 255.0
-            # depth = depth.astype(np.uint8)
             if isinstance(depth, torch.Tensor):
                 depth = depth.detach().cpu().numpy()
                 depth = depth.astype(np.float32, copy=False)
 
-            # frame.depth = self._fit_affine_depth_to_rs(
-            #     est_depth=depth, rs_depth=frame.depth
-            # )
             frame.depth = depth.astype(np.float32, copy=False)
-
-        # frame.depth = depth
 
         # if it's the first frame, initialize the pipeline
         if self.frame_id == 0:
@@ -515,274 +475,76 @@ class PipelineLocalMap:
         for obj_id in range(self.num_obj):
 
             # check and update the keypoints from the graph optimizer
+            idx, prev3d, curr3d = self._extract_valid_idx_points_for_obj(
+                obj_id, self.track_table, track_3d, track_valid, visibles
+            )
 
-            # frame to map registration
-            if self._frame_reg_mode == "f2m":
-                t_extract_start = time.time()
+            # TODO: put it at better place
+            if self.save_meta_data and obj_id == 0:
+                reg_stats_obj0.update(
+                    {
+                        "reg_key_points_idx": idx,
+                        "reg_prev3d": prev3d,  # For f2f mode, prev3d is equivalent to key_points
+                        "reg_curr3d": curr3d,
+                    }
+                )
 
-                if self._reg_remove_outside_mask:
-                    idx, key_points, curr3d, new_visibles, valid_stats = (
-                        self._extract_valid_key_points_mask_remove(
-                            self.objects[obj_id],
-                            self.track_table.obj2track_map[obj_id],
-                            tracks,
-                            track_3d,
-                            visibles,
-                            track_valid,
-                            uncertainties,
-                            frame.mask[obj_id, 0],
-                            uncertainty_thres=self.reg_uncer_thres,
-                        )
-                    )
-                    self.track_table.visible = new_visibles
-                else:
-                    idx, key_points, curr3d, valid_stats = (
-                        self._extract_valid_key_points(
-                            self.objects[obj_id],
-                            self.track_table.obj2track_map[obj_id],
-                            track_3d,
-                            visibles,
-                            track_valid,
-                            uncertainties,
-                            uncertainty_thres=self.reg_uncer_thres,
-                        )
-                    )
-
-                t_extract_end = time.time()
+            if prev3d.shape[0] < 3 or curr3d.shape[0] < 3:
+                reg_stats_obj0.update({"too_few_points": 1})
                 print(
-                    f"Extract valid key points time: {t_extract_end - t_extract_start:.4f}s"
+                    f"Frame {self.frame_id} - Object {obj_id} - Too few points: {prev3d.shape[0]}"
                 )
-
-                # TODO: put it at better place
-                if self.save_meta_data and obj_id == 0:
-                    reg_stats_obj0.update(
-                        {
-                            "reg_key_points_idx": idx,
-                            "reg_key_points": key_points,
-                            "reg_curr3d": curr3d,
-                        }
-                    )
-
-                if key_points.shape[0] < 3 or curr3d.shape[0] < 3:
-                    # self.data_logger.log({"too_few_points": 1})
-                    reg_stats_obj0.update({"too_few_points": 1})
-                    print(
-                        f"Frame {self.frame_id} - Object {obj_id} - Too few points: {key_points.shape[0]}"
-                    )
-                    continue
-
-                # TODO optimize this by saving the previous pose directly
-                prev_pose = self.objects[obj_id].pose
-
-                # key points are represented in the first frame coordinate system
-                # pose_i_0 is the transformation from the first frame to the current frame
-                # init_pose here is the warm start for the optimization, not the initial pose of the object
-                if self.register.type == "svd_uncertainty_outlier":
-                    pose_i_0, reg_stats = self.register.register(
-                        key_points,
-                        curr3d,
-                        init_pose=prev_pose,
-                        sigma_tgt=uncertainties[idx],
-                    )
-                else:
-                    pose_i_0, reg_stats = self.register.register(
-                        key_points, curr3d, init_pose=prev_pose
-                    )
-
-                # x_im1_i = se3_to_vec(log_SE3(inverse_SE3(pose_i_0) @ prev_pose))
-
-                inliers = reg_stats.get("inliers", np.array([]))
-                residuals = reg_stats.get("residuals", np.array([]))
-                mean_residual = (
-                    np.mean(residuals[inliers]) if len(inliers) > 0 else -1.0
+                continue
+            if self.register.type == "svd_uncertainty_outlier":
+                pose, reg_stats = self.register.register(
+                    prev3d, curr3d, sigma_tgt=uncertainties[idx]
                 )
-                # self.objects[obj_id].omega = x_im1_i[:3]
-                # self.objects[obj_id].v = x_im1_i[3:]
-                self.objects[obj_id].mean_residual = mean_residual
-
-                if (
-                    mean_residual < self.reg_residual_thres
-                    and self.use_graph_optimization
-                ):
-                    self.objects[obj_id].pose = pose_i_0
-
-                # Log registration statistics
-                self._log_registration_stats(
-                    self.frame_id, obj_id, key_points.shape[0], reg_stats
-                )
-
-                # TODO: put it at better place
-                if self.save_meta_data and obj_id == 0:
-                    reg_stats_obj0.update(
-                        {
-                            "reg_iter": reg_stats.get("iter", -1),
-                            "reg_thr": reg_stats.get("thr", -1.0),
-                            "reg_residuals": reg_stats.get("residuals", np.array([])),
-                            "reg_inliers": reg_stats.get("inliers", np.array([])),
-                        }
-                    )
-
-                print(f"pose at frame {self.frame_id}: {self.objects[obj_id].pose}")
-
-                if self.debug_level > 1:
-
-                    save_reg_pcd(
-                        key_points,
-                        curr3d,
-                        pose_i_0,
-                        self._reg_debug_dir,
-                        f"obj_{obj_id}_frame_{self.frame_id}",
-                        reg_stats,
-                    )
-
-            # frame to frame registration
-            elif self._frame_reg_mode == "f2f":
-                idx, prev3d, curr3d = self._extract_valid_idx_points_for_obj(
-                    obj_id, self.track_table, track_3d, track_valid, visibles
-                )
-
-                # TODO: put it at better place
-                if self.save_meta_data and obj_id == 0:
-                    reg_stats_obj0.update(
-                        {
-                            "reg_key_points_idx": idx,
-                            "reg_prev3d": prev3d,  # For f2f mode, prev3d is equivalent to key_points
-                            "reg_curr3d": curr3d,
-                        }
-                    )
-
-                if prev3d.shape[0] < 3 or curr3d.shape[0] < 3:
-                    reg_stats_obj0.update({"too_few_points": 1})
-                    print(
-                        f"Frame {self.frame_id} - Object {obj_id} - Too few points: {prev3d.shape[0]}"
-                    )
-                    continue
-                if self.register.type == "svd_uncertainty_outlier":
-                    pose, reg_stats = self.register.register(
-                        prev3d, curr3d, sigma_tgt=uncertainties[idx]
-                    )
-                else:
-                    pose, reg_stats = self.register.register(prev3d, curr3d)
-
-                inliers = reg_stats.get("inliers", np.array([]))
-                residuals = reg_stats.get("residuals", np.array([]))
-                mean_residual = (
-                    np.mean(residuals[inliers]) if len(inliers) > 0 else -1.0
-                )
-
-                self.objects[obj_id].mean_residual = mean_residual
-
-                if mean_residual < self.reg_residual_thres:
-                    self.objects[obj_id].pose = pose @ self.objects[obj_id].pose
-
-                # Log registration statistics
-                self._log_registration_stats(
-                    self.frame_id, obj_id, prev3d.shape[0], reg_stats
-                )
-
-                # TODO: put it at better place
-                if self.save_meta_data and obj_id == 0:
-                    reg_stats_obj0.update(
-                        {
-                            "reg_iter": reg_stats.get("iter", -1),
-                            "reg_thr": reg_stats.get("thr", -1.0),
-                            "reg_residuals": reg_stats.get("residuals", np.array([])),
-                            "reg_inliers": reg_stats.get("inliers", np.array([])),
-                        }
-                    )
-
-                # Log pose in TUM format
-                if self.save_pose and self.pose_log_files[obj_id] is not None:
-                    tum_pose = self._pose_matrix_to_tum_format(
-                        self.objects[obj_id].pose, timestamp=time.time()
-                    )
-                    self.pose_log_files[obj_id].write(tum_pose)
-                    self.pose_log_files[obj_id].flush()
-
-                print(f"Frame {self.frame_id} - Object {obj_id} - Pose: {pose}")
-                if self.debug_level > 1:
-                    save_reg_pcd(
-                        prev3d,
-                        curr3d,
-                        pose,
-                        self._reg_debug_dir,
-                        f"obj_{obj_id}_frame_{self.frame_id}",
-                        reg_stats,
-                    )
-            elif self._frame_reg_mode == "hybrid":
-                pass
             else:
-                raise ValueError(
-                    f"Invalid frame registration mode: {self._frame_reg_mode}. Please choose from f2f, f2m, or hybrid."
+                pose, reg_stats = self.register.register(prev3d, curr3d)
+
+            inliers = reg_stats.get("inliers", np.array([]))
+            residuals = reg_stats.get("residuals", np.array([]))
+            mean_residual = np.mean(residuals[inliers]) if len(inliers) > 0 else -1.0
+
+            self.objects[obj_id].mean_residual = mean_residual
+
+            if mean_residual < self.reg_residual_thres:
+                self.objects[obj_id].pose = pose @ self.objects[obj_id].pose
+
+            # Log registration statistics
+            self._log_registration_stats(
+                self.frame_id, obj_id, prev3d.shape[0], reg_stats
+            )
+
+            # TODO: put it at better place
+            if self.save_meta_data and obj_id == 0:
+                reg_stats_obj0.update(
+                    {
+                        "reg_iter": reg_stats.get("iter", -1),
+                        "reg_thr": reg_stats.get("thr", -1.0),
+                        "reg_residuals": reg_stats.get("residuals", np.array([])),
+                        "reg_inliers": reg_stats.get("inliers", np.array([])),
+                    }
                 )
 
-            # -------------- graph optimization --------------
-            if (
-                self.objects[obj_id].mean_residual < self.reg_residual_thres
-                and self.use_graph_optimization
-            ):
-
-                # update object frame data and send to optimizer manager
-                object_frame_data = ObjectFrameData(
-                    obj_id=obj_id,
-                    frame_id=self.frame_id,
-                    pose=self.objects[obj_id].pose,
-                    cur_3d=curr3d,
-                    cur_3d_idx=idx,
-                    inliers=reg_stats.get("inliers", np.array([])),
-                    residuals=reg_stats.get("residuals", np.array([])),
-                    uncertainties=uncertainties[idx],
+            # Log pose in TUM format
+            if self.save_pose and self.pose_log_files[obj_id] is not None:
+                tum_pose = self._pose_matrix_to_tum_format(
+                    self.objects[obj_id].pose, timestamp=time.time()
                 )
+                self.pose_log_files[obj_id].write(tum_pose)
+                self.pose_log_files[obj_id].flush()
 
-                # once the input is set, the optimizer manager will start the optimization process
-                opt_results = self.optimizer.optimize(object_frame_data)
-
-                # if we have optmized results, update the object info
-                if opt_results is not None:
-                    ## TODO: do we update pose here...?
-                    # self.objects[obj_id].pose = opt_results.pose_optimized
-                    # print(
-                    #     f"key points before optimization: {self.objects[obj_id].key_points.shape}"
-                    # )
-                    # Vectorized remapping from track IDs -> object-local keypoint indices
-                    track_ids_opt = np.asarray(
-                        opt_results.key_points_idx_optimized, dtype=int
-                    )
-                    pts_opt = np.asarray(opt_results.key_points_optimized, dtype=float)
-
-                    obj_track_ids = np.asarray(
-                        self.track_table.obj2track_map[obj_id], dtype=int
-                    )
-
-                    # Build vectorized lookup:
-                    # For each optimized track_id, find its index in obj_track_ids.
-                    # local_kp_idx[i] = j  where  obj_track_ids[j] == track_ids_opt[i]
-                    #
-                    # Fully vectorized via broadcasting:
-                    # shape (num_kp_obj, 1) == shape (1, num_landmarks)
-                    matches = obj_track_ids[:, None] == track_ids_opt[None, :]
-
-                    # Convert boolean matrix to indices (rows where match=True)
-                    # If a track_id doesn't exist for this object, it will have no match.
-                    local_kp_idx, opt_col_idx = np.where(matches)
-
-                    # Select the optimized points that correspond to matched columns
-                    pts_to_update = pts_opt[opt_col_idx]
-
-                    # Update object keypoints in one shot
-                    self.objects[obj_id].key_points[local_kp_idx] = pts_to_update
-
-                    # Finally update pose
-                    self.objects[obj_id].pose = opt_results.pose_optimized
-
-                    print(f"pose at frame {self.frame_id}: {self.objects[obj_id].pose}")
-                    # print(
-                    #     f"key points after optimization: {self.objects[obj_id].key_points.shape}"
-                    # )
-                    # print(self.objects[obj_id].key_points)
-
-                    if self.debug_level > 1:
-                        self.save_optimizer_key_points(obj_id)
+            print(f"Frame {self.frame_id} - Object {obj_id} - Pose: {pose}")
+            if self.debug_level > 1:
+                save_reg_pcd(
+                    prev3d,
+                    curr3d,
+                    pose,
+                    self._reg_debug_dir,
+                    f"obj_{obj_id}_frame_{self.frame_id}",
+                    reg_stats,
+                )
 
             # Log pose in TUM format
             if self.save_pose and self.pose_log_files[obj_id] is not None:

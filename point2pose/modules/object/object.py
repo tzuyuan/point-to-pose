@@ -28,6 +28,7 @@ class Object:
         self.pose = np.eye(
             4
         )  # 4x4 transformation matrix from object frame to world frame
+        self.lost = False
 
         self.init_bbox = None
         self.bbox = (

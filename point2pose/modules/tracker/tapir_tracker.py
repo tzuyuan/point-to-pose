@@ -42,6 +42,7 @@ class TapirTracker(Tracker):
         self._img_width = config.get("img_width", 640)
         self._resize_height = config.get("resize_height", 256)
         self._resize_width = config.get("resize_width", 256)
+        self._visible_threshold = config.get("visible_threshold", 0.5)
 
         self._device = config.get("device", "cpu")
         # self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -70,6 +71,11 @@ class TapirTracker(Tracker):
         Args:
             frame: [height, width, 3], np.uint8
         """
+        self._img_height = frame.rgb.shape[0]
+        self._img_width = frame.rgb.shape[1]
+        print(
+            f"[TAPIR] Initialized with image size {self._img_height}x{self._img_width}."
+        )
         # if no query points, return False
         if self.query_points is None:
             return False
@@ -93,15 +99,6 @@ class TapirTracker(Tracker):
         rgb_resize_pinned = torch.from_numpy(rgb_resize).pin_memory()
         rgb_resize_tensor = rgb_resize_pinned.to(self._device, non_blocking=True)
 
-        # if not self._initialized:
-        #     self._initialized = self.initialize(frame)
-        #     out_point = self.query_points.clone().cpu().numpy()
-        #     return (
-        #         out_point,
-        #         np.ones(out_point.shape[0]),
-        #         np.ones(out_point.shape[0]),
-        #     )
-        # else:
         with torch.no_grad():
             # Predict trajectories and occlusions
             tracks_resized, uncertainty, visibles, self._causal_state = (
@@ -121,7 +118,7 @@ class TapirTracker(Tracker):
             return (
                 tracks.float().numpy(),
                 uncertainty.cpu().float().numpy().reshape(-1),
-                visibles.cpu().float().numpy().reshape(-1),
+                visibles.cpu().numpy().reshape(-1),
             )
 
     def add_query_points(self, frame, new_points):
@@ -266,6 +263,7 @@ class TapirTracker(Tracker):
 
     def _postprocess_occlusions(self, occlusions, expected_dist):
         visibles = (1 - F.sigmoid(occlusions)) * (1 - F.sigmoid(expected_dist))
+        visibles = (visibles >= self._visible_threshold).to(torch.bool)
         return visibles
 
     def _online_model_init(self, model, frames, query_points):

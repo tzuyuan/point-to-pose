@@ -19,7 +19,7 @@ class SVDResidualOutlierRegister(Register):
         self._mad_scale = config.get("mad_scale", 2.5)
         self._min_inliers = config.get("min_inliers", 3)
 
-    def register(self, src_pcd, tgt_pcd, init_pose=None):
+    def register(self, src_pcd, tgt_pcd, init_pose=None, **kwargs):
         """
         Perform a single registration step using SVD.
         Args:

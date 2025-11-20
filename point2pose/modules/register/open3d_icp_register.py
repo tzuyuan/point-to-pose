@@ -55,6 +55,7 @@ class Open3DICPRegister(Register):
         source_pcd: np.ndarray,
         target_pcd: np.ndarray,
         init_pose: Optional[np.ndarray] = None,
+        **kwargs,
     ) -> Tuple[np.ndarray, Dict]:
         """
         Perform ICP registration between source and target point clouds.

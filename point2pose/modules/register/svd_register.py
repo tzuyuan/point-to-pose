@@ -11,7 +11,7 @@ class SVDRegister(Register):
     def __init__(self, config=None):
         super().__init__(config)
 
-    def register(self, src_pcd, tgt_pcd, init_pose=None):
+    def register(self, src_pcd, tgt_pcd, init_pose=None, **kwargs):
         """
         Perform a single registration step using SVD.
         """
