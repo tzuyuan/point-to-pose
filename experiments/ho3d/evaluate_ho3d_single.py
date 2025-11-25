@@ -384,7 +384,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--metadata_path",
         "-m",
-        default="/home/justin/code/point-to-pose/debug/pipeline/meta_data/meata_data.npz",
+        default="/home/justin/code/point-to-pose/debug/pipeline/meta_data/meta_data.npz",
         type=str,
         help="Path to metadata NPZ file (optional, will be inferred if not provided)",
     )

@@ -7,19 +7,33 @@ from point2pose.data_types.optimizer_result import OptimizerResult
 class LocalOptimizer:
     def __init__(self, cfg):
         self.cfg = cfg
-        self.optimizer = ISAM2Optimizer(cfg.optimizer)
+        # One ISAM2 optimizer per object id
+        self._optimizers = {}  # obj_id -> ISAM2Optimizer
 
-    def reset(self):
-        """
-        Resets the underlying optimizer state (e.g. when a new keyframe is added).
-        """
-        self.optimizer = ISAM2Optimizer(self.cfg.optimizer)
+    def _get_optimizer(self, obj_id: int) -> ISAM2Optimizer:
+        """Lazy-create an optimizer for this object."""
+        if obj_id not in self._optimizers:
+            self._optimizers[obj_id] = ISAM2Optimizer(self.cfg.optimizer)
+        return self._optimizers[obj_id]
 
-    def optimize(self, object_frame_data: ObjectFrameData) -> OptimizerResult:
+    def reset(self, obj_id: int | None = None):
         """
-        Run the optimization.
+        Reset optimizer state.
+
+        - If obj_id is None: reset all objects.
+        - If obj_id is given: reset only that object's optimizer.
         """
-        return self.optimizer.optimize(object_frame_data)
+        if obj_id is None:
+            self._optimizers = {}
+        else:
+            self._optimizers[obj_id] = ISAM2Optimizer(self.cfg.optimizer)
+
+    def optimize(self, object_frame_data: ObjectFrameData) -> OptimizerResult | None:
+        """
+        Run optimization for the corresponding object.
+        """
+        opt = self._get_optimizer(object_frame_data.obj_id)
+        return opt.optimize(object_frame_data)
 
     def update_object_state(self, obj, opt_result: OptimizerResult, track_table):
         """
@@ -49,4 +63,9 @@ class LocalOptimizer:
             obj.key_points[local_kp_idx] = pts_to_update
 
         # Update pose
+        before = obj.pose.copy()
         obj.pose = opt_result.pose_optimized
+
+        # Optional debug: see if optimization is actually doing anything
+        # delta = np.linalg.norm(before[:3, 3] - obj.pose[:3, 3])
+        # print(f"[LocalOptimizer] obj {obj.id}, frame {opt_result.frame_id}, Δt = {delta:.4f} m")

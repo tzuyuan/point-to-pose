@@ -3,6 +3,9 @@
 pipeline:
   type: modular
   params:
+    # sequence_name: auto, MPM10, AP10, etc.
+    # dataset_name: ho3d
+    # sequence_name: auto
     max_num_obj: 1
     estimate_init_pose: true
 

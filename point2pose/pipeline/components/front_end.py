@@ -144,6 +144,10 @@ class FrontEnd:
                 print(f"[FrontEnd] Object {obj_id} not initialized properly.")
                 continue
 
+            if obj.lost:
+                print(f"[FrontEnd] Object {obj_id} is lost, skip registration.")
+                continue
+
             # ----------- Registration Logic -----------
             idx_f2f, prev3d, curr3d_f2f, valid_stats = (
                 self._extract_valid_idx_points_for_obj(

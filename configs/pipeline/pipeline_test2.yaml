@@ -4,19 +4,22 @@ realsense:
 
 
 pipeline:
+  type: modular
   params:
-    max_num_obj: 2
+    max_num_obj: 1
     estimate_init_pose: true
     # frame_reg_mode: f2f, f2m, hybrid
     frame_reg_mode: f2f
 
+    use_segmenter: true
 
     use_depth_estimate: false
     depth_estimator_type: depth_anything
     device: cuda
     depth_encoder: vitl
 
-    use_graph_optimization: true
+    use_graph_optimization: false
+    use_local_graph: true
 
     debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/
@@ -77,7 +80,7 @@ sampler:
     min_points: 5
     max_points: 50
     edge_margin_px: 5
-    remove_convex_hull: true
+    remove_convex_hull: false
     inflate_points: False
     inflate_radius_px: 20
 

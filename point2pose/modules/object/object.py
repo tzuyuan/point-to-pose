@@ -14,6 +14,7 @@ class Object:
         self.key_points = np.empty((0, 3))  # Mx3
         self.uncertainties = np.empty((0,))
         self.valid = np.empty((0,))  # M, bool
+        self.num_keyframes = 0
         self.key_point_frames = np.empty(
             (0,), dtype=int
         )  # M, frame IDs when points were added

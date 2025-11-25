@@ -149,7 +149,7 @@ class SuperPointSampler(Sampler):
             if self.debug_level >= 1:
                 print(f"[SuperPoint] No keypoints for object {obj_id}")
                 self._viz_hull(rgb, mask_inner, hull_xy, detect_mask, frame.id, obj_id)
-            return np.empty((0, 2), dtype=np.int32), None
+            return np.empty((0, 2), dtype=np.int32)
 
         # --- 5) Mask filtering (keep only points inside detect_mask_used)
         h_used, w_used = detect_mask_used.shape
@@ -169,7 +169,7 @@ class SuperPointSampler(Sampler):
                     f"[SuperPoint] All keypoints filtered out by detect_mask (obj {obj_id})"
                 )
                 self._viz_hull(rgb, mask_inner, hull_xy, detect_mask, frame.id, obj_id)
-            return np.empty((0, 2), dtype=np.int32), None
+            return np.empty((0, 2), dtype=np.int32)
 
         # --- 6) Top-N by score (descending)
         n_keep = min(self.num_points, kp_sc.shape[0])
@@ -202,7 +202,7 @@ class SuperPointSampler(Sampler):
                     self._viz_hull(
                         rgb, mask_inner, hull_xy, detect_mask, frame.id, obj_id
                     )
-                return np.empty((0, 2), dtype=np.int32), None
+                return np.empty((0, 2), dtype=np.int32)
             keep_idx = np.asarray(keep_idx, dtype=np.int32)
             pts_xy_int_local = pts_xy_int_local[keep_idx]
             if desc is not None:
@@ -614,7 +614,12 @@ class SuperPointSampler(Sampler):
             track_2d = getattr(tbl, "track_2d", None)
             visible = getattr(tbl, "visible", None)
             obj2track = getattr(tbl, "obj2track_map", None)
-            if track_2d is not None and visible is not None and obj2track is not None:
+            if (
+                track_2d is not None
+                and visible is not None
+                and obj2track is not None
+                and obj_id in obj2track
+            ):
                 obj_idx = obj2track[obj_id]
                 vis_mask = np.asarray(visible, dtype=bool)[obj_idx]
                 pts = track_2d[obj_idx][vis_mask]  # (M,2) (x,y)

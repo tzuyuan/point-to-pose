@@ -294,6 +294,7 @@ class PipelineSingleProcess:
                     inliers=np.ones(len(self.objects[obj_id].key_points), dtype=bool),
                     residuals=np.zeros(len(self.objects[obj_id].key_points)),
                     uncertainties=0.01 * np.ones(len(self.objects[obj_id].key_points)),
+                    rel_pose=np.eye(4),
                 )
             )
 
@@ -651,6 +652,8 @@ class PipelineSingleProcess:
                         }
                     )
 
+                prev_pose = self.objects[obj_id].pose
+
                 if prev3d.shape[0] < 3 or curr3d.shape[0] < 3:
                     reg_stats_obj0.update({"too_few_points": 1})
                     print(
@@ -718,6 +721,8 @@ class PipelineSingleProcess:
                 stats_f2f = {}
                 T_rel = None
                 mean_res_f2f = -1.0
+
+                prev_pose = self.objects[obj_id].pose
 
                 if prev3d.shape[0] >= 3 and curr3d_f2f.shape[0] >= 3:
                     if self.register.type == "svd_uncertainty_outlier":
@@ -913,6 +918,7 @@ class PipelineSingleProcess:
                     inliers=reg_stats.get("inliers", np.array([])),
                     residuals=reg_stats.get("residuals", np.array([])),
                     uncertainties=uncertainties[idx],
+                    rel_pose=inverse_SE3(prev_pose) @ self.objects[obj_id].pose,
                 )
 
                 # once the input is set, the optimizer manager will start the optimization process

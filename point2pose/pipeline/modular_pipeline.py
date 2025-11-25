@@ -19,6 +19,7 @@ from point2pose.pipeline.components.front_end import FrontEnd
 from point2pose.pipeline.components.key_frame_manager import KeyFrameManager
 from point2pose.pipeline.components.local_optimizer import LocalOptimizer
 from point2pose.pipeline.components.key_frame_graph import KeyFrameGraph
+from point2pose.pipeline.components.recovery_manager import RecoveryManager
 
 
 class ModularPipeline:
@@ -31,6 +32,7 @@ class ModularPipeline:
         self.kf_manager = KeyFrameManager(cfg)
         self.local_optimizer = LocalOptimizer(cfg)
         self.kf_graph = KeyFrameGraph(cfg)
+        self.recovery_manager = RecoveryManager(cfg)
 
         # State
         self.track_table = PointTrackTable.new(n0=0)
@@ -38,10 +40,17 @@ class ModularPipeline:
         self.num_obj = self.pipeline_cfg.get("max_num_obj", 1)
         self.frame_id = 0
 
+        # module settings
+        self._estimate_init_pose = self.pipeline_cfg.get("estimate_init_pose", False)
+        self.use_local_graph = self.pipeline_cfg.get("use_local_graph", False)
+        self.reg_residual_thres = self.cfg.register.params.get("residual_thres", 0.07)
+
         # Logging
         self.save_pose = self.pipeline_cfg.get("save_pose", False)
         self.pose_save_path = self.pipeline_cfg.get("pose_save_path", "./poses")
         self.pose_log_files = []
+        self.debug_level = self.pipeline_cfg.get("debug_level", 0)
+        self.debug_dir = self.pipeline_cfg.get("debug_dir", None)
 
         if self.save_pose:
             os.makedirs(self.pose_save_path, exist_ok=True)
@@ -59,11 +68,16 @@ class ModularPipeline:
                 also_save_h5=False,
             )
 
-        self._estimate_init_pose = self.pipeline_cfg.get("estimate_init_pose", False)
-        self.use_graph_optimization = self.pipeline_cfg.get(
-            "use_graph_optimization", False
-        )
-        self.reg_residual_thres = self.cfg.register.params.get("residual_thres", 0.07)
+    # -------- one-time init with user clicks ----------
+    def add_user_points(self, obj_points: list[list[int]], labels: list[int]):
+        """
+        points (List[List[int]]): List of points, each defined by [x, y].
+            labels (List[int]): List of labels, each defined by 1 or 0.
+                                1 means positive point, 0 means negative point.
+        """
+        # forward to segmenter; it will start tracking objects internally
+
+        self.frontend.segmenter.add_input_points(obj_points, labels)
 
     def initialize_first_frame(self, frame):
         # 1. Initialize FrontEnd (Segmentation + Tracker)
@@ -96,7 +110,7 @@ class ModularPipeline:
             frame, self.track_table, self.objects, self.frontend.tracker
         )
 
-        # 4. Initial Optimization (optional, typically just prior)
+        # 4. Initial Optimization
         for obj_id in range(self.num_obj):
             self.local_optimizer.optimize(
                 ObjectFrameData(
@@ -165,50 +179,58 @@ class ModularPipeline:
             fe_result.visibles,
         )
 
+        # 2.5. Recovery (if lost)
+        self.recovery_manager.update(
+            frame,
+            fe_result,
+            self.objects,
+            self.track_table,
+            self.kf_manager.keyframes,
+            self.frontend.register,
+        )
+
         # 3. Key Frame Manager (Check & Sample)
         new_keyframes = self.kf_manager.update(
             frame, fe_result, self.track_table, self.objects, self.frontend.tracker
         )
 
         # If new keyframe, reset local optimizer
-        if new_keyframes:
+        for kf in new_keyframes:
             print(
                 f"Frame {self.frame_id}: Keyframe triggered. Resetting local optimizer."
             )
-            self.local_optimizer.reset()
+            self.local_optimizer.reset(kf.obj_id)
 
         # 4. Local Optimization
-        if self.use_graph_optimization:
+        if self.use_local_graph:
             for obj_id in range(self.num_obj):
-                if obj_id not in fe_result.valid_indices:
+
+                if obj_id not in fe_result.valid_indices or self.objects[obj_id].lost:
                     continue
 
                 # Only optimize if registration was good enough
                 # if self.objects[obj_id].mean_residual < self.reg_residual_thres:
-                if True:
 
-                    object_frame_data = ObjectFrameData(
-                        obj_id=obj_id,
-                        frame_id=self.frame_id,
-                        pose=self.objects[obj_id].pose,
-                        rel_pose=fe_result.rel_poses[obj_id],
-                        cur_3d=fe_result.valid_curr_3d[obj_id],
-                        cur_3d_idx=fe_result.valid_indices[obj_id],
-                        inliers=fe_result.reg_stats[obj_id].get(
-                            "inliers", np.array([])
-                        ),
-                        residuals=fe_result.reg_stats[obj_id].get(
-                            "residuals", np.array([])
-                        ),
-                        uncertainties=fe_result.uncertainties[
-                            fe_result.valid_indices[obj_id]
-                        ],
-                    )
+                object_frame_data = ObjectFrameData(
+                    obj_id=obj_id,
+                    frame_id=self.frame_id,
+                    pose=self.objects[obj_id].pose,
+                    rel_pose=fe_result.rel_poses[obj_id],
+                    cur_3d=fe_result.valid_curr_3d[obj_id],
+                    cur_3d_idx=fe_result.valid_indices[obj_id],
+                    inliers=fe_result.reg_stats[obj_id].get("inliers", np.array([])),
+                    residuals=fe_result.reg_stats[obj_id].get(
+                        "residuals", np.array([])
+                    ),
+                    uncertainties=fe_result.uncertainties[
+                        fe_result.valid_indices[obj_id]
+                    ],
+                )
 
-                    opt_result = self.local_optimizer.optimize(object_frame_data)
-                    self.local_optimizer.update_object_state(
-                        self.objects[obj_id], opt_result, self.track_table
-                    )
+                opt_result = self.local_optimizer.optimize(object_frame_data)
+                self.local_optimizer.update_object_state(
+                    self.objects[obj_id], opt_result, self.track_table
+                )
 
         # 5. Logging
         self._log_step(frame, fe_result, new_keyframes)
@@ -275,7 +297,8 @@ class ModularPipeline:
                     {
                         "frame_id": kf.frame_id,
                         "obj_id": kf.obj_id,
-                        "num_kp": len(kf.keypoints_3d_camera),
+                        "num_kp": kf.get_num_kps(),
+                        "num_obs": kf.get_num_obs(),
                     }
                     for kf in new_keyframes
                 ]
@@ -291,13 +314,27 @@ class ModularPipeline:
         return f"{timestamp:.6f} {tx:.6f} {ty:.6f} {tz:.6f} {qx:.6f} {qy:.6f} {qz:.6f} {qw:.6f}\n"
 
     def _estimate_init_pose_and_bbox_for_all_obj(self, frame):
-        # Ported from PipelineSingleProcess
+        out_pose = np.tile(np.eye(4), (self.num_obj, 1, 1))
+        # estimate initial pose
         for obj_id in range(self.num_obj):
-            mask = frame.mask[obj_id, 0]
-            coords_yx = torch.nonzero(mask > 0, as_tuple=False)
-            valid_pxl_in_mask_g = coords_yx[:, [1, 0]].contiguous()
-            valid_pxl_in_mask = valid_pxl_in_mask_g.cpu().numpy()
+            # get the initial 3d points from frame.mask
+            # mask = frame.mask[obj_id, 0]
+            # y_coords, x_coords = np.where(mask > 0)
+            # valid_pxl_in_mask = np.stack([x_coords, y_coords], axis=1)
+            # Keep masks on GPU
+            mask = frame.mask[obj_id, 0]  # [H, W] on cuda, dtype=bool/uint8
 
+            # Get (y,x) indices on GPU; switch to (x,y) like your NumPy code
+            coords_yx = torch.nonzero(mask > 0, as_tuple=False)  # [N, 2], (y,x)
+            valid_pxl_in_mask_g = coords_yx[
+                :, [1, 0]
+            ].contiguous()  # [N, 2], (x,y), still on GPU
+
+            valid_pxl_in_mask = valid_pxl_in_mask_g.cpu().numpy()
+            ## TODO: remove this potentially
+            mean_mask_pixel = np.mean(valid_pxl_in_mask, axis=0)
+
+            ## TODO: Add outlier removal
             initial_3d_points, _ = convert_pixel_to_world(
                 pixel=valid_pxl_in_mask,
                 depth_image=frame.depth,
@@ -305,44 +342,109 @@ class ModularPipeline:
                 depth_factor=frame.depth_factor,
                 remove_invalid=True,
             )
-
+            # estimate initial bbox
             pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(initial_3d_points)
 
-            # Simple outlier removal
-            if True:  # pcd_radius_outlier_removal
-                pcd, _ = pcd.remove_radius_outlier(nb_points=16, radius=0.05)
+            ## Temporary outlier removal
+            ## TODO: Make this a class
+            pcd_stat_outlier_removal = False
+            pcd_stat_outlier_removal_nb_neighbors = 20
+            pcd_stat_outlier_removal_std_ratio = 2.0
+            pcd_radius_outlier_removal = True
+            pcd_radius_outlier_removal_radius = 0.1
 
-            self.objects[obj_id].init_bbox = pcd.get_oriented_bounding_box()
+            if pcd_stat_outlier_removal:
+                _, ind_stat = pcd.remove_statistical_outlier(
+                    nb_neighbors=pcd_stat_outlier_removal_nb_neighbors,
+                    std_ratio=pcd_stat_outlier_removal_std_ratio,
+                )
+            close_indices = None
+            if pcd_radius_outlier_removal:
+                # Distance-based outlier removal if clicked point is provided
+                mean_mask_pixel_world, _ = convert_pixel_to_world(
+                    pixel=mean_mask_pixel,
+                    depth_image=frame.depth,
+                    cam_intrinsics=frame.intrinsics,
+                    cam2world=np.eye(4),
+                    depth_factor=frame.depth_factor,
+                )
+                # Calculate distances from clicked point to all points
+                points_array = initial_3d_points
+                distances = np.linalg.norm(points_array - mean_mask_pixel_world, axis=1)
+
+                # Keep points within a reasonable distance (e.g., 0.2 meters)
+                max_distance = pcd_radius_outlier_removal_radius
+                close_indices = np.where(distances <= max_distance)[0]
+
+            ind_union = None
+            if pcd_stat_outlier_removal and pcd_radius_outlier_removal:
+                ind_union = np.intersect1d(ind_stat, close_indices)
+            elif pcd_stat_outlier_removal:
+                ind_union = ind_stat
+            elif pcd_radius_outlier_removal:
+                ind_union = close_indices
+
+            if ind_union is not None:
+                pcd_world_clean = pcd.select_by_index(ind_union)
+            else:
+                pcd_world_clean = pcd
+
+            self.objects[obj_id].init_bbox = pcd_world_clean.get_oriented_bounding_box()
+            # self.objects[obj_id].init_bbox = pcd.get_axis_aligned_bounding_box()
             self.objects[obj_id].bbox = self.objects[obj_id].init_bbox
-
-            # Set initial pose from bbox
-            # This logic depends on whether init_pose is relative to camera or world.
-            # Assuming standard object frame is aligned with bbox
-            # self.objects[obj_id].pose = np.eye(4)
-            init_pose = np.eye(4)
-            init_pose[:3, :3] = self.objects[obj_id].init_bbox.R
-            init_pose[:3, 3] = self.objects[obj_id].init_bbox.center
-            self.objects[obj_id].init_pose = init_pose
-
-            # Typically first frame pose is identity in camera frame,
-            # and we define object frame relative to that?
-            # Original code:
-            # out_pose[obj_id, :3, :3] = ...R
-            # out_pose[obj_id, :3, 3] = ...center
-            # self.objects[obj_id].pose = np.eye(4)
-            # self.objects[obj_id].init_pose = out_pose[obj_id]
-
-            # So the object's pose in world (camera 0) is init_pose.
-            # The object's current pose (T_c_o) might be what we are tracking?
-            # PipelineSingleProcess tracks T_w_c or T_c_o?
-            # "pose" usually means T_c_o (object in camera) or T_w_o (object in world/camera0).
-            # Given "pose = pose @ objects[obj_id].pose", it seems to accumulate relative motion?
-            # Let's stick to the original assignment:
+            # set the initial pose
+            out_pose[obj_id, :3, :3] = self.objects[obj_id].init_bbox.R
+            out_pose[obj_id, :3, 3] = self.objects[obj_id].init_bbox.center
+            # the first frame pose is the identity
             self.objects[obj_id].pose = np.eye(4)
+            # initial pose is the pose from the object frame to the first frame
+            self.objects[obj_id].init_pose = out_pose[obj_id]
+
+            # Log initial pose in TUM format
+            if self.save_pose and self.pose_log_files[obj_id] is not None:
+                tum_pose = self._pose_matrix_to_tum_format(
+                    out_pose[obj_id], timestamp=time.time()
+                )
+                self.pose_log_files[obj_id].write(tum_pose)
+                self.pose_log_files[obj_id].flush()
+            # self.objects[obj_id].pose = np.eye(4)
+            # out_pose[obj_id] = np.eye(4)
+            # -----------------------------------------
+
+            if self.debug_level > 1:
+
+                # ensure debug directory exists
+                debug_bbx_dir = os.path.join(self.debug_dir, "pipeline/initial_bbx")
+                os.makedirs(debug_bbx_dir, exist_ok=True)
+
+                # get color from frame.rgb
+                # color = frame.rgb[y_coords, x_coords]
+                color = frame.rgb[valid_pxl_in_mask[:, 1], valid_pxl_in_mask[:, 0]]
+                pcd.colors = o3d.utility.Vector3dVector(color / 255.0)
+                o3d.io.write_point_cloud(
+                    os.path.join(debug_bbx_dir, f"initial_pcd_{obj_id}.ply"),
+                    pcd,
+                )
+
+                # get the initial bbox
+                obb_ls = o3d.geometry.LineSet.create_from_oriented_bounding_box(
+                    self.objects[obj_id].init_bbox
+                )
+                # change the line color to green and width to 2
+                obb_ls.colors = o3d.utility.Vector3dVector(np.array([[0, 1, 0]]))
+                obb_ls.lines = o3d.utility.Vector2iVector(obb_ls.lines)
+                o3d.io.write_line_set(
+                    os.path.join(debug_bbx_dir, f"initial_bbx_{obj_id}.ply"),
+                    obb_ls,
+                )
+        return out_pose
 
     def _update_object_from_frontend(self, obj_id, fe_result):
         obj = self.objects[obj_id]
+
+        if obj.lost:
+            return
 
         # 1. Pose update from front end
         if obj_id in fe_result.obj_poses:
@@ -367,7 +469,7 @@ class ModularPipeline:
         obj.mean_residual = fe_result.mean_residuals[obj_id]
 
         # 6. Lost condition
-        obj.lost = obj.mean_residual > self.reg_residual_thres
+        # obj.lost = obj.mean_residual > self.reg_residual_thres
 
     def __del__(self):
         for f in self.pose_log_files:

@@ -11,6 +11,7 @@ from omegaconf import OmegaConf
 
 from point2pose.pipeline.pipeline import Pipeline
 from point2pose.pipeline.pipeline_single_process import PipelineSingleProcess
+from point2pose.pipeline.modular_pipeline import ModularPipeline
 from point2pose.data_types.frame import Frame
 
 # from point2pose.data_types.object import Object
@@ -78,7 +79,12 @@ class RealSensePipelineTracker:
         cv2.namedWindow("RealSense Pipeline Tracker", cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback("RealSense Pipeline Tracker", self.mouse_callback)
 
-        self.pipeline = PipelineSingleProcess(self.cfg)
+        if self.cfg.pipeline.type == "single_process":
+            self.pipeline = PipelineSingleProcess(self.cfg)
+        elif self.cfg.pipeline.type == "modular":
+            self.pipeline = ModularPipeline(self.cfg)
+        else:
+            raise ValueError(f"Invalid pipeline type: {self.cfg.pipeline.type}")
 
         print("Instructions:")
         print("- Left click: Add positive point")
@@ -146,7 +152,12 @@ class RealSensePipelineTracker:
 
         # Reset pipeline
         # self.pipeline = Pipeline(self.cfg)
-        self.pipeline = PipelineSingleProcess(self.cfg)
+        if self.cfg.pipeline.type == "single_process":
+            self.pipeline = PipelineSingleProcess(self.cfg)
+        elif self.cfg.pipeline.type == "modular":
+            self.pipeline = ModularPipeline(self.cfg)
+        else:
+            raise ValueError(f"Invalid pipeline type: {self.cfg.pipeline.type}")
 
         print("Points reset. Click to add new points.")
 
