@@ -5,6 +5,7 @@ from typing import List, Dict
 import open3d as o3d
 import numpy as np
 import torch
+from scipy.spatial.transform import Rotation as scipy_R
 
 from point2pose.core.build import build_from_cfg
 from point2pose.core.module_registry import SAMPLER, CRITERION
@@ -23,6 +24,7 @@ class KeyFrameManager:
 
         self.num_obj = self.pipeline_cfg.get("max_num_obj", 1)
         self.save_key_points = self.pipeline_cfg.get("save_key_points", False)
+        self.max_rel_rotation_deg = self.pipeline_cfg.get("max_rel_rotation_deg", 45.0)
         self.key_points_save_path = self.pipeline_cfg.get(
             "key_points_save_path", "./key_points"
         )
@@ -135,6 +137,23 @@ class KeyFrameManager:
         for obj_id in range(min(self.num_obj, len(objects))):
             obj = objects[obj_id]
             self.is_key_frame[obj_id] = False
+
+            # Check 1: If object is lost, avoid sampling
+            if getattr(obj, "lost", False):
+                continue
+
+            # Check 2: Large rotation jump
+            rel_pose = front_end_result.rel_poses.get(obj_id)
+            if rel_pose is not None:
+                rot_magnitude = scipy_R.from_matrix(rel_pose[:3, :3]).magnitude()
+                angle_deg = np.degrees(rot_magnitude)
+
+                if angle_deg > self.max_rel_rotation_deg:
+                    print(
+                        f"[KeyFrameManager] Frame {frame.id}: Large rotation {angle_deg:.2f} deg "
+                        f"detected for obj {obj_id}. Skipping sampling."
+                    )
+                    continue
 
             # Decide whether this frame is a keyframe for this object
             if not self.criterion.check_sample_criterion(self.crit_ctx, obj_id):

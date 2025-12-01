@@ -19,7 +19,7 @@ pipeline:
     depth_encoder: vitl
 
     use_graph_optimization: false
-    use_local_graph: true
+    use_local_graph: false
 
     debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/
@@ -43,6 +43,12 @@ register:
     thres_reduce_factor: 0.005
     mad_scale: 1.0
     min_inliers: 3
+
+recovery:
+  type: recovery_manager
+  params:
+    max_lost_frames: 1
+    min_recovery_overlap: 10
 
 segmenter:
   type: sam2
@@ -72,10 +78,11 @@ tracker:
   #   checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
 
 sampler: 
-  type: super_point
+  type: super_point_fps
   params:
     num_points: 20
     density_per_kpx: -1
+    fps_oversample_factor: 3
 
     min_points: 5
     max_points: 50

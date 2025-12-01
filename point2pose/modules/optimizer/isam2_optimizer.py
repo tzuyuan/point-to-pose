@@ -42,6 +42,10 @@ class ISAM2Optimizer(Optimizer):
 
         self._prev_rel_T = None
 
+    def get_num_poses(self) -> int:
+        """Get the number of frames in the local graph."""
+        return len(self._inserted_poses)
+
     def optimize(self, data: ObjectFrameData):
         """Perform the optimization operation."""
         # the pose takes the first frame to the current camera frame

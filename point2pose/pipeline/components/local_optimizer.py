@@ -1,7 +1,13 @@
 import numpy as np
+from point2pose.core.base_optimizer import Optimizer
 from point2pose.modules.optimizer.isam2_optimizer import ISAM2Optimizer
+from point2pose.modules.optimizer.lm_optimizer import LMGraphOptimizer
 from point2pose.data_types.object_frame_data import ObjectFrameData
 from point2pose.data_types.optimizer_result import OptimizerResult
+
+import point2pose.modules as _modules  # trigger registrations
+from point2pose.core.module_registry import OPTIMIZER
+from point2pose.core.build import build_from_cfg
 
 
 class LocalOptimizer:
@@ -10,11 +16,17 @@ class LocalOptimizer:
         # One ISAM2 optimizer per object id
         self._optimizers = {}  # obj_id -> ISAM2Optimizer
 
-    def _get_optimizer(self, obj_id: int) -> ISAM2Optimizer:
+    def _get_optimizer(self, obj_id: int) -> Optimizer:
         """Lazy-create an optimizer for this object."""
         if obj_id not in self._optimizers:
-            self._optimizers[obj_id] = ISAM2Optimizer(self.cfg.optimizer)
+            self._optimizers[obj_id] = build_from_cfg(
+                self.cfg.local_optimizer, OPTIMIZER
+            )
         return self._optimizers[obj_id]
+
+    def get_num_frames(self, obj_id: int) -> int:
+        """Get the number of frames in the local graph for this object."""
+        return self._get_optimizer(obj_id).get_num_poses()
 
     def reset(self, obj_id: int | None = None):
         """
@@ -26,7 +38,9 @@ class LocalOptimizer:
         if obj_id is None:
             self._optimizers = {}
         else:
-            self._optimizers[obj_id] = ISAM2Optimizer(self.cfg.optimizer)
+            self._optimizers[obj_id] = build_from_cfg(
+                self.cfg.local_optimizer, OPTIMIZER
+            )
 
     def optimize(self, object_frame_data: ObjectFrameData) -> OptimizerResult | None:
         """

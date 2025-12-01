@@ -43,6 +43,10 @@ class ModularPipeline:
         # module settings
         self._estimate_init_pose = self.pipeline_cfg.get("estimate_init_pose", False)
         self.use_local_graph = self.pipeline_cfg.get("use_local_graph", False)
+        self.local_opt_type = self.cfg.local_optimizer.get("type", "isam2")
+        self.local_graph_max_num_frames = self.cfg.local_optimizer.params.get(
+            "local_graph_max_num_frames", -1
+        )
         self.reg_residual_thres = self.cfg.register.params.get("residual_thres", 0.07)
 
         # Logging
@@ -203,10 +207,22 @@ class ModularPipeline:
 
         # 4. Local Optimization
         if self.use_local_graph:
+
             for obj_id in range(self.num_obj):
 
                 if obj_id not in fe_result.valid_indices or self.objects[obj_id].lost:
                     continue
+
+                if self.local_graph_max_num_frames > 0:
+                    # get the number of frames in the local graph
+                    num_frames_in_local_graph = self.local_optimizer.get_num_frames(
+                        obj_id
+                    )
+                    # print(
+                    #     f"Frame {self.frame_id}: Number of frames in local graph: {num_frames_in_local_graph}"
+                    # )
+                    if num_frames_in_local_graph >= self.local_graph_max_num_frames:
+                        self.local_optimizer.reset(obj_id)
 
                 # Only optimize if registration was good enough
                 # if self.objects[obj_id].mean_residual < self.reg_residual_thres:
