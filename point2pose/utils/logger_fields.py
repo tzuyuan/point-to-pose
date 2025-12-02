@@ -13,9 +13,7 @@ OBJECT_RAGGED_FIELDS = {
     "obj_key_point_frames",
 }
 
-KEYFRAME_RAGGED_FIELDS = {
-    "is_key_frame",
-}
+KEYFRAME_RAGGED_FIELDS = set()
 
 REGISTRATION_RAGGED_FIELDS = {
     "reg_key_points_idx",

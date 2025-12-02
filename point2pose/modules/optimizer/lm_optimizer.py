@@ -95,7 +95,7 @@ class LMGraphOptimizer(Optimizer):
                 if data.residuals.size > 0
                 else 0.01
             )
-            sigma_between = base_sigma * 15.0  # Relax odometry relative to features
+            sigma_between = base_sigma * 10.0  # Relax odometry relative to features
 
             between_noise = gtsam.noiseModel.Diagonal.Sigmas(
                 np.array([sigma_between] * 6, dtype=float)

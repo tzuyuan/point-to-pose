@@ -110,9 +110,11 @@ class ModularPipeline:
 
         # 3. Initialize KeyFrameManager (Sampling)
         # This will populate track_table and object keypoints
-        self.kf_manager.initialize(
+        new_kfs = self.kf_manager.initialize(
             frame, self.track_table, self.objects, self.frontend.tracker
         )
+
+        self.kf_graph.update(new_kfs)
 
         # 4. Initial Optimization
         for obj_id in range(self.num_obj):
@@ -156,6 +158,8 @@ class ModularPipeline:
                     "obj_uncertainties": self.objects[0].uncertainties,
                     "obj_valid": self.objects[0].valid,
                     "is_key_frame": False,
+                    "pose_frontend": np.eye(4),
+                    "pose_local": np.eye(4),
                 }
             )
 
@@ -172,6 +176,10 @@ class ModularPipeline:
         # per-object update
         for obj_id in range(self.num_obj):
             self._update_object_from_frontend(obj_id, fe_result)
+
+        pose_frontend = {}
+        for obj_id in range(self.num_obj):
+            pose_frontend[obj_id] = self.objects[obj_id].pose.copy()
 
         # 2. Track Table Update
         # FrontEndResult contains the data needed to update the table
@@ -192,18 +200,6 @@ class ModularPipeline:
             self.kf_manager.keyframes,
             self.frontend.register,
         )
-
-        # 3. Key Frame Manager (Check & Sample)
-        new_keyframes = self.kf_manager.update(
-            frame, fe_result, self.track_table, self.objects, self.frontend.tracker
-        )
-
-        # If new keyframe, reset local optimizer
-        for kf in new_keyframes:
-            print(
-                f"Frame {self.frame_id}: Keyframe triggered. Resetting local optimizer."
-            )
-            self.local_optimizer.reset(kf.obj_id)
 
         # 4. Local Optimization
         if self.use_local_graph:
@@ -248,8 +244,39 @@ class ModularPipeline:
                     self.objects[obj_id], opt_result, self.track_table
                 )
 
-        # 5. Logging
-        self._log_step(frame, fe_result, new_keyframes)
+        pose_local = {}
+        for obj_id in range(self.num_obj):
+            pose_local[obj_id] = self.objects[obj_id].pose.copy()
+
+        # 3. Key Frame Manager (Check & Sample)
+        new_keyframes = self.kf_manager.update(
+            frame, fe_result, self.track_table, self.objects, self.frontend.tracker
+        )
+
+        # If new keyframe, reset local optimizer
+        for kf in new_keyframes:
+            print(
+                f"Frame {self.frame_id}: Keyframe triggered. Resetting local optimizer."
+            )
+            self.local_optimizer.reset(kf.obj_id)
+
+        # 5. Global Optimization
+        if new_keyframes:
+            updated_global_poses = self.kf_graph.update(new_keyframes)
+
+            for kf in new_keyframes:
+                key = (kf.obj_id, kf.kf_idx)
+                if key in updated_global_poses:
+                    global_pose = updated_global_poses[key]
+
+                    # Option A: hard snap object pose to global pose
+                    # self.objects[kf.obj_id].pose = global_pose
+
+                    obj = self.objects[kf.obj_id]
+                    obj.pose = global_pose
+
+        # 6. Logging
+        self._log_step(frame, fe_result, new_keyframes, pose_frontend, pose_local)
 
         self.frame_id += 1
 
@@ -260,7 +287,14 @@ class ModularPipeline:
 
         return out_pose
 
-    def _log_step(self, frame, fe_result, new_keyframes):
+    def _log_step(
+        self,
+        frame,
+        fe_result,
+        new_keyframes,
+        pose_frontend=None,
+        pose_local=None,
+    ):
         if self.save_pose:
             for obj_id, f in enumerate(self.pose_log_files):
                 if f:
@@ -304,6 +338,11 @@ class ModularPipeline:
                 "reg_residuals": reg_stats.get("residuals", np.array([])),
                 "reg_inliers": reg_stats.get("inliers", np.array([])),
                 "iter": reg_stats.get("iter", -1),
+                # Intermediate Poses
+                "pose_frontend": (
+                    pose_frontend[obj_id] if pose_frontend else np.eye(4)
+                ),
+                "pose_local": pose_local[obj_id] if pose_local else np.eye(4),
                 # Valid extraction stats
                 **valid_stats,
             }

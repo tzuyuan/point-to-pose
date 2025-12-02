@@ -33,6 +33,8 @@ class KeyFrame:
     obs_3d_camera: np.ndarray  # (N_o, 3) in current camera frame
     obs_3d_object: np.ndarray  # (N_o, 3) in object (frame-0) coordinates
     obs_valid: np.ndarray  # (N_o,) bool mask for valid depth
+    obs_visible: np.ndarray  # (N_o,) bool mask for visible points
+    obs_uncertainties: np.ndarray  # (N_o,) float uncertainties for the points
 
     # Dense cropped point cloud for the object in this frame
     dense_pts: np.ndarray  # (M, 3) world/camera coordinates

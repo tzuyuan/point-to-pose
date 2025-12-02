@@ -152,11 +152,13 @@ local_optimizer:
     absolute_error_tol: 1e-5
     prior_noise_param: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
 
-optimizer:
-  type: isam2
+global_optimizer:
+  type: lm_graph
   params:
     relinearize_threshold: 0.1
     relinearize_skip: 1
+    relative_error_tol: 1e-5
+    absolute_error_tol: 1e-5
     prior_noise_param: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
 
 visualization:

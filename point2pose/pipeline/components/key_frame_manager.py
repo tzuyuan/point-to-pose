@@ -61,6 +61,7 @@ class KeyFrameManager:
         # Sample for all objects (fills track_table.track_2d/3d/valid/visibles and obj2track_map)
         self._sample_for_all_obj(self.samp_ctx, track_table, tracker)
 
+        created_keyframes: List[KeyFrame] = []
         for obj_id in range(self.num_obj):
             if obj_id >= len(objects):
                 continue
@@ -104,11 +105,15 @@ class KeyFrameManager:
             )
             self.keyframes[obj_id].append(kf)
 
+            created_keyframes.append(kf)
+
             obj.last_keyframe_frame_id = kf.frame_id
             obj.num_keyframes = 1
 
         self.crit_ctx.objects = objects
         self.criterion.initialize(self.crit_ctx)
+
+        return created_keyframes
 
     # -------------------------------------------------------------------------
     # Per-frame update
@@ -259,6 +264,8 @@ class KeyFrameManager:
         uv = track_table.track_2d[track_ids]
         xyz_cam = track_table.track_3d[track_ids]
         valid = track_table.valid[track_ids]
+        visible = track_table.visible[track_ids]
+        uncertainties = track_table.uncertainty[track_ids]
 
         T_co = obj_pose
         xyz_obj = transform_pts(inverse_SE3(T_co), xyz_cam)
@@ -269,6 +276,8 @@ class KeyFrameManager:
             xyz_cam=xyz_cam,
             xyz_obj=xyz_obj,
             valid=valid,
+            visible=visible,
+            uncertainties=uncertainties,
         )
 
     def _build_obs_for_frame(self, obj_id, frame, track_table, obj):
@@ -290,6 +299,8 @@ class KeyFrameManager:
         uv = track_table.track_2d[obj_track_ids]
         xyz_cam = track_table.track_3d[obj_track_ids]
         valid = track_table.valid[obj_track_ids]
+        visible = track_table.visible[obj_track_ids]
+        uncertainties = track_table.uncertainty[obj_track_ids]
 
         T_co = obj.pose
         xyz_obj = transform_pts(inverse_SE3(T_co), xyz_cam)
@@ -300,6 +311,8 @@ class KeyFrameManager:
             xyz_cam=xyz_cam,
             xyz_obj=xyz_obj,
             valid=valid,
+            visible=visible,
+            uncertainties=uncertainties,
         )
 
     def _sample_for_all_obj(self, context, track_table, tracker):
@@ -384,6 +397,8 @@ class KeyFrameManager:
             obs_3d_camera=obs["xyz_cam"].copy(),
             obs_3d_object=obs["xyz_obj"].copy(),
             obs_valid=obs["valid"].copy(),
+            obs_visible=obs["visible"].copy(),
+            obs_uncertainties=obs["uncertainties"].copy(),
             # dense pcd
             dense_pts=dense_pts,
             dense_colors=dense_colors,

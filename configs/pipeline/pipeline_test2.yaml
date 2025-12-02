@@ -19,7 +19,7 @@ pipeline:
     depth_encoder: vitl
 
     use_graph_optimization: false
-    use_local_graph: false
+    use_local_graph: true
 
     debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/
@@ -132,13 +132,22 @@ criterion:
     debug_viz: false
     debug_dir: /home/justin/code/point-to-pose/debug/criterion
 
-optimizer:
-  type: isam2
+local_optimizer:
+  type: lm_graph
+  params:
+    local_graph_max_num_frames: -1
+    max_iterations: 20
+    relative_error_tol: 1e-5
+    absolute_error_tol: 1e-5
+    prior_noise_param: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+
+global_optimizer:
+  type: lm_graph
   params:
     relinearize_threshold: 0.1
     relinearize_skip: 1
     prior_noise_param: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
-
+    
 visualization:
   params:
     visualize_points: true
