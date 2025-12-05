@@ -784,10 +784,23 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--log_path", type=str, required=True, help="Path to meta_data.npz"
+        "--log_path",
+        type=str,
+        default=None,
+        help="Path to meta_data.npz (optional if results_dir and video_name are provided)",
+    )
+    parser.add_argument(
+        "--results_dir",
+        type=str,
+        default=None,
+        help="Results directory (e.g., /path/to/results/ho3d_single). Used with video_name to find meta_data in new structure.",
     )
     parser.add_argument("--data_path", type=str, help="Path to HO3D root")
-    parser.add_argument("--video_name", type=str, help="Video name for GT loading")
+    parser.add_argument(
+        "--video_name",
+        type=str,
+        help="Video name for GT loading (also used to find meta_data if results_dir is provided)",
+    )
     parser.add_argument(
         "--align_gt", action="store_true", help="Align GT to first frame prediction"
     )
@@ -804,9 +817,23 @@ def main():
 
     _set_plot_style()
 
+    # Determine log_path: use provided path or construct from results_dir and video_name
+    log_path = args.log_path
+    if log_path is None:
+        if args.results_dir and args.video_name:
+            log_path = os.path.join(
+                args.results_dir, args.video_name, "meta_data", "meta_data.npz"
+            )
+            print(f"Constructed log_path from results_dir and video_name: {log_path}")
+        else:
+            print(
+                "Error: Either --log_path must be provided, or both --results_dir and --video_name must be provided"
+            )
+            sys.exit(1)
+
     # 1. Load Logs
-    print(f"Loading logs from {args.log_path}...")
-    data = load_logs(args.log_path)
+    print(f"Loading logs from {log_path}...")
+    data = load_logs(log_path)
 
     # Extract poses
     if "pose_frontend" not in data:

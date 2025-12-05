@@ -12,9 +12,19 @@ from typing import Optional, Tuple
 
 
 def find_meata_data_path(
-    register_folder: str, meta_data_path_override: Optional[str] = None
+    register_folder: str,
+    meta_data_path_override: Optional[str] = None,
+    results_dir: Optional[str] = None,
+    video_name: Optional[str] = None,
 ) -> Optional[str]:
-    """Find meta_data.npz file in expected locations (also checks meata_data.npz for backward compatibility)."""
+    """Find meta_data.npz file in expected locations (also checks meata_data.npz for backward compatibility).
+
+    Args:
+        register_folder: Path to register folder
+        meta_data_path_override: Direct path to meta_data.npz (takes highest priority)
+        results_dir: Results directory (e.g., /path/to/results/ho3d_single)
+        video_name: Video sequence name (e.g., MPM10)
+    """
     # If override path is provided, use it directly
     if meta_data_path_override is not None:
         if os.path.exists(meta_data_path_override):
@@ -36,39 +46,71 @@ def find_meata_data_path(
     )  # This gives point-to-pose
 
     # Try meta_data.npz first (correct spelling)
-    meta_data_paths = [
-        # Relative to register folder
-        os.path.join(register_folder, "meta_data.npz"),
-        os.path.join(os.path.dirname(register_folder), "meta_data.npz"),
-        # Relative to project root (common output location)
-        os.path.join(project_root, "meta_data", "meta_data.npz"),
-        os.path.join(project_root, "debug", "meta_data", "meta_data.npz"),
-        os.path.join(
-            project_root, "debug", "pipeline", "meta_data", "meta_data.npz"
-        ),  # The actual location
-        # Relative paths from register folder
-        os.path.join(
-            os.path.dirname(os.path.dirname(register_folder)),
-            "meta_data",
-            "meta_data.npz",
-        ),
-        os.path.join(
-            os.path.dirname(os.path.dirname(register_folder)),
-            "debug",
-            "meta_data",
-            "meta_data.npz",
-        ),
-        os.path.join(
-            os.path.dirname(os.path.dirname(register_folder)),
-            "debug",
-            "pipeline",
-            "meta_data",
-            "meta_data.npz",
-        ),
-        # Current working directory (where pipeline might have been run)
-        os.path.join(os.getcwd(), "meta_data", "meta_data.npz"),
-        os.path.join(os.getcwd(), "debug", "pipeline", "meta_data", "meta_data.npz"),
-    ]
+    meta_data_paths = []
+
+    # NEW: Check new results folder structure first (highest priority after override)
+    if results_dir and video_name:
+        new_structure_path = os.path.join(
+            results_dir, video_name, "meta_data", "meta_data.npz"
+        )
+        meta_data_paths.append(new_structure_path)
+        # Also try with default results directory if not provided
+        default_results_dir = os.path.join(project_root, "results", "ho3d_single")
+        if results_dir != default_results_dir:
+            meta_data_paths.append(
+                os.path.join(
+                    default_results_dir, video_name, "meta_data", "meta_data.npz"
+                )
+            )
+    elif results_dir:
+        # If only results_dir provided, check all video subdirectories
+        if os.path.exists(results_dir):
+            for item in os.listdir(results_dir):
+                video_path = os.path.join(results_dir, item)
+                if os.path.isdir(video_path):
+                    meta_data_path = os.path.join(
+                        video_path, "meta_data", "meta_data.npz"
+                    )
+                    meta_data_paths.append(meta_data_path)
+
+    # Existing paths for backward compatibility
+    meta_data_paths.extend(
+        [
+            # Relative to register folder
+            os.path.join(register_folder, "meta_data.npz"),
+            os.path.join(os.path.dirname(register_folder), "meta_data.npz"),
+            # Relative to project root (common output location)
+            os.path.join(project_root, "meta_data", "meta_data.npz"),
+            os.path.join(project_root, "debug", "meta_data", "meta_data.npz"),
+            os.path.join(
+                project_root, "debug", "pipeline", "meta_data", "meta_data.npz"
+            ),  # The actual location
+            # Relative paths from register folder
+            os.path.join(
+                os.path.dirname(os.path.dirname(register_folder)),
+                "meta_data",
+                "meta_data.npz",
+            ),
+            os.path.join(
+                os.path.dirname(os.path.dirname(register_folder)),
+                "debug",
+                "meta_data",
+                "meta_data.npz",
+            ),
+            os.path.join(
+                os.path.dirname(os.path.dirname(register_folder)),
+                "debug",
+                "pipeline",
+                "meta_data",
+                "meta_data.npz",
+            ),
+            # Current working directory (where pipeline might have been run)
+            os.path.join(os.getcwd(), "meta_data", "meta_data.npz"),
+            os.path.join(
+                os.getcwd(), "debug", "pipeline", "meta_data", "meta_data.npz"
+            ),
+        ]
+    )
 
     # Also check old typo for backward compatibility
     meata_data_paths = [
@@ -169,6 +211,8 @@ def load_registration_stats(
     frame_number: int,
     mode: str = "auto",
     meta_data_path_override: Optional[str] = None,
+    results_dir: Optional[str] = None,
+    video_name: Optional[str] = None,
 ) -> Optional[
     Tuple[
         np.ndarray,
@@ -188,6 +232,9 @@ def load_registration_stats(
         object_number: Object number (currently only supports object 0, kept for compatibility)
         frame_number: Frame number to extract stats for
         mode: Registration mode ("f2f", "f2m", or "auto" to auto-detect)
+        meta_data_path_override: Direct path to meta_data.npz (optional)
+        results_dir: Results directory for new structure (optional)
+        video_name: Video sequence name for new structure (optional)
 
     Returns:
         Tuple of (residuals, inliers, uncertainties, key_points/prev3d, curr3d, keyframe_ids, reg_key_points_idx, mode) if data is found, None otherwise.
@@ -195,7 +242,12 @@ def load_registration_stats(
         mode is either "f2f" or "f2m".
     """
     _ = object_number  # Currently unused, kept for compatibility
-    meta_data_path = find_meata_data_path(register_folder)
+    meta_data_path = find_meata_data_path(
+        register_folder,
+        meta_data_path_override=meta_data_path_override,
+        results_dir=results_dir,
+        video_name=video_name,
+    )
     if meta_data_path is None:
         print("No meta_data.npz found in expected locations")
         print(f"  Searched relative to register_folder: {register_folder}")
@@ -841,15 +893,29 @@ def load_point_cloud(
 
 
 def load_all_key_point_frame_ids_raw(
-    register_folder: str, frame_number: int
+    register_folder: str,
+    frame_number: int,
+    results_dir: Optional[str] = None,
+    video_name: Optional[str] = None,
 ) -> Optional[np.ndarray]:
     """Load ALL key point frame IDs (unfiltered, length = obj_key_points_lengths/3).
 
     Returns a 1-D int array aligned to original key point indexing so reg_key_points_idx
     can be used directly without bounds issues from filtering.
     Uses unpack_ragged following notebook pattern.
+
+    Args:
+        register_folder: Path to register folder
+        frame_number: Frame number
+        results_dir: Results directory for new structure (optional)
+        video_name: Video sequence name for new structure (optional)
     """
-    meta_data_path = find_meata_data_path(register_folder, meta_data_path_override=None)
+    meta_data_path = find_meata_data_path(
+        register_folder,
+        meta_data_path_override=None,
+        results_dir=results_dir,
+        video_name=video_name,
+    )
     if meta_data_path is None:
         print("No meta_data.npz found for loading raw key point frame ids")
         return None
@@ -880,11 +946,22 @@ def load_all_key_point_frame_ids_raw(
 
 
 def load_all_key_points_with_frame_ids(
-    register_folder: str, object_number: int, frame_number: int
+    register_folder: str,
+    object_number: int,
+    frame_number: int,
+    results_dir: Optional[str] = None,
+    video_name: Optional[str] = None,
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
     """Load all key points and their frame IDs from meta_data.npz.
 
     Uses unpack_ragged following notebook pattern.
+
+    Args:
+        register_folder: Path to register folder
+        object_number: Object number (currently unused, kept for compatibility)
+        frame_number: Frame number
+        results_dir: Results directory for new structure (optional)
+        video_name: Video sequence name for new structure (optional)
 
     Returns:
         Tuple of (key_points, frame_ids) if found, None otherwise.
@@ -892,7 +969,12 @@ def load_all_key_points_with_frame_ids(
         frame_ids: (N,) array of frame IDs for each point
     """
     _ = object_number  # Currently unused, kept for compatibility
-    meta_data_path = find_meata_data_path(register_folder, meta_data_path_override=None)
+    meta_data_path = find_meata_data_path(
+        register_folder,
+        meta_data_path_override=None,
+        results_dir=results_dir,
+        video_name=video_name,
+    )
     if meta_data_path is None:
         print("No meta_data.npz found for loading all key points")
         return None
@@ -2124,12 +2206,16 @@ def main(args):
     # Load registration statistics
     mode = getattr(args, "mode", "auto")
     meta_data_path = getattr(args, "meta_data_path", None)
+    results_dir = getattr(args, "results_dir", None)
+    video_name = getattr(args, "video_name", None)
     result = load_registration_stats(
         register_folder,
         args.object_number,
         args.frame_number,
         mode=mode,
         meta_data_path_override=meta_data_path,
+        results_dir=results_dir,
+        video_name=video_name,
     )
 
     if result is None:
@@ -2206,7 +2292,11 @@ def main(args):
     # Load data for 3D visualization
     if key_points is not None and curr3d is not None:
         all_key_data = load_all_key_points_with_frame_ids(
-            register_folder, args.object_number, args.frame_number
+            register_folder,
+            args.object_number,
+            args.frame_number,
+            results_dir=results_dir,
+            video_name=video_name,
         )
         if all_key_data is not None:
             all_key_points, all_key_point_frame_ids = all_key_data
@@ -2215,7 +2305,10 @@ def main(args):
             pair_keyframe_ids = None
             if reg_key_points_idx is not None:
                 raw_ids = load_all_key_point_frame_ids_raw(
-                    register_folder, args.frame_number
+                    register_folder,
+                    args.frame_number,
+                    results_dir=results_dir,
+                    video_name=video_name,
                 )
                 if raw_ids is not None:
                     reg_idx_array = np.asarray(reg_key_points_idx, dtype=int)
@@ -2347,6 +2440,22 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Direct path to meta_data.npz file (optional, will auto-search if not provided)",
+    )
+
+    parser.add_argument(
+        "--results_dir",
+        "-r",
+        type=str,
+        default=None,
+        help="Results directory (e.g., /path/to/results/ho3d_single). Used with video_name to find meta_data in new structure.",
+    )
+
+    parser.add_argument(
+        "--video_name",
+        "-v",
+        type=str,
+        default=None,
+        help="Video sequence name (e.g., MPM10). Used with results_dir to find meta_data in new structure.",
     )
 
     parser.add_argument(

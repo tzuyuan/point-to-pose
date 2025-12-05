@@ -42,7 +42,26 @@ def gt_bbox_minmax_from_mesh(reader):
     return np.vstack([bmin.astype(float), bmax.astype(float)])  # (2,3)
 
 
+def get_all_video_names(data_path):
+    """Get all video names from the HO3D evaluation directory."""
+    evaluation_dir = os.path.join(data_path, "evaluation")
+    if not os.path.exists(evaluation_dir):
+        raise ValueError(f"Evaluation directory not found: {evaluation_dir}")
+
+    video_names = []
+    for item in os.listdir(evaluation_dir):
+        item_path = os.path.join(evaluation_dir, item)
+        if os.path.isdir(item_path):
+            # Check if it has a rgb subdirectory (to confirm it's a valid video)
+            rgb_path = os.path.join(item_path, "rgb")
+            if os.path.exists(rgb_path) and len(os.listdir(rgb_path)) > 0:
+                video_names.append(item)
+
+    return sorted(video_names)
+
+
 def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: str):
+    """Process a single HO3D video and return evaluation metrics."""
     video_path = os.path.join(data_path, os.path.join("evaluation/", video_name))
 
     reader = Ho3dReader(video_path, data_path)
@@ -141,8 +160,11 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
             pred_pose_color=(0, 255, 0),
         )
 
-        # if i == 100:
-        #     break
+    if len(gt_poses) == 0:
+        print(
+            f"Warning: No GT poses found for video {video_name}, skipping evaluation."
+        )
+        return None
 
     gt_poses = np.array(gt_poses)
     pred_poses = np.array(out_poses)[gt_ids]
@@ -218,15 +240,80 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
         max_threshold=10.0,
     )
 
+    # Return metrics for summary
+    return {
+        "video_name": video_name,
+        "add_s_err_mean": adi_errs.mean() * 100,
+        "add_err_mean": add_errs.mean() * 100,
+        "add_s_auc": adds_auc,
+        "add_auc": add_auc,
+    }
+
+
+def run_ho3d_all(data_path: str, out_dir: str, config_path: str):
+    """Process all HO3D videos and generate a summary."""
+    # Get all video names
+    video_names = get_all_video_names(data_path)
+    print(f"Found {len(video_names)} videos to process: {video_names}")
+    print("-" * 80)
+
+    # Process each video
+    results = []
+    for idx, video_name in enumerate(video_names, 1):
+        print(f"\n[{idx}/{len(video_names)}] Processing video: {video_name}")
+        try:
+            result = run_ho3d_single(data_path, video_name, out_dir, config_path)
+            if result is not None:
+                results.append(result)
+        except Exception as e:
+            print(f"Error processing video {video_name}: {e}")
+            import traceback
+
+            traceback.print_exc()
+            continue
+
+    # Print summary
+    print("\n" + "=" * 80)
+    print("SUMMARY OF RESULTS")
+    print("=" * 80)
+
+    if len(results) == 0:
+        print("No results to display.")
+        return
+
+    # Sort results by video name for consistent output
+    results.sort(key=lambda x: x["video_name"])
+
+    for result in results:
+        print(
+            f"{result['video_name']}, ADD-S_err: {result['add_s_err_mean']:.2f}[cm], "
+            f"ADD_errs: {result['add_err_mean']:.2f}[cm], "
+            f"ADD-S_AUC: {result['add_s_auc']:.2f}, ADD_AUC: {result['add_auc']:.2f}"
+        )
+
+    # Compute averages
+    if len(results) > 0:
+        avg_add_s_err = np.mean([r["add_s_err_mean"] for r in results])
+        avg_add_err = np.mean([r["add_err_mean"] for r in results])
+        avg_add_s_auc = np.mean([r["add_s_auc"] for r in results])
+        avg_add_auc = np.mean([r["add_auc"] for r in results])
+
+        print("-" * 80)
+        print(
+            f"Average, ADD-S_err: {avg_add_s_err:.2f}[cm], "
+            f"ADD_errs: {avg_add_err:.2f}[cm], "
+            f"ADD-S_AUC: {avg_add_s_auc:.2f}, ADD_AUC: {avg_add_auc:.2f}"
+        )
+        print("=" * 80)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, default="/home/justin/data/HO3D_V3/")
-    parser.add_argument("--video_name", "-v", type=str, default="MPM10")
     parser.add_argument(
         "--out_dir",
         type=str,
-        default="/home/justin/code/point-to-pose/results/ho3d_single",
+        default="/home/justin/code/point-to-pose/results/",
     )
     parser.add_argument(
         "--config_path",
@@ -237,4 +324,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    run_ho3d_single(args.data_path, args.video_name, args.out_dir, args.config_path)
+    run_ho3d_all(args.data_path, args.out_dir, args.config_path)

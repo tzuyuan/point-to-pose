@@ -65,8 +65,79 @@ def load_point_cloud(
         return None
 
 
+def find_meta_data_path(
+    register_folder: str,
+    results_dir: Optional[str] = None,
+    video_name: Optional[str] = None,
+) -> Optional[str]:
+    """Find meta_data.npz file in expected locations.
+    
+    Args:
+        register_folder: Path to register folder
+        results_dir: Results directory (e.g., /path/to/results/ho3d_single)
+        video_name: Video sequence name (e.g., MPM10)
+    
+    Returns:
+        Path to meta_data.npz if found, None otherwise
+    """
+    # Get project root
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(os.path.dirname(script_dir))
+
+    meta_data_paths = []
+    
+    # NEW: Check new results folder structure first (highest priority)
+    if results_dir and video_name:
+        new_structure_path = os.path.join(results_dir, video_name, "meta_data", "meta_data.npz")
+        meta_data_paths.append(new_structure_path)
+        # Also try with default results directory if not provided
+        default_results_dir = os.path.join(project_root, "results", "ho3d_single")
+        if results_dir != default_results_dir:
+            meta_data_paths.append(os.path.join(default_results_dir, video_name, "meta_data", "meta_data.npz"))
+    elif results_dir:
+        # If only results_dir provided, check all video subdirectories
+        if os.path.exists(results_dir):
+            for item in os.listdir(results_dir):
+                video_path = os.path.join(results_dir, item)
+                if os.path.isdir(video_path):
+                    meta_data_path = os.path.join(video_path, "meta_data", "meta_data.npz")
+                    meta_data_paths.append(meta_data_path)
+    
+    # Existing paths for backward compatibility
+    meta_data_paths.extend([
+        os.path.join(register_folder, "meta_data.npz"),
+        os.path.join(os.path.dirname(register_folder), "meta_data.npz"),
+        os.path.join(
+            os.path.dirname(os.path.dirname(register_folder)),
+            "meta_data",
+            "meta_data.npz",
+        ),
+        # Backward compatibility: also check old typo
+        os.path.join(register_folder, "meata_data.npz"),
+        os.path.join(os.path.dirname(register_folder), "meata_data.npz"),
+        os.path.join(
+            os.path.dirname(os.path.dirname(register_folder)),
+            "debug",
+            "pipeline",
+            "meta_data",
+            "meata_data.npz",
+        ),
+    ])
+
+    for path in meta_data_paths:
+        if os.path.exists(path):
+            return path
+
+    return None
+
+
 def load_correspondence_data(
-    register_folder: str, object_number: int, frame_number: int, refine: bool = False
+    register_folder: str,
+    object_number: int,
+    frame_number: int,
+    refine: bool = False,
+    results_dir: Optional[str] = None,
+    video_name: Optional[str] = None,
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Load correspondence data from meta_data.npz file.
 
@@ -78,40 +149,14 @@ def load_correspondence_data(
         object_number: Object number (currently only supports object 0)
         frame_number: Frame number to extract correspondences for
         refine: Not used in this implementation (kept for compatibility)
+        results_dir: Results directory for new structure (optional)
+        video_name: Video sequence name for new structure (optional)
 
     Returns:
         Tuple of (key_points, curr3d, inliers) if data is found, None otherwise.
         inliers is a boolean array indicating which correspondences are inliers.
     """
-    # Look for meta_data.npz in the register folder or parent directories (also check meata_data.npz for backward compatibility)
-    meta_data_paths = [
-        os.path.join(register_folder, "meta_data.npz"),
-        os.path.join(os.path.dirname(register_folder), "meta_data.npz"),
-        os.path.join(
-            os.path.dirname(os.path.dirname(register_folder)),
-            "meta_data",
-            "meta_data.npz",
-        ),
-    ]
-
-    # Backward compatibility: also check old typo
-    meata_data_paths = [
-        os.path.join(register_folder, "meata_data.npz"),
-        os.path.join(os.path.dirname(register_folder), "meata_data.npz"),
-        os.path.join(
-            os.path.dirname(os.path.dirname(register_folder)),
-            "debug",
-            "pipeline",
-            "meta_data",
-            "meata_data.npz",
-        ),
-    ]
-
-    meta_data_path = None
-    for path in meta_data_paths + meata_data_paths:
-        if os.path.exists(path):
-            meta_data_path = path
-            break
+    meta_data_path = find_meta_data_path(register_folder, results_dir, video_name)
 
     if meta_data_path is None:
         print("No meta_data.npz found in expected locations")
@@ -412,6 +457,10 @@ def interactive_visualization(
 ):
     """Interactive visualization with keyboard navigation."""
     current_frame_idx = available_frames.index(start_frame)
+    
+    # Extract results_dir and video_name from args if available
+    results_dir = getattr(args, "results_dir", None) if args is not None else None
+    video_name = getattr(args, "video_name", None) if args is not None else None
 
     print("\nNavigation controls:")
     print("  'n' or 'N': Next frame")
@@ -454,10 +503,20 @@ def interactive_visualization(
         if not visualize_correspondence:
             if getattr(args, "color_by_keyframe_id", False):
                 key_frame_ids = get_keyframe_ids_for_register_pointcloud(
-                    register_folder, object_number, frame_number, refine
+                    register_folder,
+                    object_number,
+                    frame_number,
+                    refine,
+                    results_dir=results_dir,
+                    video_name=video_name,
                 )
                 correspondence_data = load_correspondence_data(
-                    register_folder, object_number, frame_number, refine
+                    register_folder,
+                    object_number,
+                    frame_number,
+                    refine,
+                    results_dir=results_dir,
+                    video_name=video_name,
                 )
                 inliers = None
                 curr3d = None
@@ -476,7 +535,11 @@ def interactive_visualization(
                     "Attempting to load all keypoints from meta_data (without correspondence mode)..."
                 )
                 all_kps = load_all_key_points_from_meta(
-                    register_folder, object_number, frame_number
+                    register_folder,
+                    object_number,
+                    frame_number,
+                    results_dir=results_dir,
+                    video_name=video_name,
                 )
                 if all_kps is not None and len(all_kps) > 0:
                     print(f"Loaded {len(all_kps)} key points from meta_data")
@@ -516,7 +579,12 @@ def interactive_visualization(
                 print(f"Added base point cloud for context ({len(pcd.points)} points)")
 
             correspondence_data = load_correspondence_data(
-                register_folder, object_number, frame_number, refine
+                register_folder,
+                object_number,
+                frame_number,
+                refine,
+                results_dir=results_dir,
+                video_name=video_name,
             )
             if correspondence_data is not None:
                 key_points, curr3d, inliers = correspondence_data
@@ -725,40 +793,17 @@ def main(args):
 
 
 def get_keyframe_ids_for_register_pointcloud(
-    register_folder, object_number, frame_number, refine=False
+    register_folder,
+    object_number,
+    frame_number,
+    refine=False,
+    results_dir: Optional[str] = None,
+    video_name: Optional[str] = None,
 ):
     # object_number and refine are unused, kept for compatibility but suppressed linter
     _ = object_number
     _ = refine
-    # Try meta_data.npz first (correct spelling)
-    meta_paths = [
-        os.path.join(register_folder, "meta_data.npz"),
-        os.path.join(os.path.dirname(register_folder), "meta_data.npz"),
-        os.path.join(
-            os.path.dirname(os.path.dirname(register_folder)),
-            "meta_data",
-            "meta_data.npz",
-        ),
-    ]
-
-    # Backward compatibility: also check old typo
-    meata_data_paths = [
-        os.path.join(register_folder, "meata_data.npz"),
-        os.path.join(os.path.dirname(register_folder), "meata_data.npz"),
-        os.path.join(
-            os.path.dirname(os.path.dirname(register_folder)),
-            "debug",
-            "pipeline",
-            "meta_data",
-            "meata_data.npz",
-        ),
-    ]
-
-    meta_path = None
-    for path in meta_paths + meata_data_paths:
-        if os.path.exists(path):
-            meta_path = path
-            break
+    meta_path = find_meta_data_path(register_folder, results_dir, video_name)
     if meta_path is None:
         print("No meta_data.npz found for coloring by keyframe id")
         return None
@@ -811,43 +856,18 @@ def assign_point_colors_by_keyframe_id(points, key_frame_ids, inliers=None):
 
 
 def load_all_key_points_from_meta(
-    register_folder: str, object_number: int, frame_number: int
+    register_folder: str,
+    object_number: int,
+    frame_number: int,
+    results_dir: Optional[str] = None,
+    video_name: Optional[str] = None,
 ):
     # object_number is currently unused (single-object support); keep for future-proofing
     _ = object_number
 
-    # Try meta_data.npz first (correct spelling)
-    meta_data_paths = [
-        os.path.join(register_folder, "meta_data.npz"),
-        os.path.join(os.path.dirname(register_folder), "meta_data.npz"),
-        os.path.join(
-            os.path.dirname(os.path.dirname(register_folder)),
-            "meta_data",
-            "meta_data.npz",
-        ),
-    ]
-
-    # Backward compatibility: also check old typo
-    meata_data_paths = [
-        os.path.join(register_folder, "meata_data.npz"),
-        os.path.join(os.path.dirname(register_folder), "meata_data.npz"),
-        os.path.join(
-            os.path.dirname(os.path.dirname(register_folder)),
-            "debug",
-            "pipeline",
-            "meta_data",
-            "meata_data.npz",
-        ),
-    ]
-
-    meta_data_path = None
-    for path in meta_data_paths + meata_data_paths:
-        if os.path.exists(path):
-            meta_data_path = path
-            break
+    meta_data_path = find_meta_data_path(register_folder, results_dir, video_name)
     if meta_data_path is None:
         print("No meta_data.npz found for loading all key points")
-        print(f"  Searched paths: {meta_data_paths + meata_data_paths}")
         return None
     print(f"Loading all keypoints from: {meta_data_path}")
     try:
@@ -993,6 +1013,20 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Path to register folder (optional, defaults to project_root/debug/register)",
+    )
+
+    parser.add_argument(
+        "--results_dir",
+        type=str,
+        default=None,
+        help="Results directory (e.g., /path/to/results/ho3d_single). Used with video_name to find meta_data in new structure.",
+    )
+
+    parser.add_argument(
+        "--video_name",
+        type=str,
+        default=None,
+        help="Video sequence name (e.g., MPM10). Used with results_dir to find meta_data in new structure.",
     )
 
     parser.add_argument(
