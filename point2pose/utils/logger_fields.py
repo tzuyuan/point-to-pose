@@ -24,6 +24,13 @@ REGISTRATION_RAGGED_FIELDS = {
     "reg_residuals",
 }
 
+DENSE_RECOVERY_RAGGED_FIELDS = {
+    "dense_recovery_inliers_before",
+    "dense_recovery_residuals_before",
+    "dense_recovery_inliers_after",
+    "dense_recovery_residuals_after",
+}
+
 EXTRACT_RAGGED_FIELDS = {
     "extract_vis_obj_mask",
     "extract_val_obj_mask",
@@ -41,4 +48,5 @@ RAGGED_FIELDS: set[str] = (
     | KEYFRAME_RAGGED_FIELDS
     | REGISTRATION_RAGGED_FIELDS
     | EXTRACT_RAGGED_FIELDS
+    | DENSE_RECOVERY_RAGGED_FIELDS
 )

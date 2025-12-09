@@ -3,6 +3,7 @@ import os
 import numpy as np
 import torch
 import open3d as o3d
+from typing import Tuple, Optional, Dict, Any
 
 from point2pose.core.build import build_from_cfg
 from point2pose.core.module_registry import REGISTER, TRACKER, SEGMENTER
@@ -45,12 +46,29 @@ class FrontEnd:
         self.register = build_from_cfg(cfg.register, REGISTER)
 
         # -------------- registration params --------------
-        self._frame_reg_mode = self.pipeline_cfg.get("frame_reg_mode", "hybrid")
         self.reg_uncer_thres = self.cfg.register.params.get("uncer_thres", 0.3)
-        self.reg_residual_thres = self.cfg.register.params.get("residual_thres", 0.07)
+        self.reg_residual_thres = self.cfg.register.params.get("residual_thres", 0.0007)
         self._reg_remove_outside_mask = self.cfg.register.params.get(
             "remove_outside_mask", False
         )
+
+        # dense registration for recovering from bad registration
+        self.use_dense_registration = self.pipeline_cfg.get(
+            "use_dense_registration", False
+        )
+
+        if self.use_dense_registration:
+            self.dense_register = build_from_cfg(cfg.dense_register, REGISTER)
+        else:
+            self.dense_register = None
+
+        # -------------- dense registration recovery params --------------
+        self.residual_jump_threshold = self.pipeline_cfg.get(
+            "residual_jump_threshold", 0.02
+        )  # threshold for sudden residual jump
+        self.inlier_drop_ratio = self.pipeline_cfg.get(
+            "inlier_drop_ratio", 0.3
+        )  # ratio threshold for sudden inlier drop (e.g., 0.5 means 50% drop)
 
         # -------------- debug related --------------
         self.debug_level = self.pipeline_cfg.get("debug_level", 0)
@@ -68,6 +86,11 @@ class FrontEnd:
         if self.save_cropped_pcd:
             os.makedirs(self.cropped_pcd_dir, exist_ok=True)
 
+        # Track previous frame and registration stats for recovery
+        self.prev_frame = None
+        self.prev_residuals = {}  # obj_id -> previous mean residual
+        self.prev_inlier_counts = {}  # obj_id -> previous inlier count
+
         self.frame_id = 0
 
     def initialize(self, frame):
@@ -83,6 +106,8 @@ class FrontEnd:
 
         self.tracker.initialize(frame)
         self.frame_id = 0
+        # Store first frame as previous frame for next step
+        self.prev_frame = frame
 
     def step(self, frame, track_table: PointTrackTable, objects: list):
         """
@@ -95,21 +120,29 @@ class FrontEnd:
         Returns:
             FrontEndResult
         """
+        # Timing dictionary for frontend modules
+        fe_timings = {}
+
         ##########################################################
         ##                     segmenter                        ##
         ##########################################################
+        t_start = time.time()
         if self.use_segmenter:
             _, mask_logits = self.segmenter.segment(frame.rgb)
             frame.mask = mask_logits  # mask is a torch tensor on gpu
+        fe_timings["segmenter"] = time.time() - t_start
 
         ##########################################################
         ##                      tracker                         ##
         ##########################################################
+        t_start = time.time()
         tracks, uncertainties, visibles = self.tracker.track_once(frame)
+        fe_timings["tracker"] = time.time() - t_start
 
         ##########################################################
         ##              2D -> 3D conversion                     ##
         ##########################################################
+        t_start = time.time()
         track_3d, track_valid = convert_pixel_to_world(
             pixel=tracks,
             depth_image=frame.depth,
@@ -121,6 +154,7 @@ class FrontEnd:
             window_size=self.fill_missing_depth_window_size,
             min_neighbors=self.fill_missing_depth_min_neighbors,
         )
+        fe_timings["2d_to_3d"] = time.time() - t_start
 
         ##########################################################
         ##                      register                        ##
@@ -136,6 +170,11 @@ class FrontEnd:
         # To support potential external updates to visibles (mask removal)
         current_visibles = visibles.copy()
 
+        # Timing for registration per object
+        fe_timings["registration"] = 0.0
+        fe_timings["dense_recovery"] = 0.0
+        fe_timings["extract_valid"] = 0.0
+
         for obj_id in range(min(self.num_obj, len(objects))):
             obj = objects[obj_id]
 
@@ -149,30 +188,103 @@ class FrontEnd:
                 continue
 
             # ----------- Registration Logic -----------
-            idx_f2f, prev3d, curr3d_f2f, valid_stats = (
+            t_start = time.time()
+            idx_f2f, prev3d, curr3d, valid_stats = (
                 self._extract_valid_idx_points_for_obj(
                     obj_id, track_table, track_3d, track_valid, current_visibles
                 )
             )
+            fe_timings["extract_valid"] += time.time() - t_start
 
             stats_f2f = {}
             T_rel = None
             mean_res_f2f = -1.0
 
-            if prev3d.shape[0] >= 3 and curr3d_f2f.shape[0] >= 3:
+            if prev3d.shape[0] >= 3 and curr3d.shape[0] >= 3:
+                t_start = time.time()
                 T_rel, stats_f2f = self.register.register(
-                    prev3d, curr3d_f2f, sigma_tgt=uncertainties[idx_f2f]
+                    prev3d, curr3d, sigma_tgt=uncertainties[idx_f2f]
                 )
+                fe_timings["registration"] += time.time() - t_start
 
                 mean_res_f2f = self._compute_mean_residual(stats_f2f)
 
+            T_rel_dense = None
+            # Store before dense recovery info
+            pose_before_dense = None
+            rel_before_dense = None
+            stats_before_dense = None
+
+            # Initialize dense recovery flags
+            result.dense_recovery_triggered[obj_id] = False
+
+            # Check for sudden jump/drop and apply dense registration if needed
+            if (
+                self.use_dense_registration
+                and self.dense_register is not None
+                and self.prev_frame is not None
+                # and T_rel is not None
+                # and mean_res_f2f >= 0
+            ):
+                should_recover, reason = self._check_registration_quality(
+                    obj_id, mean_res_f2f, stats_f2f
+                )
+
+                # if frame.id > 940 and frame.id < 1000:
+                #     should_recover = True
+                #     self.dense_register.debug_level = 2
+                #     reason = "test"
+
+                if should_recover:
+                    # Capture state before dense recovery
+                    pose_before_dense = obj.pose.copy()
+                    rel_before_dense = T_rel.copy() if T_rel is not None else np.eye(4)
+                    stats_before_dense = stats_f2f.copy() if stats_f2f else {}
+
+                    print(
+                        f"[FrontEnd] Frame {self.frame_id} - Object {obj_id} - "
+                        f"Dense recovery triggered: {reason}"
+                    )
+                    t_start = time.time()
+                    T_rel_dense, stats_dense_after = self._apply_dense_recovery(
+                        obj_id, self.prev_frame, frame, T_rel
+                    )
+                    fe_timings["dense_recovery"] += time.time() - t_start
+
+                    # Store dense recovery info in result
+                    result.dense_recovery_triggered[obj_id] = True
+                    result.dense_recovery_pose_before[obj_id] = pose_before_dense
+                    result.dense_recovery_rel_before[obj_id] = rel_before_dense
+                    result.dense_recovery_stats_before[obj_id] = stats_before_dense
+
+                    if T_rel_dense is not None:
+                        result.dense_recovery_rel_after[obj_id] = T_rel_dense
+                        result.dense_recovery_stats_after[obj_id] = (
+                            stats_dense_after if stats_dense_after else {}
+                        )
+                    else:
+                        result.dense_recovery_rel_after[obj_id] = rel_before_dense
+                        result.dense_recovery_stats_after[obj_id] = stats_before_dense
+
             # Predict odom pose
             T_prev = obj.pose.copy()
-            if T_rel is not None and 0 < mean_res_f2f < self.reg_residual_thres:
+            pose_after_dense = None
+            if T_rel_dense is not None:
+                T_odom = T_rel_dense @ T_prev
+                pose_after_dense = T_odom.copy()
+                print(
+                    f"[FrontEnd] Frame {self.frame_id} - Object {obj_id} - "
+                    "Dense recovery successful"
+                )
+            elif T_rel is not None and 0 < mean_res_f2f < self.reg_residual_thres:
                 T_odom = T_rel @ T_prev
             else:
                 T_odom = T_prev
                 obj.lost = True
+
+            # Store after pose if dense recovery was triggered
+            if result.dense_recovery_triggered.get(obj_id, False):
+                result.dense_recovery_pose_after[obj_id] = T_odom.copy()
 
             # update results for the object
             self._update_results(
@@ -182,7 +294,7 @@ class FrontEnd:
                 T_rel,
                 idx_f2f,
                 prev3d,
-                curr3d_f2f,
+                curr3d,
                 mean_res_f2f,
                 stats_f2f,
                 valid_stats,
@@ -192,7 +304,7 @@ class FrontEnd:
             if self.debug_level > 1:
                 save_reg_pcd(
                     prev3d,
-                    curr3d_f2f,
+                    curr3d,
                     T_rel if T_rel is not None else np.eye(4),
                     self._reg_debug_dir,
                     f"obj_{obj_id}_frame_{self.frame_id}_f2f",
@@ -203,11 +315,35 @@ class FrontEnd:
                 f"[FrontEnd] Frame {self.frame_id} - Object {obj_id} - Odom: \n{T_odom}"
             )
 
+            # Update previous stats for next frame
+            if mean_res_f2f >= 0:
+                self.prev_residuals[obj_id] = mean_res_f2f
+                inliers = stats_f2f.get("inliers", np.array([]))
+                if len(inliers) > 0:
+                    self.prev_inlier_counts[obj_id] = int(np.sum(inliers))
+                else:
+                    # If no inliers array, use number of points as fallback
+                    self.prev_inlier_counts[obj_id] = prev3d.shape[0]
+
         # Optionally save cropped pcd
         if self.save_cropped_pcd:
+            t_start = time.time()
             self._save_cropped_pcd(frame)
+            fe_timings["save_cropped_pcd"] = time.time() - t_start
+
+        # Update previous frame for next step
+        self.prev_frame = frame
 
         self.frame_id += 1
+
+        # Print timing summary
+        total_fe_time = sum(fe_timings.values())
+        timing_str = " | ".join(
+            [f"{k}: {v*1000:.2f}ms" for k, v in fe_timings.items() if v > 0]
+        )
+        print(
+            f"[FrontEnd] Frame {self.frame_id-1} timing: {timing_str} | Total: {total_fe_time*1000:.2f}ms"
+        )
 
         return result
 
@@ -442,3 +578,155 @@ class FrontEnd:
         }
 
         return idx, key_points, curr3d, cur_visible, valid_stats
+
+    def _check_registration_quality(self, obj_id, mean_residual, stats):
+        """
+        Check for sudden jump in residual or sudden drop in inlier count.
+
+        Args:
+            obj_id: Object ID
+            mean_residual: Current mean residual
+            stats: Registration statistics dictionary
+
+        Returns:
+            tuple: (should_recover: bool, reason: str)
+        """
+        # Check if we have previous stats for this object
+        if obj_id not in self.prev_residuals:
+            return False, "no_previous_stats"
+
+        prev_residual = self.prev_residuals[obj_id]
+        prev_inlier_count = self.prev_inlier_counts.get(obj_id, 0)
+
+        # Get current inlier count
+        inliers = stats.get("inliers", np.array([]))
+        if len(inliers) > 0:
+            curr_inlier_count = int(np.sum(inliers))
+        else:
+            # Fallback: use number of residuals as proxy
+            residuals = stats.get("residuals", np.array([]))
+            curr_inlier_count = len(residuals) if len(residuals) > 0 else 0
+
+        # Check for sudden residual jump (above threshold)
+        # Only check if previous residual was below threshold (good registration)
+        if prev_residual < self.reg_residual_thres:
+            residual_jump = mean_residual - prev_residual
+            if residual_jump > self.residual_jump_threshold:
+                return True, f"residual_jump_{residual_jump:.4f}"
+
+        if curr_inlier_count < 5:
+            return True, f"insufficient_inliers_{curr_inlier_count}"
+
+        if mean_residual > 0.0007:
+            return True, f"high_residual_{mean_residual:.4f}"
+
+        # Check for sudden inlier drop
+        # Only check if we had a reasonable number of inliers before
+        if prev_inlier_count > 0 and curr_inlier_count > 0:
+            inlier_drop_ratio = 1.0 - (curr_inlier_count / prev_inlier_count)
+            if inlier_drop_ratio > self.inlier_drop_ratio:
+                return True, f"inlier_drop_{inlier_drop_ratio:.2%}"
+
+        return False, "ok"
+
+    def _extract_cropped_point_cloud(self, frame, obj_id: int) -> np.ndarray:
+        """
+        Extract cropped point cloud from frame using mask for the specified object.
+
+        Args:
+            frame: Frame object
+            obj_id: Object ID
+
+        Returns:
+            point_cloud: (N, 3) numpy array of 3D points, or empty array if extraction fails
+        """
+        try:
+            if frame.mask is None:
+                return np.empty((0, 3), dtype=np.float32)
+
+            mask = frame.mask[obj_id, 0]
+            coords_yx = torch.nonzero(mask > 0, as_tuple=False)
+            if coords_yx.numel() == 0:
+                return np.empty((0, 3), dtype=np.float32)
+
+            pxl_xy = coords_yx[:, [1, 0]].cpu().numpy()
+            world_pts, valid = convert_pixel_to_world(
+                pixel=pxl_xy,
+                depth_image=frame.depth,
+                cam_intrinsics=frame.intrinsics,
+                depth_factor=frame.depth_factor,
+                min_depth=self.min_depth,
+                max_depth=self.max_depth,
+                fill_missing_depth=self.fill_missing_depth,
+                window_size=self.fill_missing_depth_window_size,
+                min_neighbors=self.fill_missing_depth_min_neighbors,
+            )
+
+            if world_pts.size == 0 or not np.any(valid):
+                return np.empty((0, 3), dtype=np.float32)
+
+            return world_pts[valid]
+
+        except Exception as e:
+            print(
+                f"[FrontEnd] Error extracting cropped point cloud for obj {obj_id}: {e}"
+            )
+            return np.empty((0, 3), dtype=np.float32)
+
+    def _apply_dense_recovery(
+        self,
+        obj_id: int,
+        prev_frame,
+        curr_frame,
+        init_pose: np.ndarray,
+    ) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
+        """
+        Apply dense registration using cropped point clouds from previous and current frames.
+
+        Args:
+            obj_id: Object ID
+            prev_frame: Previous frame object
+            curr_frame: Current frame object
+            init_pose: Initial transformation estimate (4x4)
+
+        Returns:
+            tuple: (transformation_matrix, stats_dict)
+                - transformation_matrix: 4x4 transformation matrix, or None if recovery fails
+                - stats_dict: Dictionary with registration statistics
+        """
+        if self.dense_register is None:
+            return None, {}
+
+        if init_pose is None:
+            init_pose = np.eye(4)
+
+        # Extract cropped point clouds
+        prev_pcd = self._extract_cropped_point_cloud(prev_frame, obj_id)
+        curr_pcd = self._extract_cropped_point_cloud(curr_frame, obj_id)
+
+        # Check if we have enough points
+        min_points = 100  # Minimum points for dense registration
+        if prev_pcd.shape[0] < min_points or curr_pcd.shape[0] < min_points:
+            print(
+                f"[FrontEnd] Dense recovery skipped: insufficient points "
+                f"(prev: {prev_pcd.shape[0]}, curr: {curr_pcd.shape[0]})"
+            )
+            return None, {}
+
+        # Apply dense registration
+        try:
+            T_dense, stats_dense = self.dense_register.register(
+                source_pcd=prev_pcd,
+                target_pcd=curr_pcd,
+                init_pose=init_pose,
+            )
+
+            if T_dense is not None:
+                # Return transformation and stats
+                return T_dense, stats_dense if stats_dense else {}
+
+            return None, {}
+
+        except Exception as e:
+            print(f"[FrontEnd] Dense recovery failed: {e}")
+            return None, {}

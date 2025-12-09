@@ -181,7 +181,7 @@ class LMGraphOptimizer(Optimizer):
 
         print(
             f"[LMGraphOptimizer] Optimized frame {frame_id} for object {data.obj_id}, "
-            f"{landmark_xyz.shape[0]} landmarks"
+            f"{len(self._inserted_poses)} frames and {landmark_xyz.shape[0]} landmarks"
         )
 
         return OptimizerResult(

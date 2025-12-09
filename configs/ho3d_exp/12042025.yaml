@@ -20,8 +20,6 @@ pipeline:
     device: cuda
     depth_encoder: vitl
 
-
-    use_dense_registration: true
     use_local_graph: true
 
     debug_level: 2
@@ -32,7 +30,7 @@ pipeline:
     key_points_save_path: /home/justin/code/point-to-pose/debug/key_points
     save_meta_data: true
     meta_data_save_path: /home/justin/code/point-to-pose/debug/pipeline/meta_data
-    save_cropped_pcd: false
+    save_cropped_pcd: true
     cropped_pcd_dir: /home/justin/code/point-to-pose/debug/cropped_pcd
 
 
@@ -51,19 +49,7 @@ register:
     min_inliers: 3
 
     # outlier pose
-    residual_thres: 0.001
-
-dense_register:
-  type: cupoch_icp
-  params:
-    icp_type: point_to_plane
-    min_num_points: 5
-    max_num_points: 10000
-    max_correspondence_distance: 0.05
-    max_iterations: 30
-    epsilon: 1e-6
-    debug_level: 0
-    debug_dir: /home/justin/code/point-to-pose/debug/dense_register
+    residual_thres: 0.07
 
 recovery:
   type: recovery_manager

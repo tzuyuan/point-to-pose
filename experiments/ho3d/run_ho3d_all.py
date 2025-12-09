@@ -313,7 +313,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--out_dir",
         type=str,
-        default="/home/justin/code/point-to-pose/results/",
+        default="/home/justin/code/point-to-pose/results/ho3d_all",
     )
     parser.add_argument(
         "--config_path",

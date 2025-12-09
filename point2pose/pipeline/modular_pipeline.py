@@ -160,6 +160,16 @@ class ModularPipeline:
                     "is_key_frame": False,
                     "pose_frontend": np.eye(4),
                     "pose_local": np.eye(4),
+                    # Dense recovery info (initialized for first frame - no recovery possible)
+                    "dense_recovery_triggered": False,
+                    "dense_recovery_pose_before": np.eye(4),
+                    "dense_recovery_pose_after": np.eye(4),
+                    "dense_recovery_rel_before": np.eye(4),
+                    "dense_recovery_rel_after": np.eye(4),
+                    "dense_recovery_inliers_before": np.array([]),
+                    "dense_recovery_residuals_before": np.array([]),
+                    "dense_recovery_inliers_after": np.array([]),
+                    "dense_recovery_residuals_after": np.array([]),
                 }
             )
 
@@ -170,8 +180,21 @@ class ModularPipeline:
         if self.frame_id == 0:
             return self.initialize_first_frame(frame)
 
+        iter_start_time = time.time()
+        module_times = {
+            "frontend": 0.0,
+            "track_table": 0.0,
+            "recovery": 0.0,
+            "local_opt": 0.0,
+            "keyframe": 0.0,
+            "global_opt": 0.0,
+            "logging": 0.0,
+        }
+
         # 1. Front End (Tracking + Registration)
+        t0 = time.time()
         fe_result = self.frontend.step(frame, self.track_table, self.objects)
+        module_times["frontend"] = time.time() - t0
 
         # per-object update
         for obj_id in range(self.num_obj):
@@ -183,6 +206,7 @@ class ModularPipeline:
 
         # 2. Track Table Update
         # FrontEndResult contains the data needed to update the table
+        t0 = time.time()
         self.track_table.update_track_table(
             fe_result.tracks,
             fe_result.track_3d,
@@ -190,8 +214,10 @@ class ModularPipeline:
             fe_result.uncertainties,
             fe_result.visibles,
         )
+        module_times["track_table"] = time.time() - t0
 
         # 2.5. Recovery (if lost)
+        t0 = time.time()
         self.recovery_manager.update(
             frame,
             fe_result,
@@ -200,10 +226,11 @@ class ModularPipeline:
             self.kf_manager.keyframes,
             self.frontend.register,
         )
+        module_times["recovery"] = time.time() - t0
 
         # 4. Local Optimization
+        t0 = time.time()
         if self.use_local_graph:
-
             for obj_id in range(self.num_obj):
 
                 if obj_id not in fe_result.valid_indices or self.objects[obj_id].lost:
@@ -243,15 +270,18 @@ class ModularPipeline:
                 self.local_optimizer.update_object_state(
                     self.objects[obj_id], opt_result, self.track_table
                 )
+        module_times["local_opt"] = time.time() - t0
 
         pose_local = {}
         for obj_id in range(self.num_obj):
             pose_local[obj_id] = self.objects[obj_id].pose.copy()
 
         # 3. Key Frame Manager (Check & Sample)
+        t0 = time.time()
         new_keyframes = self.kf_manager.update(
             frame, fe_result, self.track_table, self.objects, self.frontend.tracker
         )
+        module_times["keyframe"] = time.time() - t0
 
         # If new keyframe, reset local optimizer
         for kf in new_keyframes:
@@ -261,6 +291,7 @@ class ModularPipeline:
             self.local_optimizer.reset(kf.obj_id)
 
         # 5. Global Optimization
+        t0 = time.time()
         if new_keyframes:
             updated_global_poses = self.kf_graph.update(new_keyframes)
 
@@ -274,11 +305,27 @@ class ModularPipeline:
 
                     obj = self.objects[kf.obj_id]
                     obj.pose = global_pose
+        module_times["global_opt"] = time.time() - t0
 
         # 6. Logging
+        t0 = time.time()
         self._log_step(frame, fe_result, new_keyframes, pose_frontend, pose_local)
+        module_times["logging"] = time.time() - t0
 
         self.frame_id += 1
+
+        iter_total_time = time.time() - iter_start_time
+        print(
+            f"Frame {self.frame_id}: "
+            f"frontend={module_times['frontend']:.4f}s, "
+            f"track_table={module_times['track_table']:.4f}s, "
+            f"recovery={module_times['recovery']:.4f}s, "
+            f"local_opt={module_times['local_opt']:.4f}s, "
+            f"keyframe={module_times['keyframe']:.4f}s, "
+            f"global_opt={module_times['global_opt']:.4f}s, "
+            f"logging={module_times['logging']:.4f}s, "
+            f"total={iter_total_time:.4f}s"
+        )
 
         # Return poses
         out_pose = np.tile(np.eye(4), (self.num_obj, 1, 1))
@@ -309,6 +356,13 @@ class ModularPipeline:
 
             reg_stats = fe_result.reg_stats.get(obj_id, {})
             valid_stats = fe_result.valid_stats.get(obj_id, {})
+
+            # Extract dense recovery info
+            dense_recovery_triggered = fe_result.dense_recovery_triggered.get(
+                obj_id, False
+            )
+            dense_stats_before = fe_result.dense_recovery_stats_before.get(obj_id, {})
+            dense_stats_after = fe_result.dense_recovery_stats_after.get(obj_id, {})
 
             log_payload = {
                 "timestamp": frame.timestamp,
@@ -343,6 +397,32 @@ class ModularPipeline:
                     pose_frontend[obj_id] if pose_frontend else np.eye(4)
                 ),
                 "pose_local": pose_local[obj_id] if pose_local else np.eye(4),
+                # Dense recovery info
+                "dense_recovery_triggered": dense_recovery_triggered,
+                "dense_recovery_pose_before": fe_result.dense_recovery_pose_before.get(
+                    obj_id, np.eye(4)
+                ),
+                "dense_recovery_pose_after": fe_result.dense_recovery_pose_after.get(
+                    obj_id, np.eye(4)
+                ),
+                "dense_recovery_rel_before": fe_result.dense_recovery_rel_before.get(
+                    obj_id, np.eye(4)
+                ),
+                "dense_recovery_rel_after": fe_result.dense_recovery_rel_after.get(
+                    obj_id, np.eye(4)
+                ),
+                "dense_recovery_inliers_before": dense_stats_before.get(
+                    "inliers", np.array([])
+                ),
+                "dense_recovery_residuals_before": dense_stats_before.get(
+                    "residuals", np.array([])
+                ),
+                "dense_recovery_inliers_after": dense_stats_after.get(
+                    "inliers", np.array([])
+                ),
+                "dense_recovery_residuals_after": dense_stats_after.get(
+                    "residuals", np.array([])
+                ),
                 # Valid extraction stats
                 **valid_stats,
             }

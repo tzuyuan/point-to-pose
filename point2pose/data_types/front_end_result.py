@@ -39,3 +39,27 @@ class FrontEndResult:
     visibles: Optional[np.ndarray] = None
     track_3d: Optional[np.ndarray] = None
     track_valid: Optional[np.ndarray] = None
+
+    # Dense recovery info (before/after dense registration)
+    # Key: obj_id
+    dense_recovery_triggered: Dict[int, bool] = field(
+        default_factory=dict
+    )  # Whether dense recovery was triggered
+    dense_recovery_pose_before: Dict[int, np.ndarray] = field(
+        default_factory=dict
+    )  # 4x4 pose before dense recovery
+    dense_recovery_pose_after: Dict[int, np.ndarray] = field(
+        default_factory=dict
+    )  # 4x4 pose after dense recovery
+    dense_recovery_rel_before: Dict[int, np.ndarray] = field(
+        default_factory=dict
+    )  # 4x4 relative pose before dense recovery
+    dense_recovery_rel_after: Dict[int, np.ndarray] = field(
+        default_factory=dict
+    )  # 4x4 relative pose after dense recovery
+    dense_recovery_stats_before: Dict[int, Dict[str, Any]] = field(
+        default_factory=dict
+    )  # Registration stats before
+    dense_recovery_stats_after: Dict[int, Dict[str, Any]] = field(
+        default_factory=dict
+    )  # Registration stats after

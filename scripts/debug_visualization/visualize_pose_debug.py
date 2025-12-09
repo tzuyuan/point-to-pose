@@ -495,6 +495,551 @@ def plot_residual_analysis(
     plt.show()
 
 
+# ---------------------- Slope and Threshold Analysis ---------------------- #
+def compute_slopes(values, valid_mask=None, window_size=5):
+    """
+    Compute the slope (derivative) of a time series using a rolling window of past frames.
+    Uses linear regression on the past N frames to compute a more robust slope estimate.
+    Returns slopes with same length as input (first values are NaN until window is filled).
+
+    Args:
+        values: (N,) array of values
+        valid_mask: (N,) boolean array indicating valid values (optional)
+        window_size: Number of past frames to use for slope computation (default: 5)
+
+    Returns:
+        slopes: (N,) array of slopes, NaN where invalid or insufficient history
+    """
+    values = np.asarray(values)
+    slopes = np.full(len(values), np.nan)
+
+    if valid_mask is None:
+        valid_mask = ~np.isnan(values)
+    else:
+        valid_mask = valid_mask & ~np.isnan(values)
+
+    if np.sum(valid_mask) < window_size:
+        return slopes
+
+    valid_indices = np.where(valid_mask)[0]
+    if len(valid_indices) < window_size:
+        return slopes
+
+    # For each valid index, use the past window_size frames (including current) to compute slope
+    for i in range(len(valid_indices)):
+        idx_curr = valid_indices[i]
+
+        # Find indices in the window (past window_size frames including current)
+        window_start = max(0, i - window_size + 1)
+        window_indices = valid_indices[window_start : i + 1]
+
+        if len(window_indices) < 2:
+            continue
+
+        # Extract values and frame indices for linear regression
+        window_values = values[window_indices]
+        window_frames = window_indices.astype(float)
+
+        # Compute slope using linear regression (least squares)
+        # slope = (n*sum(xy) - sum(x)*sum(y)) / (n*sum(x^2) - sum(x)^2)
+        n = len(window_frames)
+        sum_x = np.sum(window_frames)
+        sum_y = np.sum(window_values)
+        sum_xy = np.sum(window_frames * window_values)
+        sum_x2 = np.sum(window_frames * window_frames)
+
+        denominator = n * sum_x2 - sum_x * sum_x
+        if abs(denominator) > 1e-10:  # Avoid division by zero
+            slope = (n * sum_xy - sum_x * sum_y) / denominator
+            slopes[idx_curr] = slope
+
+    return slopes
+
+
+def compute_frame_to_frame_changes(values, valid_mask=None):
+    """
+    Compute frame-to-frame changes (jumps/drops).
+    Returns changes with same length as input (first value is NaN).
+
+    Args:
+        values: (N,) array of values
+        valid_mask: (N,) boolean array indicating valid values (optional)
+
+    Returns:
+        changes: (N,) array of absolute changes, NaN where invalid or at boundaries
+    """
+    values = np.asarray(values)
+    changes = np.full(len(values), np.nan)
+
+    if valid_mask is None:
+        valid_mask = ~np.isnan(values)
+    else:
+        valid_mask = valid_mask & ~np.isnan(values)
+
+    if np.sum(valid_mask) < 2:
+        return changes
+
+    valid_indices = np.where(valid_mask)[0]
+    if len(valid_indices) < 2:
+        return changes
+
+    for i in range(1, len(valid_indices)):
+        idx_curr = valid_indices[i]
+        idx_prev = valid_indices[i - 1]
+        if idx_prev >= 0 and idx_curr < len(values):
+            changes[idx_curr] = values[idx_curr] - values[idx_prev]
+
+    return changes
+
+
+def compute_inlier_drop_ratios(inlier_counts, valid_mask=None):
+    """
+    Compute inlier drop ratios: 1.0 - (curr / prev) for consecutive frames.
+    Returns ratios with same length as input (first value is NaN).
+
+    Args:
+        inlier_counts: (N,) array of inlier counts
+        valid_mask: (N,) boolean array indicating valid values (optional)
+
+    Returns:
+        drop_ratios: (N,) array of drop ratios, NaN where invalid or at boundaries
+    """
+    inlier_counts = np.asarray(inlier_counts, dtype=float)
+    drop_ratios = np.full(len(inlier_counts), np.nan)
+
+    if valid_mask is None:
+        valid_mask = (inlier_counts > 0) & ~np.isnan(inlier_counts)
+    else:
+        valid_mask = valid_mask & (inlier_counts > 0) & ~np.isnan(inlier_counts)
+
+    if np.sum(valid_mask) < 2:
+        return drop_ratios
+
+    valid_indices = np.where(valid_mask)[0]
+    if len(valid_indices) < 2:
+        return drop_ratios
+
+    for i in range(1, len(valid_indices)):
+        idx_curr = valid_indices[i]
+        idx_prev = valid_indices[i - 1]
+        if idx_prev >= 0 and idx_curr < len(inlier_counts):
+            prev_count = inlier_counts[idx_prev]
+            curr_count = inlier_counts[idx_curr]
+            if prev_count > 0:
+                drop_ratios[idx_curr] = 1.0 - (curr_count / prev_count)
+
+    return drop_ratios
+
+
+def plot_slope_and_threshold_analysis(
+    mean_res,
+    inlier_counts,
+    kf_indices=None,
+    save_prefix=None,
+    reg_residual_thres=0.07,
+    residual_jump_threshold=0.02,
+    inlier_drop_ratio=0.5,
+    high_residual_threshold=0.01,
+    min_inlier_count=5,
+    slope_window_size=10,
+):
+    """
+    Plot slopes and threshold analysis to help decide threshold values.
+
+    Layout (all in one figure):
+      - Rows 1-2: Residual (top) and Residual Slope (bottom, shared x-axis)
+      - Rows 3-4: Inlier Count (top) and Inlier Slope (bottom, shared x-axis)
+      - Row 5: Residual Jumps
+      - Row 6: Inlier Drop Ratios
+      - Rows 7-8: Distributions (2x2 grid)
+
+    Args:
+        slope_window_size: Number of past frames to use for slope computation (default: 5)
+    """
+    frames = np.arange(len(mean_res))
+    valid_mask = ~np.isnan(mean_res)
+
+    # Compute slopes using rolling window
+    residual_slopes = compute_slopes(
+        mean_res, valid_mask, window_size=slope_window_size
+    )
+    inlier_slopes = compute_slopes(
+        inlier_counts, valid_mask=None, window_size=slope_window_size
+    )
+
+    # Compute frame-to-frame changes
+    residual_jumps = compute_frame_to_frame_changes(mean_res, valid_mask)
+    inlier_drop_ratios = compute_inlier_drop_ratios(inlier_counts, valid_mask=None)
+
+    # Create figure with GridSpec for flexible layout
+    from matplotlib.gridspec import GridSpec
+
+    fig = plt.figure(figsize=(16, 20))
+    # Main grid: 6 rows for time series, then 2 rows for distributions (will split into 2x2)
+    gs_main = GridSpec(
+        8,
+        2,
+        figure=fig,
+        hspace=0.35,
+        wspace=0.3,
+        height_ratios=[1, 0.8, 1, 0.8, 1, 1, 1, 1],
+        width_ratios=[1, 1],
+    )
+
+    # Time series plots (span full width)
+    ax_res = fig.add_subplot(gs_main[0, :])
+    ax_res_slope = fig.add_subplot(gs_main[1, :], sharex=ax_res)
+    ax_inl = fig.add_subplot(gs_main[2, :])
+    ax_inl_slope = fig.add_subplot(gs_main[3, :], sharex=ax_inl)
+    ax_jumps = fig.add_subplot(gs_main[4, :])
+    ax_drops = fig.add_subplot(gs_main[5, :])
+
+    # Distribution plots (2x2 grid in rows 6-7)
+    ax_dist1 = fig.add_subplot(gs_main[6, 0])
+    ax_dist2 = fig.add_subplot(gs_main[6, 1])
+    ax_dist3 = fig.add_subplot(gs_main[7, 0])
+    ax_dist4 = fig.add_subplot(gs_main[7, 1])
+
+    # ----- 1) Residual and Residual Slope (paired) -----
+    # Plot residual
+    ax_res.plot(
+        frames[valid_mask],
+        mean_res[valid_mask],
+        ".-",
+        label="Mean Residual",
+        color="tab:red",
+        linewidth=1.0,
+        markersize=3,
+    )
+    if kf_indices is not None:
+        for k in kf_indices:
+            if 0 <= k < len(frames):
+                ax_res.axvline(x=k, color="k", alpha=0.15, linewidth=0.8)
+    ax_res.set_ylabel("Mean Residual")
+    ax_res.set_title("Residual Over Time")
+    ax_res.grid(True, linestyle="--", alpha=0.6)
+    ax_res.legend(loc="upper left")
+    plt.setp(
+        ax_res.get_xticklabels(), visible=False
+    )  # Hide x-axis labels for shared axis
+
+    # Plot residual slope
+    valid_slope_mask = ~np.isnan(residual_slopes)
+    if np.any(valid_slope_mask):
+        ax_res_slope.plot(
+            frames[valid_slope_mask],
+            residual_slopes[valid_slope_mask],
+            ".-",
+            label="Residual Slope",
+            color="tab:orange",
+            linewidth=1.0,
+            markersize=3,
+        )
+        ax_res_slope.axhline(y=0, color="k", linestyle="--", alpha=0.3, linewidth=0.8)
+
+        # Statistics
+        slope_vals = residual_slopes[valid_slope_mask]
+        print("\n[Residual Slope] Statistics:")
+        print(
+            "  mean={:.6f}, median={:.6f}, std={:.6f}, "
+            "p90={:.6f}, max={:.6f}, min={:.6f}".format(
+                float(np.mean(slope_vals)),
+                float(np.median(slope_vals)),
+                float(np.std(slope_vals)),
+                float(np.percentile(slope_vals, 90)),
+                float(np.max(slope_vals)),
+                float(np.min(slope_vals)),
+            )
+        )
+
+    if kf_indices is not None:
+        for k in kf_indices:
+            if 0 <= k < len(frames):
+                ax_res_slope.axvline(x=k, color="k", alpha=0.15, linewidth=0.8)
+
+    ax_res_slope.set_ylabel("Residual Slope\n(change per frame)")
+    ax_res_slope.set_xlabel("Frame")
+    ax_res_slope.grid(True, linestyle="--", alpha=0.6)
+    ax_res_slope.legend(loc="upper left")
+
+    # ----- 2) Inlier Count and Inlier Slope (paired) -----
+    # Plot inlier count
+    ax_inl.plot(
+        frames,
+        inlier_counts,
+        ".-",
+        label="Inlier Count",
+        color="tab:green",
+        linewidth=1.0,
+        markersize=3,
+    )
+    if kf_indices is not None:
+        for k in kf_indices:
+            if 0 <= k < len(frames):
+                ax_inl.axvline(x=k, color="k", alpha=0.15, linewidth=0.8)
+    ax_inl.set_ylabel("# Inliers")
+    ax_inl.set_title("Inlier Count Over Time")
+    ax_inl.grid(True, linestyle="--", alpha=0.6)
+    ax_inl.legend(loc="upper left")
+    plt.setp(
+        ax_inl.get_xticklabels(), visible=False
+    )  # Hide x-axis labels for shared axis
+
+    # Plot inlier slope
+    valid_inl_slope_mask = ~np.isnan(inlier_slopes)
+    if np.any(valid_inl_slope_mask):
+        ax_inl_slope.plot(
+            frames[valid_inl_slope_mask],
+            inlier_slopes[valid_inl_slope_mask],
+            ".-",
+            label="Inlier Count Slope",
+            color="tab:cyan",
+            linewidth=1.0,
+            markersize=3,
+        )
+        ax_inl_slope.axhline(y=0, color="k", linestyle="--", alpha=0.3, linewidth=0.8)
+
+        # Statistics
+        inl_slope_vals = inlier_slopes[valid_inl_slope_mask]
+        print("\n[Inlier Count Slope] Statistics:")
+        print(
+            "  mean={:.2f}, median={:.2f}, std={:.2f}, "
+            "p90={:.2f}, max={:.2f}, min={:.2f}".format(
+                float(np.mean(inl_slope_vals)),
+                float(np.median(inl_slope_vals)),
+                float(np.std(inl_slope_vals)),
+                float(np.percentile(inl_slope_vals, 90)),
+                float(np.max(inl_slope_vals)),
+                float(np.min(inl_slope_vals)),
+            )
+        )
+
+    if kf_indices is not None:
+        for k in kf_indices:
+            if 0 <= k < len(frames):
+                ax_inl_slope.axvline(x=k, color="k", alpha=0.15, linewidth=0.8)
+
+    ax_inl_slope.set_ylabel("Inlier Count Slope\n(change per frame)")
+    ax_inl_slope.set_xlabel("Frame")
+    ax_inl_slope.grid(True, linestyle="--", alpha=0.6)
+    ax_inl_slope.legend(loc="upper left")
+
+    # ----- 3) Residual Jumps -----
+    valid_jump_mask = ~np.isnan(residual_jumps)
+    if np.any(valid_jump_mask):
+        jump_vals = residual_jumps[valid_jump_mask]
+        # Plot absolute jumps
+        abs_jumps = np.abs(jump_vals)
+
+        ax_jumps.plot(
+            frames[valid_jump_mask],
+            jump_vals,
+            ".-",
+            label="Residual Jump",
+            color="tab:orange",
+            linewidth=1.0,
+            markersize=3,
+            alpha=0.7,
+        )
+        ax_jumps.axhline(y=0, color="k", linestyle="--", alpha=0.3, linewidth=0.8)
+
+        # Statistics
+        print("\n[Residual Jumps] Statistics:")
+        print(
+            "  mean={:.6f}, median={:.6f}, std={:.6f}, "
+            "p90={:.6f}, max={:.6f}, min={:.6f}".format(
+                float(np.mean(jump_vals)),
+                float(np.median(jump_vals)),
+                float(np.std(jump_vals)),
+                float(np.percentile(jump_vals, 90)),
+                float(np.max(jump_vals)),
+                float(np.min(jump_vals)),
+            )
+        )
+        print(
+            f"  Frames above threshold ({residual_jump_threshold:.4f}): "
+            f"{np.sum(abs_jumps > residual_jump_threshold)} / {len(abs_jumps)} "
+            f"({100.0 * np.sum(abs_jumps > residual_jump_threshold) / len(abs_jumps):.1f}%)"
+        )
+
+    if kf_indices is not None:
+        for k in kf_indices:
+            if 0 <= k < len(frames):
+                ax_jumps.axvline(x=k, color="k", alpha=0.15, linewidth=0.8)
+
+    ax_jumps.set_ylabel("Residual Jump\n(frame-to-frame change)")
+    ax_jumps.set_xlabel("Frame")
+    ax_jumps.set_title("Residual Jumps Over Time")
+    ax_jumps.grid(True, linestyle="--", alpha=0.6)
+    ax_jumps.legend(loc="upper left")
+
+    # ----- 4) Inlier Drop Ratios -----
+    valid_drop_mask = ~np.isnan(inlier_drop_ratios)
+    if np.any(valid_drop_mask):
+        drop_vals = inlier_drop_ratios[valid_drop_mask]
+
+        ax_drops.plot(
+            frames[valid_drop_mask],
+            drop_vals,
+            ".-",
+            label="Inlier Drop Ratio",
+            color="tab:purple",
+            linewidth=1.0,
+            markersize=3,
+            alpha=0.7,
+        )
+        ax_drops.axhline(y=0, color="k", linestyle="--", alpha=0.3, linewidth=0.8)
+
+        # Statistics
+        print("\n[Inlier Drop Ratios] Statistics:")
+        print(
+            "  mean={:.4f}, median={:.4f}, std={:.4f}, "
+            "p90={:.4f}, max={:.4f}, min={:.4f}".format(
+                float(np.mean(drop_vals)),
+                float(np.median(drop_vals)),
+                float(np.std(drop_vals)),
+                float(np.percentile(drop_vals, 90)),
+                float(np.max(drop_vals)),
+                float(np.min(drop_vals)),
+            )
+        )
+        print(
+            f"  Frames above threshold ({inlier_drop_ratio:.2%}): "
+            f"{np.sum(drop_vals > inlier_drop_ratio)} / {len(drop_vals)} "
+            f"({100.0 * np.sum(drop_vals > inlier_drop_ratio) / len(drop_vals):.1f}%)"
+        )
+
+    if kf_indices is not None:
+        for k in kf_indices:
+            if 0 <= k < len(frames):
+                ax_drops.axvline(x=k, color="k", alpha=0.15, linewidth=0.8)
+
+    ax_drops.set_ylabel("Inlier Drop Ratio\n(1 - curr/prev)")
+    ax_drops.set_xlabel("Frame")
+    ax_drops.set_title("Inlier Drop Ratios Over Time")
+    ax_drops.grid(True, linestyle="--", alpha=0.6)
+    ax_drops.legend(loc="upper left")
+
+    # ----- 5) Distribution Analysis (in same figure) -----
+
+    # Distribution 1: Residuals
+    valid_res = mean_res[valid_mask]
+    if valid_res.size > 0:
+        ax_dist1.hist(valid_res, bins=50, alpha=0.7, color="tab:red", edgecolor="black")
+        ax_dist1.axvline(
+            x=reg_residual_thres,
+            color="r",
+            linestyle="--",
+            linewidth=2,
+            label=f"reg_residual_thres ({reg_residual_thres:.4f})",
+        )
+        ax_dist1.axvline(
+            x=high_residual_threshold,
+            color="orange",
+            linestyle="--",
+            linewidth=2,
+            label=f"high_residual_threshold ({high_residual_threshold:.4f})",
+        )
+        ax_dist1.set_xlabel("Mean Residual")
+        ax_dist1.set_ylabel("Count")
+        ax_dist1.set_title("Distribution of Residuals")
+        ax_dist1.legend(loc="upper right", fontsize=8)
+        ax_dist1.grid(True, linestyle="--", alpha=0.3)
+
+        # Print threshold statistics
+        print("\n[Residual Threshold Analysis]:")
+        print(
+            f"  Frames with residual > {reg_residual_thres:.4f}: "
+            f"{np.sum(valid_res > reg_residual_thres)} / {len(valid_res)} "
+            f"({100.0 * np.sum(valid_res > reg_residual_thres) / len(valid_res):.1f}%)"
+        )
+        print(
+            f"  Frames with residual > {high_residual_threshold:.4f}: "
+            f"{np.sum(valid_res > high_residual_threshold)} / {len(valid_res)} "
+            f"({100.0 * np.sum(valid_res > high_residual_threshold) / len(valid_res):.1f}%)"
+        )
+
+    # Distribution 2: Inlier counts
+    valid_inliers = inlier_counts[inlier_counts > 0]
+    if valid_inliers.size > 0:
+        ax_dist2.hist(
+            valid_inliers, bins=50, alpha=0.7, color="tab:green", edgecolor="black"
+        )
+        ax_dist2.axvline(
+            x=min_inlier_count,
+            color="r",
+            linestyle="--",
+            linewidth=2,
+            label=f"min_inlier_count ({min_inlier_count})",
+        )
+        ax_dist2.set_xlabel("Inlier Count")
+        ax_dist2.set_ylabel("Count")
+        ax_dist2.set_title("Distribution of Inlier Counts")
+        ax_dist2.legend(loc="upper right", fontsize=8)
+        ax_dist2.grid(True, linestyle="--", alpha=0.3)
+
+        # Print threshold statistics
+        print("\n[Inlier Count Threshold Analysis]:")
+        print(
+            f"  Frames with inlier_count < {min_inlier_count}: "
+            f"{np.sum(inlier_counts < min_inlier_count)} / {len(inlier_counts)} "
+            f"({100.0 * np.sum(inlier_counts < min_inlier_count) / len(inlier_counts):.1f}%)"
+        )
+
+    # Distribution 3: Residual jumps (absolute)
+    valid_abs_jumps = (
+        np.abs(residual_jumps[valid_jump_mask])
+        if np.any(valid_jump_mask)
+        else np.array([])
+    )
+    if valid_abs_jumps.size > 0:
+        ax_dist3.hist(
+            valid_abs_jumps, bins=50, alpha=0.7, color="tab:orange", edgecolor="black"
+        )
+        ax_dist3.axvline(
+            x=residual_jump_threshold,
+            color="r",
+            linestyle="--",
+            linewidth=2,
+            label=f"residual_jump_threshold ({residual_jump_threshold:.4f})",
+        )
+        ax_dist3.set_xlabel("Absolute Residual Jump")
+        ax_dist3.set_ylabel("Count")
+        ax_dist3.set_title("Distribution of Residual Jumps (abs)")
+        ax_dist3.legend(loc="upper right", fontsize=8)
+        ax_dist3.grid(True, linestyle="--", alpha=0.3)
+
+    # Distribution 4: Inlier drop ratios
+    valid_drops = (
+        inlier_drop_ratios[valid_drop_mask] if np.any(valid_drop_mask) else np.array([])
+    )
+    if valid_drops.size > 0:
+        ax_dist4.hist(
+            valid_drops, bins=50, alpha=0.7, color="tab:purple", edgecolor="black"
+        )
+        ax_dist4.axvline(
+            x=inlier_drop_ratio,
+            color="r",
+            linestyle="--",
+            linewidth=2,
+            label=f"inlier_drop_ratio ({inlier_drop_ratio:.2%})",
+        )
+        ax_dist4.set_xlabel("Inlier Drop Ratio")
+        ax_dist4.set_ylabel("Count")
+        ax_dist4.set_title("Distribution of Inlier Drop Ratios")
+        ax_dist4.legend(loc="upper right", fontsize=8)
+        ax_dist4.grid(True, linestyle="--", alpha=0.3)
+
+    plt.suptitle("Slope and Threshold Analysis", fontsize=16, y=0.995)
+
+    if save_prefix:
+        out_file = f"{save_prefix}_slope_and_threshold_analysis.png"
+        plt.savefig(out_file, dpi=180, bbox_inches="tight")
+        print(f"Saved slope+threshold analysis plot to {out_file}")
+
+    plt.show()
+
+
 # ---------------------- Plotting: Full Trajectory ---------------------- #
 def plot_full_trajectory(
     frontend, local, global_, gt, keyframe_indices, save_prefix=None
@@ -777,6 +1322,454 @@ def filter_keyframes_with_gt(kf_indices, gt_poses):
     return np.array(valid_kf, dtype=int)
 
 
+# ---------------------- Dense Recovery Analysis ---------------------- #
+def plot_dense_recovery_analysis(
+    data,
+    pose_frontend,
+    pose_global,
+    gt_poses=None,
+    save_prefix=None,
+):
+    """
+    Plot dense recovery analysis showing before/after stats including pose errors.
+
+    Layout:
+      - Row 1: Translation error before/after dense recovery
+      - Row 2: Rotation error before/after dense recovery
+      - Row 3: Residual comparison before/after
+      - Row 4: Inlier count comparison before/after
+    """
+    # Extract dense recovery data
+    if "dense_recovery_triggered" not in data:
+        print(
+            "Warning: 'dense_recovery_triggered' not found in logs. "
+            "This could mean:\n"
+            "  1. The logs were generated before dense recovery logging was added\n"
+            "  2. Dense recovery is not enabled in the pipeline configuration\n"
+            "  3. The pipeline hasn't been run yet with the new logging code\n"
+            "Skipping dense recovery analysis."
+        )
+        # Print available keys for debugging
+        available_keys = list(data.keys())
+        dense_keys = [k for k in available_keys if "dense" in k.lower()]
+        if dense_keys:
+            print(f"Found dense-related keys: {dense_keys}")
+        else:
+            print(
+                f"No dense-related keys found. Available keys (first 20): {sorted(available_keys)[:20]}..."
+            )
+        return
+
+    # Extract dense recovery trigger flags
+    triggered_raw = data["dense_recovery_triggered"]
+    if isinstance(triggered_raw, np.ndarray):
+        if triggered_raw.dtype == object:
+            dense_triggered = np.array(
+                [bool(x) if x is not None else False for x in triggered_raw]
+            )
+        else:
+            dense_triggered = triggered_raw.astype(bool)
+    else:
+        dense_triggered = np.array(
+            [bool(x) if x is not None else False for x in triggered_raw]
+        )
+
+    # Extract pose arrays - try direct first, then unpack_ragged
+    dense_pose_before = None
+    dense_pose_after = None
+    if "dense_recovery_pose_before" in data:
+        try:
+            dense_pose_before = ensure_numeric(
+                data["dense_recovery_pose_before"], "dense_recovery_pose_before"
+            )
+        except Exception:
+            dense_pose_before = unpack_ragged(data, "dense_recovery_pose_before")
+    else:
+        dense_pose_before = unpack_ragged(data, "dense_recovery_pose_before")
+
+    if "dense_recovery_pose_after" in data:
+        try:
+            dense_pose_after = ensure_numeric(
+                data["dense_recovery_pose_after"], "dense_recovery_pose_after"
+            )
+        except Exception:
+            dense_pose_after = unpack_ragged(data, "dense_recovery_pose_after")
+    else:
+        dense_pose_after = unpack_ragged(data, "dense_recovery_pose_after")
+
+    # Get frames where dense recovery was triggered
+    recovery_frames = np.where(dense_triggered)[0]
+
+    if len(recovery_frames) == 0:
+        print("No dense recovery events found in logs.")
+        return
+
+    print(
+        f"\nFound {len(recovery_frames)} frames with dense recovery triggered: {recovery_frames}"
+    )
+
+    # Extract residuals and inliers
+    dense_residuals_before = unpack_ragged(data, "dense_recovery_residuals_before")
+    dense_residuals_after = unpack_ragged(data, "dense_recovery_residuals_after")
+    dense_inliers_before = unpack_ragged(data, "dense_recovery_inliers_before")
+    dense_inliers_after = unpack_ragged(data, "dense_recovery_inliers_after")
+
+    # Compute stats for recovery frames
+    N = len(dense_triggered)
+    mean_res_before = np.full(N, np.nan)
+    mean_res_after = np.full(N, np.nan)
+    inlier_count_before = np.zeros(N, dtype=int)
+    inlier_count_after = np.zeros(N, dtype=int)
+
+    for i in recovery_frames:
+        if dense_residuals_before is not None and i < len(dense_residuals_before):
+            res_before = dense_residuals_before[i]
+            if res_before is not None and len(res_before) > 0:
+                inl_before = None
+                if dense_inliers_before is not None and i < len(dense_inliers_before):
+                    inl_before = np.asarray(dense_inliers_before[i], dtype=bool)
+                    if inl_before.size == res_before.size:
+                        mean_res_before[i] = (
+                            np.mean(res_before[inl_before])
+                            if np.any(inl_before)
+                            else np.mean(res_before)
+                        )
+                        inlier_count_before[i] = np.sum(inl_before)
+                    else:
+                        mean_res_before[i] = np.mean(res_before)
+                        inlier_count_before[i] = len(res_before)
+                else:
+                    mean_res_before[i] = np.mean(res_before)
+                    inlier_count_before[i] = len(res_before)
+
+        if dense_residuals_after is not None and i < len(dense_residuals_after):
+            res_after = dense_residuals_after[i]
+            if res_after is not None and len(res_after) > 0:
+                inl_after = None
+                if dense_inliers_after is not None and i < len(dense_inliers_after):
+                    inl_after = np.asarray(dense_inliers_after[i], dtype=bool)
+                    if inl_after.size == res_after.size:
+                        mean_res_after[i] = (
+                            np.mean(res_after[inl_after])
+                            if np.any(inl_after)
+                            else np.mean(res_after)
+                        )
+                        inlier_count_after[i] = np.sum(inl_after)
+                    else:
+                        mean_res_after[i] = np.mean(res_after)
+                        inlier_count_after[i] = len(res_after)
+                else:
+                    mean_res_after[i] = np.mean(res_after)
+                    inlier_count_after[i] = len(res_after)
+
+    # Compute pose errors if GT available
+    t_err_before = None
+    t_err_after = None
+    r_err_before = None
+    r_err_after = None
+
+    if gt_poses is not None:
+        t_err_before = np.full(N, np.nan)
+        t_err_after = np.full(N, np.nan)
+        r_err_before = np.full(N, np.nan)
+        r_err_after = np.full(N, np.nan)
+
+        for i in recovery_frames:
+            if i >= len(gt_poses):
+                continue
+
+            gt = gt_poses[i]
+            if gt is None or np.allclose(gt, np.eye(4)):
+                continue
+
+            # Before dense recovery
+            pose_b = None
+            if dense_pose_before is not None:
+                if isinstance(dense_pose_before, (list, np.ndarray)) and i < len(
+                    dense_pose_before
+                ):
+                    pose_b = dense_pose_before[i]
+                    if isinstance(pose_b, np.ndarray) and pose_b.shape == (4, 4):
+                        rel_b = np.linalg.inv(gt) @ pose_b
+                        t_err_before[i] = np.linalg.norm(rel_b[:3, 3])
+                        r_mat_b = rel_b[:3, :3]
+                        r_b = R.from_matrix(r_mat_b)
+                        r_err_before[i] = np.linalg.norm(r_b.as_rotvec())
+
+            # After dense recovery
+            pose_a = None
+            if dense_pose_after is not None:
+                if isinstance(dense_pose_after, (list, np.ndarray)) and i < len(
+                    dense_pose_after
+                ):
+                    pose_a = dense_pose_after[i]
+                    if isinstance(pose_a, np.ndarray) and pose_a.shape == (4, 4):
+                        rel_a = np.linalg.inv(gt) @ pose_a
+                        t_err_after[i] = np.linalg.norm(rel_a[:3, 3])
+                        r_mat_a = rel_a[:3, :3]
+                        r_a = R.from_matrix(r_mat_a)
+                        r_err_after[i] = np.linalg.norm(r_a.as_rotvec())
+
+    # Create figure
+    fig, axes = plt.subplots(4, 1, figsize=(14, 12))
+
+    # Plot 1: Translation Error
+    ax_t = axes[0]
+    if t_err_before is not None and t_err_after is not None:
+        valid_mask = ~(
+            np.isnan(t_err_before[recovery_frames])
+            | np.isnan(t_err_after[recovery_frames])
+        )
+        valid_frames = recovery_frames[valid_mask]
+        if len(valid_frames) > 0:
+            x = np.arange(len(valid_frames))
+            ax_t.bar(
+                x - 0.2,
+                t_err_before[valid_frames],
+                0.4,
+                label="Before Dense Recovery",
+                color="tab:red",
+                alpha=0.7,
+            )
+            ax_t.bar(
+                x + 0.2,
+                t_err_after[valid_frames],
+                0.4,
+                label="After Dense Recovery",
+                color="tab:green",
+                alpha=0.7,
+            )
+            ax_t.set_ylabel("Translation Error (m)")
+            ax_t.set_title("Translation Error: Before vs. After Dense Recovery")
+            ax_t.set_xticks(x)
+            ax_t.set_xticklabels(valid_frames, rotation=45)
+            ax_t.legend()
+            ax_t.grid(True, linestyle="--", alpha=0.6)
+
+            # Print improvement stats
+            improvements = t_err_after[valid_frames] < t_err_before[valid_frames]
+            print(f"\n[Dense Recovery] Translation Error:")
+            print(
+                f"  Improved: {np.sum(improvements)}/{len(valid_frames)} ({100*np.sum(improvements)/len(valid_frames):.1f}%)"
+            )
+            if len(valid_frames) > 0:
+                print(f"  Mean before: {np.mean(t_err_before[valid_frames]):.4f} m")
+                print(f"  Mean after: {np.mean(t_err_after[valid_frames]):.4f} m")
+                print(
+                    f"  Mean improvement: {np.mean(t_err_before[valid_frames] - t_err_after[valid_frames]):.4f} m"
+                )
+        else:
+            ax_t.text(
+                0.5,
+                0.5,
+                "No valid GT data for dense recovery frames",
+                ha="center",
+                va="center",
+                transform=ax_t.transAxes,
+            )
+    else:
+        ax_t.text(
+            0.5,
+            0.5,
+            "No GT available for pose error computation",
+            ha="center",
+            va="center",
+            transform=ax_t.transAxes,
+        )
+    ax_t.grid(True, linestyle="--", alpha=0.6)
+
+    # Plot 2: Rotation Error
+    ax_r = axes[1]
+    if r_err_before is not None and r_err_after is not None:
+        valid_mask = ~(
+            np.isnan(r_err_before[recovery_frames])
+            | np.isnan(r_err_after[recovery_frames])
+        )
+        valid_frames = recovery_frames[valid_mask]
+        if len(valid_frames) > 0:
+            x = np.arange(len(valid_frames))
+            ax_r.bar(
+                x - 0.2,
+                np.degrees(r_err_before[valid_frames]),
+                0.4,
+                label="Before Dense Recovery",
+                color="tab:red",
+                alpha=0.7,
+            )
+            ax_r.bar(
+                x + 0.2,
+                np.degrees(r_err_after[valid_frames]),
+                0.4,
+                label="After Dense Recovery",
+                color="tab:green",
+                alpha=0.7,
+            )
+            ax_r.set_ylabel("Rotation Error (deg)")
+            ax_r.set_title("Rotation Error: Before vs. After Dense Recovery")
+            ax_r.set_xticks(x)
+            ax_r.set_xticklabels(valid_frames, rotation=45)
+            ax_r.legend()
+            ax_r.grid(True, linestyle="--", alpha=0.6)
+
+            # Print improvement stats
+            improvements = r_err_after[valid_frames] < r_err_before[valid_frames]
+            print(f"\n[Dense Recovery] Rotation Error:")
+            print(
+                f"  Improved: {np.sum(improvements)}/{len(valid_frames)} ({100*np.sum(improvements)/len(valid_frames):.1f}%)"
+            )
+            if len(valid_frames) > 0:
+                print(
+                    f"  Mean before: {np.mean(np.degrees(r_err_before[valid_frames])):.2f} deg"
+                )
+                print(
+                    f"  Mean after: {np.mean(np.degrees(r_err_after[valid_frames])):.2f} deg"
+                )
+                print(
+                    f"  Mean improvement: {np.mean(np.degrees(r_err_before[valid_frames] - r_err_after[valid_frames])):.2f} deg"
+                )
+        else:
+            ax_r.text(
+                0.5,
+                0.5,
+                "No valid GT data for dense recovery frames",
+                ha="center",
+                va="center",
+                transform=ax_r.transAxes,
+            )
+    else:
+        ax_r.text(
+            0.5,
+            0.5,
+            "No GT available for pose error computation",
+            ha="center",
+            va="center",
+            transform=ax_r.transAxes,
+        )
+    ax_r.grid(True, linestyle="--", alpha=0.6)
+
+    # Plot 3: Residual Comparison
+    ax_res = axes[2]
+    valid_mask = ~(
+        np.isnan(mean_res_before[recovery_frames])
+        | np.isnan(mean_res_after[recovery_frames])
+    )
+    valid_frames = recovery_frames[valid_mask]
+    if len(valid_frames) > 0:
+        x = np.arange(len(valid_frames))
+        ax_res.bar(
+            x - 0.2,
+            mean_res_before[valid_frames],
+            0.4,
+            label="Before Dense Recovery",
+            color="tab:red",
+            alpha=0.7,
+        )
+        ax_res.bar(
+            x + 0.2,
+            mean_res_after[valid_frames],
+            0.4,
+            label="After Dense Recovery",
+            color="tab:green",
+            alpha=0.7,
+        )
+        ax_res.set_ylabel("Mean Residual")
+        ax_res.set_title("Registration Residual: Before vs. After Dense Recovery")
+        ax_res.set_xticks(x)
+        ax_res.set_xticklabels(valid_frames, rotation=45)
+        ax_res.legend()
+        ax_res.grid(True, linestyle="--", alpha=0.6)
+
+        # Print improvement stats
+        improvements = mean_res_after[valid_frames] < mean_res_before[valid_frames]
+        print(f"\n[Dense Recovery] Residual:")
+        print(
+            f"  Improved: {np.sum(improvements)}/{len(valid_frames)} ({100*np.sum(improvements)/len(valid_frames):.1f}%)"
+        )
+        if len(valid_frames) > 0:
+            print(f"  Mean before: {np.mean(mean_res_before[valid_frames]):.6f}")
+            print(f"  Mean after: {np.mean(mean_res_after[valid_frames]):.6f}")
+            print(
+                f"  Mean improvement: {np.mean(mean_res_before[valid_frames] - mean_res_after[valid_frames]):.6f}"
+            )
+    else:
+        ax_res.text(
+            0.5,
+            0.5,
+            "No valid residual data for dense recovery frames",
+            ha="center",
+            va="center",
+            transform=ax_res.transAxes,
+        )
+    ax_res.grid(True, linestyle="--", alpha=0.6)
+
+    # Plot 4: Inlier Count Comparison
+    ax_inl = axes[3]
+    valid_mask = (inlier_count_before[recovery_frames] > 0) | (
+        inlier_count_after[recovery_frames] > 0
+    )
+    valid_frames = recovery_frames[valid_mask]
+    if len(valid_frames) > 0:
+        x = np.arange(len(valid_frames))
+        ax_inl.bar(
+            x - 0.2,
+            inlier_count_before[valid_frames],
+            0.4,
+            label="Before Dense Recovery",
+            color="tab:red",
+            alpha=0.7,
+        )
+        ax_inl.bar(
+            x + 0.2,
+            inlier_count_after[valid_frames],
+            0.4,
+            label="After Dense Recovery",
+            color="tab:green",
+            alpha=0.7,
+        )
+        ax_inl.set_ylabel("# Inliers")
+        ax_inl.set_xlabel("Frame Index")
+        ax_inl.set_title("Inlier Count: Before vs. After Dense Recovery")
+        ax_inl.set_xticks(x)
+        ax_inl.set_xticklabels(valid_frames, rotation=45)
+        ax_inl.legend()
+        ax_inl.grid(True, linestyle="--", alpha=0.6)
+
+        # Print improvement stats
+        improvements = (
+            inlier_count_after[valid_frames] > inlier_count_before[valid_frames]
+        )
+        print(f"\n[Dense Recovery] Inlier Count:")
+        print(
+            f"  Improved: {np.sum(improvements)}/{len(valid_frames)} ({100*np.sum(improvements)/len(valid_frames):.1f}%)"
+        )
+        if len(valid_frames) > 0:
+            print(f"  Mean before: {np.mean(inlier_count_before[valid_frames]):.1f}")
+            print(f"  Mean after: {np.mean(inlier_count_after[valid_frames]):.1f}")
+            print(
+                f"  Mean improvement: {np.mean(inlier_count_after[valid_frames] - inlier_count_before[valid_frames]):.1f}"
+            )
+    else:
+        ax_inl.text(
+            0.5,
+            0.5,
+            "No valid inlier data for dense recovery frames",
+            ha="center",
+            va="center",
+            transform=ax_inl.transAxes,
+        )
+    ax_inl.grid(True, linestyle="--", alpha=0.6)
+
+    plt.suptitle("Dense Recovery Analysis: Before vs. After", fontsize=16, y=0.995)
+    plt.tight_layout()
+
+    if save_prefix:
+        out_file = f"{save_prefix}_dense_recovery_analysis.png"
+        plt.savefig(out_file, dpi=180, bbox_inches="tight")
+        print(f"Saved dense recovery analysis plot to {out_file}")
+
+    plt.show()
+
+
 # ---------------------- Main ---------------------- #
 def main():
     parser = argparse.ArgumentParser(
@@ -980,6 +1973,22 @@ def main():
             kf_indices=kf_indices,
             save_prefix=args.save_prefix,
         )
+
+        # 4b. Slope and Threshold Analysis
+        print("\n" + "=" * 60)
+        print("Slope and Threshold Analysis")
+        print("=" * 60)
+        plot_slope_and_threshold_analysis(
+            mean_res,
+            inlier_counts,
+            kf_indices=kf_indices,
+            save_prefix=args.save_prefix,
+            reg_residual_thres=0.07,  # Default from front_end.py
+            residual_jump_threshold=0.02,  # Default from front_end.py
+            inlier_drop_ratio=0.5,  # Default from front_end.py
+            high_residual_threshold=0.01,  # Hard-coded in front_end.py
+            min_inlier_count=5,  # Hard-coded in front_end.py
+        )
     else:
         print(
             "Warning: 'reg_residuals' not found in logs (checked ragged & direct), skipping residual plot."
@@ -1035,6 +2044,18 @@ def main():
                 kf_indices,
                 args.save_prefix,
             )
+
+    # 6. Dense Recovery Analysis
+    print("\n" + "=" * 60)
+    print("Dense Recovery Analysis")
+    print("=" * 60)
+    plot_dense_recovery_analysis(
+        data,
+        pose_frontend,
+        pose_global,
+        gt_poses=gt_poses,
+        save_prefix=args.save_prefix,
+    )
 
 
 if __name__ == "__main__":
