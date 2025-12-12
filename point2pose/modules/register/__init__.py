@@ -4,3 +4,4 @@ from .svd_register_uncertainty_outlier import SVDUncertaintyOutlierRegister
 from .svd_register_irls_uncertainty import SVDUncertaintyIRLSRegister
 from .cupoch_icp_register import CupochICPRegister
 from .cupoch_gicp_register import CupochGICPRegister
+from .svd_ransac_register import SVDRansacRegister

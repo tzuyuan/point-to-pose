@@ -44,7 +44,7 @@ class FrontEnd:
 
         self.tracker = build_from_cfg(cfg.tracker, TRACKER)
         self.register = build_from_cfg(cfg.register, REGISTER)
-
+        print(f"[FrontEnd] Register: {self.register}")
         # -------------- registration params --------------
         self.reg_uncer_thres = self.cfg.register.params.get("uncer_thres", 0.3)
         self.reg_residual_thres = self.cfg.register.params.get("residual_thres", 0.0007)
@@ -95,7 +95,7 @@ class FrontEnd:
 
     def initialize(self, frame):
         """Initialize segmentation and tracker with the first frame."""
-        self.segmenter.initialize(frame.rgb)
+        self.segmenter.initialize(frame.rgb, mask=frame.mask)
 
         if self.use_segmenter:
             # get number of objects

@@ -85,7 +85,7 @@ class YcbineoatReader:
         return color
 
     def get_mask(self, i):
-        mask = cv2.imread(self.color_files[i].replace("rgb", "masks"), -1)
+        mask = cv2.imread(self.color_files[i].replace("rgb", "gt_mask"), -1)
         if len(mask.shape) == 3:
             mask = (mask.sum(axis=-1) > 0).astype(np.uint8)
         mask = cv2.resize(mask, (self.W, self.H), interpolation=cv2.INTER_NEAREST)

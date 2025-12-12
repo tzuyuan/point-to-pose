@@ -83,7 +83,7 @@ class LMGraphOptimizer(Optimizer):
                 gtsam.PriorFactorPose3(Xi, cur_pose_gtsam, self._prior_noise)
             )
             self._prev_rel_T = gtsam.Pose3(np.eye(4))
-        else:
+        elif data.rel_pose is not None:
             prev_id = self._prev_frame_id
             X_prev = gtsam.symbol("x", prev_id)
 

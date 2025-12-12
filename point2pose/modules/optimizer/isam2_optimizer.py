@@ -72,7 +72,7 @@ class ISAM2Optimizer(Optimizer):
                 gtsam.PriorFactorPose3(Xi, cur_pose_gtsam, self._prior_noise)
             )
             self._prev_rel_T = gtsam.Pose3(np.eye(4))
-        else:
+        elif data.rel_pose is not None:
             Xim1 = gtsam.symbol("x", self._prev_frame_id)
             # rel_T = gtsam.Pose3(self._prev_pose_inv @ cur_pose)
             rel_T = gtsam.Pose3(inverse_SE3(data.rel_pose))

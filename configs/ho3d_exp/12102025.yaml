@@ -32,7 +32,7 @@ pipeline:
     key_points_save_path: /home/justin/code/point-to-pose/debug/key_points
     save_meta_data: true
     meta_data_save_path: /home/justin/code/point-to-pose/debug/pipeline/meta_data
-    save_cropped_pcd: true
+    save_cropped_pcd: false
     cropped_pcd_dir: /home/justin/code/point-to-pose/debug/cropped_pcd
 
 

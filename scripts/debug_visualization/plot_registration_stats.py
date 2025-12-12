@@ -5,10 +5,24 @@ Similar to visualize_register_pcd.py in terms of data access.
 """
 
 import os
+import sys
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Optional, Tuple
+
+# Add project root to path for imports
+project_root = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+try:
+    from point2pose.io.sources.dataset.datareader import Ho3dReader, YcbineoatReader
+except ImportError:
+    Ho3dReader = None
+    YcbineoatReader = None
 
 
 def find_meata_data_path(
@@ -366,12 +380,24 @@ def load_registration_stats(
         )
 
         if residuals is None or len(residuals) == 0:
-            print("Could not extract reg_residuals")
-            return None
+            print("Warning: Could not extract reg_residuals (empty)")
+            if residuals is None:
+                residuals = np.array([])
+            # return None  # Don't return None, continue with empty residuals
 
         if inliers is None or len(inliers) == 0:
-            print("Could not extract reg_inliers, assuming all are inliers")
-            inliers = np.ones(len(residuals), dtype=bool)
+            # Determine expected length
+            expected_len = len(residuals)
+            if expected_len == 0:
+                if key_points is not None:
+                    expected_len = len(key_points)
+                elif curr3d is not None:
+                    expected_len = len(curr3d)
+
+            print(
+                f"Warning: Could not extract reg_inliers, assuming all {expected_len} points are inliers"
+            )
+            inliers = np.ones(expected_len, dtype=bool)
 
         # Extract uncertainties using reg_key_points_idx (following notebook pattern)
         uncertainties = None
@@ -481,20 +507,29 @@ def load_registration_stats(
 
         print("Loaded registration stats:")
         print(f"  - Number of points: {len(residuals)}")
-        print(
-            f"  - Inliers: {np.sum(inliers)} ({100*np.sum(inliers)/len(inliers):.1f}%)"
-        )
-        print(
-            f"  - Outliers: {np.sum(~inliers)} ({100*np.sum(~inliers)/len(inliers):.1f}%)"
-        )
+        if len(inliers) > 0:
+            print(
+                f"  - Inliers: {np.sum(inliers)} ({100*np.sum(inliers)/len(inliers):.1f}%)"
+            )
+            print(
+                f"  - Outliers: {np.sum(~inliers)} ({100*np.sum(~inliers)/len(inliers):.1f}%)"
+            )
+        else:
+            print("  - Inliers: 0")
         if uncertainties is not None:
             print(
                 f"  - Uncertainty range: [{uncertainties.min():.4f}, {uncertainties.max():.4f}]"
             )
-        print(f"  - Residual range: [{residuals.min():.4f}, {residuals.max():.4f}]")
-        print(f"  - Mean residual (inliers): {np.mean(residuals[inliers]):.4f}")
-        if np.sum(~inliers) > 0:
-            print(f"  - Mean residual (outliers): {np.mean(residuals[~inliers]):.4f}")
+        if len(residuals) > 0:
+            print(f"  - Residual range: [{residuals.min():.4f}, {residuals.max():.4f}]")
+            if np.sum(inliers) > 0:
+                print(f"  - Mean residual (inliers): {np.mean(residuals[inliers]):.4f}")
+            if np.sum(~inliers) > 0:
+                print(
+                    f"  - Mean residual (outliers): {np.mean(residuals[~inliers]):.4f}"
+                )
+        else:
+            print("  - Residual range: N/A (empty)")
 
         # Note: curr3d are already in the current frame coordinate system and should NOT be transformed.
         # For f2m: The registration transformation (obj_pose) transforms key_points from first frame to current frame.
@@ -1045,6 +1080,254 @@ def load_all_key_points_with_frame_ids(
         return None
 
 
+def load_gt_key_points(
+    register_folder: str,
+    object_number: int,
+    frame_number: int,
+    results_dir: Optional[str] = None,
+    video_name: Optional[str] = None,
+    ho3d_root: Optional[str] = None,
+) -> Optional[np.ndarray]:
+    """Load ground truth key points by transforming key point map using GT pose.
+
+    Args:
+        register_folder: Path to register folder
+        object_number: Object number (currently unused, kept for compatibility)
+        frame_number: Frame number to load GT key points for
+        results_dir: Results directory for new structure (optional)
+        video_name: Video sequence name for new structure (optional)
+        ho3d_root: HO3D dataset root directory (optional, will try to infer)
+
+    Returns:
+        GT key points in current frame coordinate system (N, 3) or None if not found
+    """
+    _ = object_number  # Currently unused, kept for compatibility
+
+    # Load key point map from meta_data.npz (stored in first frame coordinate system)
+    meta_data_path = find_meata_data_path(
+        register_folder,
+        meta_data_path_override=None,
+        results_dir=results_dir,
+        video_name=video_name,
+    )
+    if meta_data_path is None:
+        print("No meta_data.npz found for loading GT key points")
+        return None
+
+    try:
+        data = np.load(meta_data_path, allow_pickle=True)
+
+        # Get key point map (stored in first frame coordinate system)
+        obj_key_points_list = unpack_ragged("obj_key_points", data, dim=3)
+
+        # Find frame index for the CURRENT frame to get the full accumulated map
+        if "frame_id" not in data:
+            print("No frame_id field found in meta_data.npz")
+            return None
+
+        frame_ids = data["frame_id"]
+        current_frame_idx = None
+
+        for i, fid in enumerate(frame_ids):
+            if fid == frame_number:
+                current_frame_idx = i
+                break
+
+        if current_frame_idx is None:
+            print(
+                f"Frame {frame_number} not found in meta_data.npz, falling back to last frame"
+            )
+            current_frame_idx = len(frame_ids) - 1
+
+        if current_frame_idx >= len(obj_key_points_list):
+            print(f"Frame index {current_frame_idx} out of range for obj_key_points")
+            return None
+
+        key_point_map = obj_key_points_list[
+            current_frame_idx
+        ]  # Key points in first frame coords, but accumulated up to current frame
+
+        if len(key_point_map) == 0:
+            print("Key point map is empty")
+            return None
+
+        # Load GT pose for current frame using datareader
+        # Try to infer video directory from results_dir, ho3d_root, and video_name
+        video_dir = None
+        if results_dir and video_name:
+            video_dir = os.path.join(results_dir, video_name)
+            if not os.path.exists(video_dir):
+                video_dir = None
+
+        # If ho3d_root is provided, try ho3d_root/video_name
+        if video_dir is None and ho3d_root and video_name:
+            potential_video_dir = os.path.join(ho3d_root, video_name)
+            if os.path.exists(potential_video_dir):
+                video_dir = potential_video_dir
+
+        # If still not found and video_name is provided, try common locations
+        if video_dir is None and video_name:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(os.path.dirname(script_dir))
+            potential_paths = [
+                os.path.join(project_root, "data", "ho3d", video_name),
+                os.path.join(project_root, "data", video_name),
+                os.path.join(
+                    "/mnt",
+                    "9a72c439-d0a7-45e8-8d20-d7a235d02763",
+                    "DATASET",
+                    "HO3D",
+                    video_name,
+                ),
+            ]
+            # Also try with ho3d_root if provided
+            if ho3d_root:
+                potential_paths.insert(0, os.path.join(ho3d_root, video_name))
+
+            for path in potential_paths:
+                if os.path.exists(path):
+                    video_dir = path
+                    break
+
+        if video_dir is None or not os.path.exists(video_dir):
+            print(
+                f"Warning: Could not find video directory for {video_name}, cannot load GT pose"
+            )
+            if ho3d_root:
+                print(f"  Tried: {os.path.join(ho3d_root, video_name)}")
+            if results_dir:
+                print(f"  Tried: {os.path.join(results_dir, video_name)}")
+            return None
+
+        # Try to infer ho3d_root if not provided or if provided ho3d_root doesn't have models
+        # The ho3d_root should contain a "models" directory
+        actual_ho3d_root = ho3d_root
+        if ho3d_root is None or not os.path.exists(os.path.join(ho3d_root, "models")):
+            # Common HO3D root locations
+            potential_roots = []
+            if ho3d_root:
+                # If ho3d_root was provided but doesn't have models, try parent directory
+                potential_roots.append(os.path.dirname(ho3d_root))
+            if video_dir:
+                potential_roots.extend(
+                    [
+                        os.path.dirname(
+                            video_dir
+                        ),  # Video dir might be directly under ho3d_root
+                        os.path.join(os.path.dirname(video_dir), ".."),
+                    ]
+                )
+            potential_roots.extend(
+                [
+                    os.path.join(
+                        "/mnt",
+                        "9a72c439-d0a7-45e8-8d20-d7a235d02763",
+                        "DATASET",
+                        "HO3D",
+                    ),
+                ]
+            )
+            for root in potential_roots:
+                if (
+                    root
+                    and os.path.exists(root)
+                    and os.path.exists(os.path.join(root, "models"))
+                ):
+                    actual_ho3d_root = root
+                    break
+
+        # If we still don't have a valid ho3d_root, use the provided one anyway
+        if actual_ho3d_root is None:
+            actual_ho3d_root = ho3d_root
+
+        # Create datareader
+        reader = None
+        if actual_ho3d_root and os.path.exists(actual_ho3d_root) and video_dir:
+            try:
+                print(
+                    f"Creating Ho3dReader with video_dir={video_dir}, ho3d_root={actual_ho3d_root}"
+                )
+                reader = Ho3dReader(video_dir, actual_ho3d_root)
+            except Exception as e:
+                print(f"Warning: Could not create Ho3dReader: {e}")
+                import traceback
+
+                traceback.print_exc()
+
+        if reader is None:
+            print("Warning: Could not create datareader, cannot load GT pose")
+            return None
+
+        # Get GT pose for current frame
+        if frame_number >= len(reader):
+            print(
+                f"Frame {frame_number} out of range for datareader (length: {len(reader)})"
+            )
+            return None
+
+        gt_pose_current = reader.get_gt_pose(frame_number)
+        if gt_pose_current is None:
+            print(f"GT pose not available for frame {frame_number}")
+            return None
+
+        # Get GT pose for first frame (for reference)
+        # Note: We need the transform from first frame to current frame
+        # because the key_point_map is stored in the first frame's coordinate system.
+        # This is true even for accumulated maps - new points are transformed back to frame 0 before adding.
+
+        # Find index of frame 0 (or whatever the reference frame is)
+        # Assuming the map reference frame is the one at index 0 of the sequence
+        first_frame_idx = 0
+        gt_pose_first = reader.get_gt_pose(first_frame_idx)
+
+        if gt_pose_first is None:
+            # If first frame doesn't have GT (e.g. tracking started mid-sequence), try to find first valid GT
+            for i in range(len(reader)):
+                pose = reader.get_gt_pose(i)
+                if pose is not None:
+                    gt_pose_first = pose
+                    print(
+                        f"Using frame {i} as reference for GT pose (first frame was None)"
+                    )
+                    break
+
+            if gt_pose_first is None:
+                print(
+                    "GT pose not available for any frame, using current frame pose directly"
+                )
+                # Transform key points directly with current GT pose
+                # Assuming key points are in object frame, transform to camera frame
+                key_points_h = np.hstack(
+                    [key_point_map, np.ones((len(key_point_map), 1))]
+                )
+                gt_key_points = (gt_pose_current @ key_points_h.T).T[:, :3]
+                return gt_key_points
+
+        # Transform key points from first frame to current frame using GT poses
+        # Key points are in first frame coordinate system (reference frame)
+        # Transform: gt_pose_current @ inv(gt_pose_first) @ key_points
+        gt_pose_first_inv = np.linalg.inv(gt_pose_first)
+        transform = gt_pose_current @ gt_pose_first_inv
+
+        key_points_h = np.hstack([key_point_map, np.ones((len(key_point_map), 1))])
+        gt_key_points = (transform @ key_points_h.T).T[:, :3]
+
+        # Filter NaN points
+        if np.any(np.isnan(gt_key_points)):
+            valid_mask = ~np.isnan(gt_key_points).any(axis=1)
+            gt_key_points = gt_key_points[valid_mask]
+
+        print(f"Loaded {len(gt_key_points)} GT key points for frame {frame_number}")
+        return gt_key_points
+
+    except Exception as e:
+        print(f"Error loading GT key points: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return None
+
+
 def plot_3d_correspondences(
     register_folder: str,
     object_number: int,
@@ -1138,8 +1421,8 @@ def plot_3d_correspondences(
     # Draw correspondence lines
     # Note: key_points are already transformed in load_registration_stats,
     # and curr3d are in the current frame coordinate system (not transformed)
-    if len(key_points) == len(curr3d):
-        if inliers is not None:
+    if len(key_points) == len(curr3d) and len(key_points) > 0:
+        if inliers is not None and len(inliers) == len(key_points):
             # Draw lines for inliers (green) and outliers (red) separately
             for i in range(len(key_points)):
                 if inliers[i]:
@@ -1476,8 +1759,8 @@ def plot_3d_correspondences_uncertainty(
                 grey_labeled = True
 
     # Draw correspondence lines (same as original)
-    if len(key_points) == len(curr3d):
-        if inliers is not None:
+    if len(key_points) > 0 and len(key_points) == len(curr3d):
+        if inliers is not None and len(inliers) == len(key_points):
             for i in range(len(key_points)):
                 if inliers[i]:
                     ax.plot(
@@ -1998,14 +2281,36 @@ def plot_3d_registration_points_only(
         inliers = inliers[:min_len]
 
     # Draw correspondence lines
-    if inliers is not None:
-        inlier_mask = inliers
-        outlier_mask = ~inliers
+    if len(key_points) > 0 and len(key_points) == len(curr3d):
+        if inliers is not None and len(inliers) == len(key_points):
+            inlier_mask = inliers
+            outlier_mask = ~inliers
 
-        # Draw lines for inliers (green) and outliers (red) separately
-        for i in range(len(key_points)):
-            if inlier_mask[i]:
-                # Green line for inliers
+            # Draw lines for inliers (green) and outliers (red) separately
+            for i in range(len(key_points)):
+                if inlier_mask[i]:
+                    # Green line for inliers
+                    ax.plot(
+                        [key_points[i, 0], curr3d[i, 0]],
+                        [key_points[i, 1], curr3d[i, 1]],
+                        [key_points[i, 2], curr3d[i, 2]],
+                        "g-",
+                        alpha=0.6,
+                        linewidth=1.5,
+                    )
+                else:
+                    # Red line for outliers
+                    ax.plot(
+                        [key_points[i, 0], curr3d[i, 0]],
+                        [key_points[i, 1], curr3d[i, 1]],
+                        [key_points[i, 2], curr3d[i, 2]],
+                        "r-",
+                        alpha=0.6,
+                        linewidth=1.5,
+                    )
+        else:
+            # If no inliers info, draw all lines in green
+            for i in range(len(key_points)):
                 ax.plot(
                     [key_points[i, 0], curr3d[i, 0]],
                     [key_points[i, 1], curr3d[i, 1]],
@@ -2014,27 +2319,6 @@ def plot_3d_registration_points_only(
                     alpha=0.6,
                     linewidth=1.5,
                 )
-            else:
-                # Red line for outliers
-                ax.plot(
-                    [key_points[i, 0], curr3d[i, 0]],
-                    [key_points[i, 1], curr3d[i, 1]],
-                    [key_points[i, 2], curr3d[i, 2]],
-                    "r-",
-                    alpha=0.6,
-                    linewidth=1.5,
-                )
-    else:
-        # If no inliers info, draw all lines in green
-        for i in range(len(key_points)):
-            ax.plot(
-                [key_points[i, 0], curr3d[i, 0]],
-                [key_points[i, 1], curr3d[i, 1]],
-                [key_points[i, 2], curr3d[i, 2]],
-                "g-",
-                alpha=0.6,
-                linewidth=1.5,
-            )
 
     # Plot source points (key_points or prev3d)
     if inliers is not None:
@@ -2187,6 +2471,439 @@ def plot_3d_registration_points_only(
         pass
 
 
+def plot_3d_with_gt_key_points(
+    register_folder: str,
+    object_number: int,
+    frame_number: int,
+    key_points: np.ndarray,
+    curr3d: np.ndarray,
+    gt_key_points: np.ndarray,
+    inliers: Optional[np.ndarray],
+    output_path: Optional[str] = None,
+    mode: str = "f2m",
+):
+    """Create a 3D plot showing source points, target points, and GT key points.
+
+    Args:
+        register_folder: Path to register folder
+        object_number: Object number
+        frame_number: Frame number
+        key_points: Registration key points (N, 3) - for f2m mode, or prev3d (N, 3) for f2f mode
+        curr3d: Current 3D points (N, 3)
+        gt_key_points: Ground truth key points (M, 3)
+        inliers: Optional inlier mask (N,)
+        output_path: Optional path to save the figure
+        mode: Registration mode ("f2f" or "f2m")
+    """
+    fig = plt.figure(figsize=(15, 10))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # Load registered point cloud if available
+    pcd_points = load_point_cloud(register_folder, object_number, frame_number)
+    if pcd_points is not None:
+        ax.scatter(
+            pcd_points[:, 0],
+            pcd_points[:, 1],
+            pcd_points[:, 2],
+            c="lightgray",
+            alpha=0.2,
+            s=1,
+            label="Point Cloud (context)",
+        )
+
+    # Ensure arrays have the same length
+    min_len = min(len(key_points), len(curr3d))
+    key_points = key_points[:min_len]
+    curr3d = curr3d[:min_len]
+    if inliers is not None:
+        inliers = inliers[:min_len]
+
+    # Draw correspondence lines
+    if inliers is not None:
+        inlier_mask = inliers
+        outlier_mask = ~inliers
+
+        # Draw lines for inliers (green) and outliers (red) separately
+        for i in range(len(key_points)):
+            if inlier_mask[i]:
+                # Green line for inliers
+                ax.plot(
+                    [key_points[i, 0], curr3d[i, 0]],
+                    [key_points[i, 1], curr3d[i, 1]],
+                    [key_points[i, 2], curr3d[i, 2]],
+                    "g-",
+                    alpha=0.4,
+                    linewidth=1.5,
+                )
+            else:
+                # Red line for outliers
+                ax.plot(
+                    [key_points[i, 0], curr3d[i, 0]],
+                    [key_points[i, 1], curr3d[i, 1]],
+                    [key_points[i, 2], curr3d[i, 2]],
+                    "r-",
+                    alpha=0.4,
+                    linewidth=1.5,
+                )
+    else:
+        # If no inliers info, draw all lines in green
+        for i in range(len(key_points)):
+            ax.plot(
+                [key_points[i, 0], curr3d[i, 0]],
+                [key_points[i, 1], curr3d[i, 1]],
+                [key_points[i, 2], curr3d[i, 2]],
+                "g-",
+                alpha=0.4,
+                linewidth=1.5,
+            )
+
+    # Plot source points (key_points or prev3d)
+    if inliers is not None:
+        inlier_mask = inliers
+        outlier_mask = ~inliers
+
+        # Plot inliers for source points
+        if np.any(inlier_mask):
+            ax.scatter(
+                key_points[inlier_mask, 0],
+                key_points[inlier_mask, 1],
+                key_points[inlier_mask, 2],
+                c="green",
+                s=80,
+                marker="o",
+                edgecolors="black",
+                linewidths=1.0,
+                alpha=0.9,
+                label="Source (inliers)",
+            )
+
+        # Plot outliers for source points with different marker
+        if np.any(outlier_mask):
+            ax.scatter(
+                key_points[outlier_mask, 0],
+                key_points[outlier_mask, 1],
+                key_points[outlier_mask, 2],
+                c="red",
+                s=100,
+                marker="X",
+                edgecolors="black",
+                linewidths=1.2,
+                alpha=0.9,
+                label="Source (outliers)",
+            )
+    else:
+        # If no inliers info, plot all source points
+        ax.scatter(
+            key_points[:, 0],
+            key_points[:, 1],
+            key_points[:, 2],
+            c="blue",
+            s=80,
+            marker="o",
+            edgecolors="black",
+            linewidths=1.0,
+            alpha=0.9,
+            label="Source",
+        )
+
+    # Plot target points (curr3d)
+    if inliers is not None:
+        inlier_mask = inliers
+        outlier_mask = ~inliers
+
+        # Plot inliers for target points
+        if np.any(inlier_mask):
+            ax.scatter(
+                curr3d[inlier_mask, 0],
+                curr3d[inlier_mask, 1],
+                curr3d[inlier_mask, 2],
+                c="green",
+                s=80,
+                marker="^",
+                edgecolors="black",
+                linewidths=1.0,
+                alpha=0.9,
+                label="Target (inliers)",
+            )
+
+        # Plot outliers for target points with different marker
+        if np.any(outlier_mask):
+            ax.scatter(
+                curr3d[outlier_mask, 0],
+                curr3d[outlier_mask, 1],
+                curr3d[outlier_mask, 2],
+                c="red",
+                s=100,
+                marker="s",
+                edgecolors="black",
+                linewidths=1.2,
+                alpha=0.9,
+                label="Target (outliers)",
+            )
+    else:
+        # If no inliers info, plot all target points
+        ax.scatter(
+            curr3d[:, 0],
+            curr3d[:, 1],
+            curr3d[:, 2],
+            c="orange",
+            s=80,
+            marker="^",
+            edgecolors="black",
+            linewidths=1.0,
+            alpha=0.9,
+            label="Target",
+        )
+
+    # Plot GT key points
+    if gt_key_points is not None and len(gt_key_points) > 0:
+        ax.scatter(
+            gt_key_points[:, 0],
+            gt_key_points[:, 1],
+            gt_key_points[:, 2],
+            c="purple",
+            s=100,
+            marker="*",
+            edgecolors="black",
+            linewidths=1.0,
+            alpha=0.9,
+            label="GT Key Points",
+        )
+
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    source_label = "prev3d" if mode == "f2f" else "key_points"
+    num_inliers = np.sum(inliers) if inliers is not None else len(key_points)
+    num_outliers = np.sum(~inliers) if inliers is not None else 0
+    ax.set_title(
+        f"Registration with GT Key Points ({mode.upper()}) - Frame {frame_number}\n"
+        f"Source ({source_label}) ↔ Target (curr3d) | "
+        f"Inliers: {num_inliers}, Outliers: {num_outliers} | "
+        f"GT Key Points: {len(gt_key_points) if gt_key_points is not None else 0}"
+    )
+
+    ax.legend(loc="upper left", fontsize=10)
+
+    # Set equal aspect ratio
+    all_points = np.vstack([key_points, curr3d])
+    if gt_key_points is not None and len(gt_key_points) > 0:
+        all_points = np.vstack([all_points, gt_key_points])
+    if pcd_points is not None:
+        all_points = np.vstack([all_points, pcd_points])
+    if len(all_points) > 0:
+        # Calculate ranges for each axis
+        x_range = all_points[:, 0].max() - all_points[:, 0].min()
+        y_range = all_points[:, 1].max() - all_points[:, 1].min()
+        z_range = all_points[:, 2].max() - all_points[:, 2].min()
+        max_range = max(x_range, y_range, z_range) / 2.0
+
+        # Calculate midpoints
+        mid_x = (all_points[:, 0].max() + all_points[:, 0].min()) * 0.5
+        mid_y = (all_points[:, 1].max() + all_points[:, 1].min()) * 0.5
+        mid_z = (all_points[:, 2].max() + all_points[:, 2].min()) * 0.5
+
+        # Set equal limits for all axes
+        ax.set_xlim(mid_x - max_range, mid_x + max_range)
+        ax.set_ylim(mid_y - max_range, mid_y + max_range)
+        ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+        # Set equal aspect ratio using set_box_aspect (if available, matplotlib >= 3.3.0)
+        try:
+            ax.set_box_aspect([1, 1, 1])
+        except AttributeError:
+            # Fallback for older matplotlib versions - manually set aspect
+            # The equal limits above should help, but we can't guarantee perfect aspect
+            pass
+
+    plt.tight_layout()
+
+    if isinstance(output_path, str) and len(output_path) > 0:
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"Saved 3D plot with GT key points to: {output_path}")
+        plt.close()
+    else:
+        pass
+
+
+def plot_3d_key_points_vs_gt(
+    register_folder: str,
+    object_number: int,
+    frame_number: int,
+    key_points: np.ndarray,
+    gt_key_points: np.ndarray,
+    output_path: Optional[str] = None,
+    mode: str = "f2m",
+):
+    """Create a 3D plot showing only current key points vs GT key points.
+
+    Args:
+        register_folder: Path to register folder
+        object_number: Object number
+        frame_number: Frame number
+        key_points: Registration key points (N, 3) - for f2m mode, or prev3d (N, 3) for f2f mode
+        gt_key_points: Ground truth key points (M, 3)
+        output_path: Optional path to save the figure
+        mode: Registration mode ("f2f" or "f2m")
+    """
+    fig = plt.figure(figsize=(15, 10))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # Load registered point cloud if available (for context)
+    pcd_points = load_point_cloud(register_folder, object_number, frame_number)
+    if pcd_points is not None:
+        ax.scatter(
+            pcd_points[:, 0],
+            pcd_points[:, 1],
+            pcd_points[:, 2],
+            c="lightgray",
+            alpha=0.2,
+            s=1,
+            label="Point Cloud (context)",
+        )
+
+    # Plot current key points (source)
+    ax.scatter(
+        key_points[:, 0],
+        key_points[:, 1],
+        key_points[:, 2],
+        c="blue",
+        s=60,
+        marker="o",
+        edgecolors="black",
+        linewidths=0.5,
+        alpha=0.8,
+        label=f"Current Key Points ({'prev3d' if mode == 'f2f' else 'key_points'})",
+    )
+
+    # Plot GT key points
+    if gt_key_points is not None and len(gt_key_points) > 0:
+        ax.scatter(
+            gt_key_points[:, 0],
+            gt_key_points[:, 1],
+            gt_key_points[:, 2],
+            c="red",
+            s=80,
+            marker="*",
+            edgecolors="black",
+            linewidths=0.5,
+            alpha=0.8,
+            label="GT Key Points",
+        )
+
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+
+    ax.set_title(
+        f"Key Points vs GT ({mode.upper()}) - Frame {frame_number}\n"
+        f"Current: {len(key_points)} | GT: {len(gt_key_points) if gt_key_points is not None else 0}"
+    )
+
+    ax.legend(loc="upper left", fontsize=10)
+
+    # Set equal aspect ratio
+    all_points = key_points.copy()
+    if gt_key_points is not None and len(gt_key_points) > 0:
+        all_points = np.vstack([all_points, gt_key_points])
+    if pcd_points is not None:
+        all_points = np.vstack([all_points, pcd_points])
+
+    if len(all_points) > 0:
+        # Calculate ranges for each axis
+        x_range = all_points[:, 0].max() - all_points[:, 0].min()
+        y_range = all_points[:, 1].max() - all_points[:, 1].min()
+        z_range = all_points[:, 2].max() - all_points[:, 2].min()
+        max_range = max(x_range, y_range, z_range) / 2.0
+
+        # Calculate midpoints
+        mid_x = (all_points[:, 0].max() + all_points[:, 0].min()) * 0.5
+        mid_y = (all_points[:, 1].max() + all_points[:, 1].min()) * 0.5
+        mid_z = (all_points[:, 2].max() + all_points[:, 2].min()) * 0.5
+
+        # Set equal limits for all axes
+        ax.set_xlim(mid_x - max_range, mid_x + max_range)
+        ax.set_ylim(mid_y - max_range, mid_y + max_range)
+        ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+        # Set equal aspect ratio using set_box_aspect (if available, matplotlib >= 3.3.0)
+        try:
+            ax.set_box_aspect([1, 1, 1])
+        except AttributeError:
+            pass
+
+    plt.tight_layout()
+
+    if isinstance(output_path, str) and len(output_path) > 0:
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"Saved Key Points vs GT plot to: {output_path}")
+        plt.close()
+    else:
+        pass
+
+
+def extract_video_info_from_path(
+    register_folder: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Extract results_dir and video_name from register_folder path.
+
+    Assumes structure: results_dir/video_name/register or results_dir/video_name/...
+
+    Args:
+        register_folder: Path to register folder
+
+    Returns:
+        Tuple of (results_dir, video_name) if detected, (None, None) otherwise
+    """
+    register_folder = os.path.abspath(register_folder)
+    path_parts = register_folder.split(os.sep)
+
+    # Look for common patterns:
+    # 1. .../results/ho3d_single/MPM10/register -> results_dir=.../results/ho3d_single, video_name=MPM10
+    # 2. .../results/ho3d_single/MPM10/.../register -> same
+    # 3. .../results/.../video_name/register -> extract video_name and results_dir
+
+    # Try to find "results" in the path
+    results_idx = None
+    for i, part in enumerate(path_parts):
+        if part == "results":
+            results_idx = i
+            break
+
+    if results_idx is not None and results_idx + 2 < len(path_parts):
+        # Found results directory, check if next two levels exist
+        # results_dir should be up to results_idx+1, video_name at results_idx+2
+        potential_results_dir = os.sep.join(path_parts[: results_idx + 2])
+        potential_video_name = path_parts[results_idx + 2]
+
+        # Verify this structure makes sense (video_name directory exists)
+        potential_video_path = os.path.join(potential_results_dir, potential_video_name)
+        if os.path.exists(potential_video_path) and os.path.isdir(potential_video_path):
+            return potential_results_dir, potential_video_name
+
+    # Alternative: if register_folder is directly under a video_name directory
+    # e.g., /path/to/video_name/register
+    parent_dir = os.path.dirname(register_folder)
+    if parent_dir and parent_dir != register_folder:
+        parent_name = os.path.basename(parent_dir)
+        grandparent_dir = os.path.dirname(parent_dir)
+
+        # Check if parent looks like a video name (not a generic name like "register" or "debug")
+        generic_names = {"register", "debug", "results", "meta_data", "output"}
+        if parent_name not in generic_names and grandparent_dir:
+            # Check if grandparent contains "results"
+            if "results" in grandparent_dir:
+                # Try to find results directory
+                grandparent_parts = grandparent_dir.split(os.sep)
+                for i, part in enumerate(grandparent_parts):
+                    if part == "results" and i + 1 < len(grandparent_parts):
+                        results_dir = os.sep.join(grandparent_parts[: i + 2])
+                        if os.path.exists(results_dir):
+                            return results_dir, parent_name
+
+    return None, None
+
+
 def main(args):
     """Main function."""
     # Construct register folder path
@@ -2203,11 +2920,24 @@ def main(args):
         print(f"Error: Register folder {register_folder} does not exist")
         return
 
-    # Load registration statistics
+    # Auto-detect video sequence info from register_folder path if not provided
     mode = getattr(args, "mode", "auto")
     meta_data_path = getattr(args, "meta_data_path", None)
     results_dir = getattr(args, "results_dir", None)
     video_name = getattr(args, "video_name", None)
+    ho3d_root = getattr(args, "ho3d_root", None)
+
+    # If results_dir or video_name not provided, try to extract from register_folder path
+    if (results_dir is None or video_name is None) and register_folder:
+        detected_results_dir, detected_video_name = extract_video_info_from_path(
+            register_folder
+        )
+        if detected_results_dir and results_dir is None:
+            results_dir = detected_results_dir
+            print(f"Auto-detected results_dir from path: {results_dir}")
+        if detected_video_name and video_name is None:
+            video_name = detected_video_name
+            print(f"Auto-detected video_name from path: {video_name}")
     result = load_registration_stats(
         register_folder,
         args.object_number,
@@ -2271,23 +3001,30 @@ def main(args):
         plot_3d_uncertainty_output_path = f"{base_path}_3d_uncertainty.png"
         plot_3d_residuals_output_path = f"{base_path}_3d_residuals.png"
         plot_3d_points_only_output_path = f"{base_path}_3d_points_only.png"
+        plot_3d_gt_output_path = f"{base_path}_3d_gt.png"
+        plot_3d_kp_vs_gt_output_path = f"{base_path}_3d_kp_vs_gt.png"
     else:
         plot_3d_output_path = None
         plot_3d_uncertainty_output_path = None
         plot_3d_residuals_output_path = None
         plot_3d_points_only_output_path = None
+        plot_3d_gt_output_path = None
+        plot_3d_kp_vs_gt_output_path = None
 
     # Create statistics plot (don't show yet)
-    plot_registration_stats(
-        residuals,
-        inliers,
-        uncertainties,
-        keyframe_ids,
-        args.frame_number,
-        reg_key_points_idx=reg_key_points_idx,
-        output_path=stats_output_path,
-        mode=detected_mode,
-    )
+    if len(residuals) > 0:
+        plot_registration_stats(
+            residuals,
+            inliers,
+            uncertainties,
+            keyframe_ids,
+            args.frame_number,
+            reg_key_points_idx=reg_key_points_idx,
+            output_path=stats_output_path,
+            mode=detected_mode,
+        )
+    else:
+        print("Warning: Skipping registration stats plot due to empty residuals")
 
     # Load data for 3D visualization
     if key_points is not None and curr3d is not None:
@@ -2357,20 +3094,21 @@ def main(args):
             )
 
             # Create residual-colored 3D visualization
-            plot_3d_correspondences_residuals(
-                register_folder,
-                args.object_number,
-                args.frame_number,
-                key_points,
-                curr3d,
-                all_key_points,
-                all_key_point_frame_ids,
-                residuals,
-                inliers,
-                plot_3d_residuals_output_path,
-                mode=detected_mode,
-                reg_key_points_idx=reg_key_points_idx,
-            )
+            if len(residuals) > 0:
+                plot_3d_correspondences_residuals(
+                    register_folder,
+                    args.object_number,
+                    args.frame_number,
+                    key_points,
+                    curr3d,
+                    all_key_points,
+                    all_key_point_frame_ids,
+                    residuals,
+                    inliers,
+                    plot_3d_residuals_output_path,
+                    mode=detected_mode,
+                    reg_key_points_idx=reg_key_points_idx,
+                )
 
             # Create registration points only visualization
             plot_3d_registration_points_only(
@@ -2383,6 +3121,41 @@ def main(args):
                 plot_3d_points_only_output_path,
                 mode=detected_mode,
             )
+
+            # Load GT key points and create visualization
+            gt_key_points = load_gt_key_points(
+                register_folder,
+                args.object_number,
+                args.frame_number,
+                results_dir=results_dir,
+                video_name=video_name,
+                ho3d_root=ho3d_root,
+            )
+            if gt_key_points is not None and len(gt_key_points) > 0:
+                plot_3d_with_gt_key_points(
+                    register_folder,
+                    args.object_number,
+                    args.frame_number,
+                    key_points,
+                    curr3d,
+                    gt_key_points,
+                    inliers,
+                    plot_3d_gt_output_path,
+                    mode=detected_mode,
+                )
+
+                # Plot key points vs GT key points (new function)
+                plot_3d_key_points_vs_gt(
+                    register_folder,
+                    args.object_number,
+                    args.frame_number,
+                    key_points,
+                    gt_key_points,
+                    plot_3d_kp_vs_gt_output_path,
+                    mode=detected_mode,
+                )
+            else:
+                print("Warning: Could not load GT key points for visualization")
         else:
             print("Warning: Could not load all key points for 3D visualization")
     else:
@@ -2399,6 +3172,39 @@ def main(args):
                 plot_3d_points_only_output_path if output_path else None,
                 mode=detected_mode,
             )
+
+            # Try to load GT key points even if all_key_points failed
+            gt_key_points = load_gt_key_points(
+                register_folder,
+                args.object_number,
+                args.frame_number,
+                results_dir=results_dir,
+                video_name=video_name,
+                ho3d_root=ho3d_root,
+            )
+            if gt_key_points is not None and len(gt_key_points) > 0:
+                plot_3d_with_gt_key_points(
+                    register_folder,
+                    args.object_number,
+                    args.frame_number,
+                    key_points,
+                    curr3d,
+                    gt_key_points,
+                    inliers,
+                    plot_3d_gt_output_path if output_path else None,
+                    mode=detected_mode,
+                )
+
+                # Plot key points vs GT key points (new function)
+                plot_3d_key_points_vs_gt(
+                    register_folder,
+                    args.object_number,
+                    args.frame_number,
+                    key_points,
+                    gt_key_points,
+                    plot_3d_kp_vs_gt_output_path if output_path else None,
+                    mode=detected_mode,
+                )
 
     # Show all figures at once if not saving
     if not output_path:
@@ -2479,6 +3285,13 @@ if __name__ == "__main__":
         default="auto",
         choices=["auto", "f2f", "f2m"],
         help="Registration mode: 'auto' to auto-detect, 'f2f' for frame-to-frame, 'f2m' for frame-to-map (default: auto)",
+    )
+
+    parser.add_argument(
+        "--ho3d_root",
+        type=str,
+        default=None,
+        help="HO3D dataset root directory (optional, will try to infer from video path)",
     )
 
     parsed_args = parser.parse_args()

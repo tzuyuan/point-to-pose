@@ -49,15 +49,66 @@ class Sam2RealTimeSegmenter(Segmenter):
         self.input_points.extend(points)
         self.input_labels.extend(labels)
 
-    def initialize(self, image):
+    def initialize(self, image, mask=None):
         """
-        Initialize the segmenter with the provided points.
+        Initialize the segmenter with the provided points or mask.
         """
         self.predictor.load_first_frame(image)
 
-        # Add all points to predictor.
+        # Initialize from mask if provided
+        if mask is not None:
+            # Handle torch tensor
+
+            if hasattr(mask, "cpu"):
+                mask = mask.cpu().numpy()
+
+            # Handle dimensions (1, 1, H, W) or (1, H, W) -> (H, W)
+            if mask.ndim == 4:
+                mask = mask[0, 0]
+            elif mask.ndim == 3:
+                mask = mask[0]
+
+            mask = mask.astype(bool)
+
+            # sample a few points within the mask as the prompt points
+            y_indices, x_indices = np.where(mask > 0)
+            if len(y_indices) > 0:
+                num_points = 5
+                if len(y_indices) > num_points:
+                    indices = np.linspace(0, len(y_indices) - 1, num_points, dtype=int)
+                else:
+                    indices = np.arange(len(y_indices))
+
+                points = np.stack(
+                    [x_indices[indices], y_indices[indices]], axis=1
+                ).astype(np.float32)
+                labels = np.ones(len(points), dtype=np.int32)
+
+                self.predictor.add_new_prompt(
+                    frame_idx=0,
+                    obj_id=0,
+                    points=points,
+                    labels=labels,
+                )
+                print(
+                    f"[SAM2] Added object 0 from {len(points)} points sampled from mask."
+                )
+            else:
+                print("[SAM2] Mask provided but empty. No points sampled.")
+
+            self.num_obj = 1
+
+        # Add points to predictor if any exist
         # Return True if at least one object is added.
-        self.tracking_started = self._add_all_points_to_predictor()
+        if len(self.input_points) > 0:
+            self.tracking_started = self._add_all_points_to_predictor()
+        else:
+            self.tracking_started = self.num_obj > 0
+
+        if not self.tracking_started:
+            print(
+                "[SAM2] No objects added. Please call add_input_points() or provide a mask."
+            )
 
     def segment(self, image):
         """

@@ -6,14 +6,14 @@ pipeline:
     max_num_obj: 1
     estimate_init_pose: true
 
-    use_segmenter: false
+    use_segmenter: true
 
     # depth related
     fill_missing_depth: true
     fill_missing_depth_window_size: 3
     fill_missing_depth_min_neighbors: 1
     min_depth: 0.05
-    max_depth: 0.8
+    max_depth: 1.5
 
     use_depth_estimate: false
     depth_estimator_type: depth_anything

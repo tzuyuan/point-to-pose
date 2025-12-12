@@ -89,7 +89,16 @@ class ModularPipeline:
 
         # 2. Setup Objects based on segmentation
         if self.frontend.use_segmenter:
-            self.num_obj = np.sum(np.asarray(self.frontend.segmenter.input_labels) == 1)
+            # Prefer segmenter's object count if available (supports mask init), otherwise fall back to point labels
+            if (
+                hasattr(self.frontend.segmenter, "num_obj")
+                and self.frontend.segmenter.num_obj > 0
+            ):
+                self.num_obj = self.frontend.segmenter.num_obj
+            else:
+                self.num_obj = np.sum(
+                    np.asarray(self.frontend.segmenter.input_labels) == 1
+                )
 
         for obj_id in range(self.num_obj):
             self.objects.append(Object(obj_id))
