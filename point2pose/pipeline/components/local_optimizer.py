@@ -80,6 +80,5 @@ class LocalOptimizer:
         before = obj.pose.copy()
         obj.pose = opt_result.pose_optimized
 
-        # Optional debug: see if optimization is actually doing anything
         # delta = np.linalg.norm(before[:3, 3] - obj.pose[:3, 3])
         # print(f"[LocalOptimizer] obj {obj.id}, frame {opt_result.frame_id}, Δt = {delta:.4f} m")

@@ -79,6 +79,9 @@ class SVDRansacRegister(Register):
 
             T_h = self._svd_fit(p0[sample_idx], tgt_pcd[sample_idx])
 
+            if T_h is None:
+                continue
+
             p_h = transform_pts(T_h, p0)
             residuals = np.linalg.norm(p_h - tgt_pcd, axis=1)
             inliers = residuals <= self._inlier_thres
@@ -92,6 +95,10 @@ class SVDRansacRegister(Register):
         # if no hypothesis found, fallback
         if best_T is None:
             T = self._svd_fit(p0, tgt_pcd)
+
+            if T is None:
+                return None, {}
+
             p_T = transform_pts(T, p0)
             residuals = np.linalg.norm(p_T - tgt_pcd, axis=1)
             inliers = residuals <= self._inlier_thres
@@ -119,6 +126,9 @@ class SVDRansacRegister(Register):
                 break
 
             T = self._svd_fit(p0[inliers], tgt_pcd[inliers])
+
+            if T is None:
+                return None, {}
 
             p_T = transform_pts(T, p0)
             residuals = np.linalg.norm(p_T - tgt_pcd, axis=1)
@@ -163,7 +173,11 @@ class SVDRansacRegister(Register):
         Q = qa - cq
         H = P.T @ Q
 
-        U, _S, Vt = np.linalg.svd(H)
+        try:
+            U, _S, Vt = np.linalg.svd(H)
+        except Exception as e:
+            return None
+
         R = Vt.T @ U.T
         if np.linalg.det(R) < 0:
             Vt[-1, :] *= -1

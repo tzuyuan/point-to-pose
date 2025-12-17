@@ -139,6 +139,9 @@ class FrontEnd:
         tracks, uncertainties, visibles = self.tracker.track_once(frame)
         fe_timings["tracker"] = time.time() - t_start
 
+        if frame.id == 261:
+            print("tracks: ", tracks)
+
         ##########################################################
         ##              2D -> 3D conversion                     ##
         ##########################################################
@@ -183,6 +186,8 @@ class FrontEnd:
                 print(f"[FrontEnd] Object {obj_id} not initialized properly.")
                 continue
 
+            # skip frame to frame registration if the object is marked as lost
+            # (recovery manager should take care of this by performing frame to map registration)
             if obj.lost:
                 print(f"[FrontEnd] Object {obj_id} is lost, skip registration.")
                 continue
@@ -200,6 +205,7 @@ class FrontEnd:
             T_rel = None
             mean_res_f2f = -1.0
 
+            # solve frame to frame registration
             if prev3d.shape[0] >= 3 and curr3d.shape[0] >= 3:
                 t_start = time.time()
                 T_rel, stats_f2f = self.register.register(
@@ -245,6 +251,8 @@ class FrontEnd:
                         f"[FrontEnd] Frame {self.frame_id} - Object {obj_id} - "
                         f"Dense recovery triggered: {reason}"
                     )
+
+                    # perform dense recovery
                     t_start = time.time()
                     T_rel_dense, stats_dense_after = self._apply_dense_recovery(
                         obj_id, self.prev_frame, frame, T_rel
@@ -268,14 +276,13 @@ class FrontEnd:
 
             # Predict odom pose
             T_prev = obj.pose.copy()
-            pose_after_dense = None
             if T_rel_dense is not None:
                 T_odom = T_rel_dense @ T_prev
-                pose_after_dense = T_odom.copy()
                 print(
                     f"[FrontEnd] Frame {self.frame_id} - Object {obj_id} - "
                     "Dense recovery successful"
                 )
+            ## TODO: maybe more than simple residual threshold?
             elif T_rel is not None and 0 < mean_res_f2f < self.reg_residual_thres:
                 T_odom = T_rel @ T_prev
             else:

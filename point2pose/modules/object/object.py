@@ -12,6 +12,7 @@ class Object:
 
         # 3D points belonging to the object, represented in the first frame coordinate system
         self.key_points = np.empty((0, 3))  # Mx3
+        self.key_point_indices = np.empty((0,), dtype=int)  # M, global track IDs
         self.uncertainties = np.empty((0,))
         self.valid = np.empty((0,))  # M, bool
         self.num_keyframes = 0
@@ -45,6 +46,7 @@ class Object:
         new_key_points: np.ndarray,
         new_uncertainties: np.ndarray,
         new_valid: np.ndarray,
+        new_indices: np.ndarray = None,
         frame_id: int = None,
     ):
         """
@@ -53,6 +55,8 @@ class Object:
         Args:
             new_key_points (np.ndarray): New 3D points to add, shape (M, 3).
             new_uncertainties (np.ndarray): Uncertainties associated with the new points, shape (M,).
+            new_valid (np.ndarray): Valid mask for the new points, shape (M,).
+            new_indices (np.ndarray): Global track IDs for the new points, shape (M,).
             frame_id (int): Frame ID when these points were added. If None, uses -1.
         """
         assert new_key_points.shape[1] == 3, "new_key_points should have shape (M, 3)"
@@ -63,7 +67,12 @@ class Object:
         if frame_id is None:
             frame_id = -1
 
+        if new_indices is None:
+             # Default to -1 if not provided, though typically we want real IDs
+            new_indices = np.full(new_key_points.shape[0], -1, dtype=int)
+
         self.key_points = np.vstack((self.key_points, new_key_points))
+        self.key_point_indices = np.hstack((self.key_point_indices, new_indices))
         self.uncertainties = np.hstack((self.uncertainties, new_uncertainties))
         self.valid = np.hstack((self.valid, new_valid))
         self.key_point_frames = np.hstack(

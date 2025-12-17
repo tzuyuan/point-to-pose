@@ -122,6 +122,26 @@ def se3_to_xyz_quat(poses):
     return np.hstack([xyz, quats])
 
 
+def se3_to_xyz_rpy(poses):
+    """
+    Convert (N, 4, 4) poses to (N, 6) [x, y, z, roll, pitch, yaw]
+    Uses 'xyz' Euler angle convention (intrinsic rotations).
+    """
+    poses = np.asarray(poses)
+    N = poses.shape[0]
+    xyz = poses[:, :3, 3]
+
+    rpy = []
+    for i in range(N):
+        r = R.from_matrix(poses[i, :3, :3])
+        # Use 'xyz' convention (intrinsic rotations)
+        euler = r.as_euler('xyz', degrees=False)
+        rpy.append(euler)
+
+    rpy = np.array(rpy)
+    return np.hstack([xyz, rpy])
+
+
 def compute_relative_errors(pred_poses, gt_poses):
     """
     Compute per-frame translation and rotation errors.
@@ -1296,6 +1316,136 @@ def analyze_keyframe_improvement(
     )
 
 
+def plot_pose_components_vs_gt(
+    pose_frontend,
+    pose_local,
+    pose_global,
+    gt_poses,
+    kf_indices=None,
+    save_prefix=None,
+):
+    """
+    Plot x, y, z, roll, pitch, yaw components for frontend, local, and global
+    with respect to ground truth.
+    
+    Frontend and local are plotted as solid lines, global as dots.
+    Ground truth is plotted as solid reference lines.
+    
+    Args:
+        pose_frontend: (N, 4, 4) array of frontend poses
+        pose_local: (N, 4, 4) array of local optimization poses
+        pose_global: (N, 4, 4) array of global optimization poses
+        gt_poses: (N, 4, 4) array of ground truth poses
+        kf_indices: Optional array of keyframe indices to mark
+        save_prefix: Optional prefix for saving the plot
+    """
+    if gt_poses is None:
+        print("Warning: No GT poses available, skipping pose components plot.")
+        return
+    
+    # Convert all poses to xyz + rpy
+    fe_xyzrpy = se3_to_xyz_rpy(pose_frontend)
+    lo_xyzrpy = se3_to_xyz_rpy(pose_local)
+    gl_xyzrpy = se3_to_xyz_rpy(pose_global)
+    gt_xyzrpy = se3_to_xyz_rpy(gt_poses)
+    
+    # Align lengths
+    min_len = min(len(fe_xyzrpy), len(lo_xyzrpy), len(gl_xyzrpy), len(gt_xyzrpy))
+    fe_xyzrpy = fe_xyzrpy[:min_len]
+    lo_xyzrpy = lo_xyzrpy[:min_len]
+    gl_xyzrpy = gl_xyzrpy[:min_len]
+    gt_xyzrpy = gt_xyzrpy[:min_len]
+    
+    frames = np.arange(min_len)
+    
+    # Component names and labels
+    component_names = ['x', 'y', 'z', 'roll', 'pitch', 'yaw']
+    component_labels = ['x (m)', 'y (m)', 'z (m)', 'roll (rad)', 'pitch (rad)', 'yaw (rad)']
+    
+    # Create figure with 6 vertical subplots (6 rows, 1 column)
+    fig, axes = plt.subplots(6, 1, figsize=(14, 16), sharex=True)
+    
+    # Define better colors (avoid pure red and black)
+    color_gt = '#2C3E50'  # Dark slate gray
+    color_frontend = '#3498DB'  # Nice blue
+    color_local = '#27AE60'  # Nice green
+    color_global = '#E74C3C'  # Muted red/coral
+    
+    for i, (name, label) in enumerate(zip(component_names, component_labels)):
+        ax = axes[i]
+        
+        # Plot ground truth as solid reference line
+        ax.plot(
+            frames,
+            gt_xyzrpy[:, i],
+            label='GT',
+            color=color_gt,
+            linewidth=2.0,
+            linestyle='-',
+            alpha=0.8,
+        )
+        
+        # Plot frontend as solid line
+        ax.plot(
+            frames,
+            fe_xyzrpy[:, i],
+            label='Frontend',
+            color=color_frontend,
+            linewidth=1.8,
+            linestyle='-',
+            alpha=0.75,
+        )
+        
+        # Plot local optimization as solid line
+        ax.plot(
+            frames,
+            lo_xyzrpy[:, i],
+            label='Local',
+            color=color_local,
+            linewidth=1.8,
+            linestyle='-',
+            alpha=0.75,
+        )
+        
+        # Plot global optimization as dots
+        ax.scatter(
+            frames,
+            gl_xyzrpy[:, i],
+            label='Global',
+            color=color_global,
+            s=20,
+            alpha=0.85,
+            marker='o',
+            zorder=5,
+            edgecolors='white',
+            linewidths=0.5,
+        )
+        
+        # Mark keyframes if provided
+        if kf_indices is not None:
+            for k in kf_indices:
+                if 0 <= k < len(frames):
+                    ax.axvline(x=k, color='gray', alpha=0.2, linewidth=0.8, linestyle='-')
+        
+        ax.set_ylabel(label, fontsize=11)
+        ax.set_title(f'{name.upper()} Component', fontsize=12, pad=5)
+        ax.grid(True, linestyle='--', alpha=0.5)
+        ax.legend(loc='best', fontsize=9, framealpha=0.9)
+    
+    # Set x-label on bottom subplot only
+    axes[-1].set_xlabel('Frame', fontsize=11)
+    
+    plt.suptitle('Pose Components: Frontend, Local, Global vs. Ground Truth', fontsize=14, y=0.995)
+    plt.tight_layout()
+    
+    if save_prefix:
+        out_file = f"{save_prefix}_pose_components_vs_gt.png"
+        plt.savefig(out_file, dpi=180, bbox_inches='tight')
+        print(f"Saved pose components plot to {out_file}")
+    
+    plt.show()
+
+
 def filter_keyframes_with_gt(kf_indices, gt_poses):
     """
     Return only the subset of keyframe indices that have valid GT.
@@ -2023,7 +2173,20 @@ def main():
             save_prefix=args.save_prefix,
         )
 
-        # 5b. Optional global / per-frame plots
+        # 5b. Pose components vs GT
+        print("\n" + "=" * 60)
+        print("Pose Components vs Ground Truth")
+        print("=" * 60)
+        plot_pose_components_vs_gt(
+            pose_frontend,
+            pose_local,
+            pose_global,
+            gt_poses,
+            kf_indices=kf_indices,
+            save_prefix=args.save_prefix,
+        )
+
+        # 5c. Optional global / per-frame plots
         if args.plot_full_trajectory:
             plot_full_trajectory(
                 pose_frontend,

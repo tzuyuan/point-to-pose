@@ -78,6 +78,7 @@ class KeyFrameManager:
 
             # Assign keypoints to object
             obj.key_points = track_table.track_3d[obj_track_ids]
+            obj.key_point_indices = obj_track_ids
             obj.valid = track_table.valid[obj_track_ids]
             obj.key_point_frames = np.full(obj_track_ids.shape[0], 0, dtype=int)
 
@@ -197,6 +198,7 @@ class KeyFrameManager:
                 0.5
                 * np.ones(len(new_points_3d_obj), dtype=float),  # initial uncertainty
                 valid_new_points_3d,
+                new_indices,
                 front_end_result.frame_id,
             )
 

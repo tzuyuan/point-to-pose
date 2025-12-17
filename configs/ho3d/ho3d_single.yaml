@@ -21,7 +21,7 @@ pipeline:
     depth_encoder: vitl
 
 
-    use_dense_registration: true
+    use_dense_registration: false
     use_local_graph: true
 
     debug_level: 2
@@ -37,34 +37,35 @@ pipeline:
 
 
 
-# register:
-#   type: svd_residual_outlier
-#   params:
-#     remove_outside_mask: true
-#     debug_level: 0
-#     max_iter: 15
-#     uncer_thres: 0.3
-#     threshold_method: mad
-#     inlier_thres: 0.01
-#     thres_reduce_factor: 0.005
-#     mad_scale: 5
-#     min_inliers: 3
+register:
+  # svd_ransac, svd_residual_outlier, svd_uncertainty_outlier
+  type: svd_residual_outlier
+  params:
+    remove_outside_mask: true
+    debug_level: 0
+    max_iter: 15
+    uncer_thres: 0.3
+    threshold_method: mad
+    inlier_thres: 0.01
+    thres_reduce_factor: 0.005
+    mad_scale: 5
+    min_inliers: 3
 
+    # outlier pose
+    residual_thres: 0.07
+
+# register:
+#   type: svd_ransac
+#   params:
+#     sample_size: 5     
+#     max_trials: 300
+#     inlier_thres: 0.01
+#     min_inliers: 5
+#     refine_iters: 1
+#     min_triangle_area: 1e-6
+#     min_pca_ratio: 1e-3
 #     # outlier pose
 #     residual_thres: 0.001
-
-register:
-  type: svd_ransac
-  params:
-    sample_size: 5     
-    max_trials: 300
-    inlier_thres: 0.01
-    min_inliers: 5
-    refine_iters: 1
-    min_triangle_area: 1e-6
-    min_pca_ratio: 1e-3
-    # outlier pose
-    residual_thres: 0.001
 
 dense_register:
   type: cupoch_icp
@@ -111,14 +112,14 @@ tracker:
   #   resize_width: 640
   #   device: cuda
   #   window_len: 16
-  #   v2: False  # keep False unless you specifically use v2 weights
+  #   v2: False  
   #   checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
   #   debug: true
 
 sampler: 
   type: super_point
   params:
-    num_points: 20
+    num_points: 30
     density_per_kpx: -1
     fps_oversample_factor: 3
 
@@ -162,7 +163,7 @@ criterion:
     discretization_angle: 60
 
     # rotation threshold criterion
-    max_angle_deg: 10
+    max_angle_deg: 15
 
     # mask area criterion
     fit_mode: convex

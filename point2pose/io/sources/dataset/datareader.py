@@ -81,6 +81,9 @@ class YcbineoatReader:
 
     def get_color(self, i):
         color = imageio.imread(self.color_files[i])
+        if color.shape[-1] == 4:
+            color = color[..., :3]  # Drop alpha channel
+
         color = cv2.resize(color, (self.W, self.H), interpolation=cv2.INTER_NEAREST)
         return color
 

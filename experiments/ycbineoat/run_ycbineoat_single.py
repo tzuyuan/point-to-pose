@@ -160,12 +160,6 @@ def run_ycbineoat_single(
             timestamp=time.time(),
         )
 
-        # visualize color, depth, and mask
-        # cv2.imshow("color", frame.rgb)
-        # cv2.imshow("depth", frame.depth)
-        # cv2.imshow("mask", frame.mask)
-        # cv2.waitKey(0)
-
         # get out pose from the pipeline
         out_pose = pipeline.step(frame)
         out_poses.append(out_pose.reshape(4, 4))
@@ -309,7 +303,7 @@ if __name__ == "__main__":
         "--video_name",
         "-v",
         type=str,
-        default="bleach0",
+        default="tomato_soup_can_yalehand0",
         help="Name of the video folder (e.g. 0048 or bleach0)",
     )
     parser.add_argument(

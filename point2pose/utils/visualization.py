@@ -256,6 +256,27 @@ def visualize_and_save_tracking_results(
                     track_2d_points,
                     visible_color,
                 )
+        elif points_vis_method == "visible_valid":
+            for i, obj in enumerate(objects):
+                if i not in track_table.obj2track_map:
+                    continue
+
+                # Generate N by 3 array with (0,0,255) (Red) for each row
+                track_idx = track_table.obj2track_map[i]
+                track_2d_points = track_table.track_2d[track_idx]
+                N = len(track_2d_points)
+                colors = np.full((N, 3), (0, 0, 255), dtype=np.uint8)
+
+                # Set Green (0, 255, 0) for points that are both visible and valid
+                visible_mask = track_table.visible[track_idx]
+                valid_mask = track_table.valid[track_idx]
+                colors[visible_mask & valid_mask] = (0, 255, 0)
+
+                draw_points_on_image(
+                    display_frame,
+                    track_2d_points,
+                    colors,
+                )
         elif points_vis_method == "visible_uncertainty":
             # Plot only visible points, colored by their uncertainty colors
             for i, obj in enumerate(objects):

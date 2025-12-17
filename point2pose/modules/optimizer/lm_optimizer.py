@@ -13,7 +13,7 @@ from point2pose.utils.transform import transform_pts, inverse_SE3
 @OPTIMIZER.register_module("lm_graph")
 class LMGraphOptimizer(Optimizer):
     """
-    A generic graph-based optimizer using Levenberg–Marquardt.
+    A generic graph-based optimizer using Levenberg-Marquardt.
 
     This module maintains an internal GTSAM NonlinearFactorGraph and Values
     container. Each call to `optimize()` adds new variables and factors based on
@@ -44,6 +44,8 @@ class LMGraphOptimizer(Optimizer):
         self._lm_params.setMaxIterations(config.get("max_iterations", 20))
         self._lm_params.setRelativeErrorTol(config.get("relative_error_tol", 1e-5))
         self._lm_params.setAbsoluteErrorTol(config.get("absolute_error_tol", 1e-5))
+
+        self._lm_params.setVerbosityLM("SUMMARY")
 
         # Bookkeeping
         self._inserted_poses = set()
@@ -87,6 +89,8 @@ class LMGraphOptimizer(Optimizer):
             prev_id = self._prev_frame_id
             X_prev = gtsam.symbol("x", prev_id)
 
+            # relative pose is from previous frame to current frame
+            # we need to invert it to get the current frame to the previous frame
             rel_T = gtsam.Pose3(inverse_SE3(data.rel_pose))
 
             # Noise scaled by measurement residuals
@@ -97,9 +101,14 @@ class LMGraphOptimizer(Optimizer):
             )
             sigma_between = base_sigma * 10.0  # Relax odometry relative to features
 
+            # between_noise = gtsam.noiseModel.Diagonal.Sigmas(
+            #     np.array([sigma_between] * 6, dtype=float)
+            # )
+
             between_noise = gtsam.noiseModel.Diagonal.Sigmas(
-                np.array([sigma_between] * 6, dtype=float)
+                np.array([5, 5, 5, 0.5, 0.5, 0.5], dtype=float)
             )
+            # between_noise = gtsam.noiseModel.Isotropic.Sigma(6, 0.5)
 
             self._graph.push_back(
                 gtsam.BetweenFactorPose3(X_prev, Xi, rel_T, between_noise)
@@ -125,14 +134,16 @@ class LMGraphOptimizer(Optimizer):
                 if not data.inliers[m] or np.isnan(data.cur_3d[m]).any():
                     continue
 
-                z_cam = data.cur_3d[m]
+                z_cam = data.cur_3d[m].copy()
                 Lj = gtsam.symbol("l", int(lid))
 
                 sigma_point = float(max(1e-4, data.residuals[m]))
-                base_noise = gtsam.noiseModel.Isotropic.Sigma(3, sigma_point)
-                point_noise = gtsam.noiseModel.Robust(
-                    gtsam.noiseModel.mEstimator.Huber(1.345), base_noise
-                )
+                # base_noise = gtsam.noiseModel.Isotropic.Sigma(3, sigma_point)
+                # point_noise = gtsam.noiseModel.Robust(
+                #     gtsam.noiseModel.mEstimator.Huber(1.345), base_noise
+                # )
+
+                point_noise = gtsam.noiseModel.Isotropic.Sigma(3, 0.5)
 
                 # Create landmark if missing
                 if Lj not in self._inserted_landmarks:
@@ -177,7 +188,28 @@ class LMGraphOptimizer(Optimizer):
         pose_opt = inverse_SE3(Xi_hat.matrix())
 
         # Extract optimized landmarks
-        landmark_xyz = gtsam.utilities.extractPoint3(result)
+        # landmark_xyz = gtsam.utilities.extractPoint3(result)
+
+        num_L = len(self.inserted_landmark_ids)
+
+        landmark_xyz = np.empty((num_L, 3), dtype=float)
+        ids = np.empty((num_L,), dtype=np.int64)
+
+        k = 0
+        for lid in self.inserted_landmark_ids:
+            Lj = gtsam.symbol("l", int(lid))
+            if not result.exists(Lj):
+                continue
+
+            p = np.asarray(result.atPoint3(Lj), dtype=float).reshape(
+                3,
+            )  # (3,)
+            landmark_xyz[k, :] = p
+            ids[k] = int(lid)
+            k += 1
+
+        landmark_xyz = landmark_xyz[:k, :]
+        ids = ids[:k]  # keep as np array (or ids.tolist() if you prefer a list)
 
         print(
             f"[LMGraphOptimizer] Optimized frame {frame_id} for object {data.obj_id}, "
@@ -189,5 +221,5 @@ class LMGraphOptimizer(Optimizer):
             frame_id=frame_id,
             pose_optimized=pose_opt,
             key_points_optimized=landmark_xyz,
-            key_points_idx_optimized=self.inserted_landmark_ids,
+            key_points_idx_optimized=ids,
         )

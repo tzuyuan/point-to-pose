@@ -187,6 +187,7 @@ class Pipeline:
             self.objects[obj_id].key_points = self.track_table.track_3d[
                 self.track_table.obj2track_map[obj_id]
             ]
+            self.objects[obj_id].key_point_indices = self.track_table.obj2track_map[obj_id]
             self.objects[obj_id].valid = self.track_table.valid[
                 self.track_table.obj2track_map[obj_id]
             ]
@@ -679,6 +680,7 @@ class Pipeline:
                     new_points_3d_frame_0,
                     0.5 * np.ones(len(new_points_3d_frame_0), dtype=float),
                     valid_new_points_3d,
+                    new_indices,
                     self.frame_id,
                 )
 

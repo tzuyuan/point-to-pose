@@ -17,7 +17,7 @@ class KeyFrame:
     kf_idx: int  # index of the key frame in the key frame list for this object
     timestamp: Optional[float]
 
-    # Pose of the tracked object in this frame (4x4 SE(3), e.g., T_0c or T_wc depending on your convention)
+    # Pose of the tracked object in this frame (4x4 SE(3))
     pose: np.ndarray
 
     # Newly sampled keypoints associated with this key frame

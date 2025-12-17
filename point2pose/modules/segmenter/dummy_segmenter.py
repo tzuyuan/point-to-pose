@@ -7,7 +7,7 @@ class DummySegmenter(Segmenter):
     def __init__(self, config):
         super().__init__(config)
 
-    def initialize(self, frame):
+    def initialize(self, frame, mask=None):
         """Initialize the segmenter."""
         pass
 

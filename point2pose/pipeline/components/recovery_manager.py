@@ -269,6 +269,7 @@ class RecoveryManager:
         # So T aligns KeyFrame -> Current Frame
         try:
             T_rel, stats = register.register(prev3d, curr3d, sigma_tgt=sigma_tgt)
+            print(T_rel)
         except Exception as e:
             print(f"[RecoveryManager] Error in aligning frame to keyframe: {e}")
             return None, {}

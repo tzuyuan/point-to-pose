@@ -199,8 +199,9 @@ class ModularPipeline:
             "global_opt": 0.0,
             "logging": 0.0,
         }
-
-        # 1. Front End (Tracking + Registration)
+        #################################################################
+        ##                        Front End                            ##
+        #################################################################
         t0 = time.time()
         fe_result = self.frontend.step(frame, self.track_table, self.objects)
         module_times["frontend"] = time.time() - t0
@@ -213,7 +214,9 @@ class ModularPipeline:
         for obj_id in range(self.num_obj):
             pose_frontend[obj_id] = self.objects[obj_id].pose.copy()
 
-        # 2. Track Table Update
+        #################################################################
+        ##                     Track Table Update                      ##
+        #################################################################
         # FrontEndResult contains the data needed to update the table
         t0 = time.time()
         self.track_table.update_track_table(
@@ -225,7 +228,10 @@ class ModularPipeline:
         )
         module_times["track_table"] = time.time() - t0
 
-        # 2.5. Recovery (if lost)
+        #################################################################
+        ##                      Recovery Manager                       ##
+        #################################################################
+        # perform frame to map registration if the object is marked as lost
         t0 = time.time()
         self.recovery_manager.update(
             frame,
@@ -237,7 +243,10 @@ class ModularPipeline:
         )
         module_times["recovery"] = time.time() - t0
 
-        # 4. Local Optimization
+        #################################################################
+        ##                     Local Optimization                      ##
+        #################################################################
+        # perform graph optimization of frames between keyframes
         t0 = time.time()
         if self.use_local_graph:
             for obj_id in range(self.num_obj):
@@ -285,7 +294,10 @@ class ModularPipeline:
         for obj_id in range(self.num_obj):
             pose_local[obj_id] = self.objects[obj_id].pose.copy()
 
-        # 3. Key Frame Manager (Check & Sample)
+        #################################################################
+        ##                     Key Frame Manager                       ##
+        #################################################################
+        # check, initialize new keyframes, and sample new keypoints
         t0 = time.time()
         new_keyframes = self.kf_manager.update(
             frame, fe_result, self.track_table, self.objects, self.frontend.tracker
@@ -299,7 +311,10 @@ class ModularPipeline:
             )
             self.local_optimizer.reset(kf.obj_id)
 
-        # 5. Global Optimization
+        #################################################################
+        ##                     Global Optimization                     ##
+        #################################################################
+        # perform global optimization of key frames only
         t0 = time.time()
         if new_keyframes:
             updated_global_poses = self.kf_graph.update(new_keyframes)
@@ -309,14 +324,14 @@ class ModularPipeline:
                 if key in updated_global_poses:
                     global_pose = updated_global_poses[key]
 
-                    # Option A: hard snap object pose to global pose
-                    # self.objects[kf.obj_id].pose = global_pose
-
                     obj = self.objects[kf.obj_id]
                     obj.pose = global_pose
         module_times["global_opt"] = time.time() - t0
 
-        # 6. Logging
+        #################################################################
+        ##                         Logging                             ##
+        #################################################################
+        # log the results
         t0 = time.time()
         self._log_step(frame, fe_result, new_keyframes, pose_frontend, pose_local)
         module_times["logging"] = time.time() - t0

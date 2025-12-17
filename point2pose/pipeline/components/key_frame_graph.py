@@ -77,7 +77,11 @@ class KeyFrameGraph:
         opt = self._get_optimizer(obj_id)
         return opt.get_num_poses()
 
-    def update(self, keyframes: List[KeyFrame]) -> Dict[Tuple[int, int], np.ndarray]:
+    def update(
+        self, keyframes: List[KeyFrame]
+    ) -> Tuple[
+        Dict[Tuple[int, int], np.ndarray], Dict[int, Tuple[np.ndarray, np.ndarray]]
+    ]:
         """
         Add a batch of new keyframes to the global graph and run optimization.
 
@@ -85,13 +89,15 @@ class KeyFrameGraph:
             keyframes: list of newly created KeyFrame instances.
 
         Returns:
-            Dict mapping (obj_id, kf_idx) -> optimized 4x4 pose for those keyframes
-            (only for those where the underlying optimizer returned a non-None result).
+            Tuple of:
+            1. Dict mapping (obj_id, kf_idx) -> optimized 4x4 pose
+            2. Dict mapping obj_id -> (optimized_key_points, optimized_key_point_indices)
         """
         updated_poses: Dict[Tuple[int, int], np.ndarray] = {}
+        updated_landmarks: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
         if not keyframes:
-            return updated_poses
+            return updated_poses, updated_landmarks
 
         for kf in keyframes:
             obj_id = kf.obj_id
@@ -144,9 +150,6 @@ class KeyFrameGraph:
                         )
                     else:
                         uncertainties = 0.5 * np.ones((cur_3d.shape[0],), dtype=float)
-
-                    # In this design, "inliers" just means "we will create a factor"
-                    inliers = np.ones((cur_3d.shape[0],), dtype=bool)
             else:
                 # No observed points in this keyframe
                 cur_3d = np.zeros((0, 3), dtype=float)
@@ -186,8 +189,17 @@ class KeyFrameGraph:
                 kf.pose = opt_result.pose_optimized
                 updated_poses[(obj_id, kf_idx)] = opt_result.pose_optimized
 
+                if (
+                    opt_result.key_points_optimized is not None
+                    and opt_result.key_points_idx_optimized is not None
+                ):
+                    updated_landmarks[obj_id] = (
+                        opt_result.key_points_optimized,
+                        np.asarray(opt_result.key_points_idx_optimized, dtype=int),
+                    )
+
             # Update last keyframe bookkeeping for this object
             self._last_kf_pose[obj_id] = np.asarray(kf.pose, dtype=float)
             self._last_kf_idx[obj_id] = kf_idx
 
-        return updated_poses
+        return updated_poses, updated_landmarks

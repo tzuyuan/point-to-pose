@@ -116,7 +116,7 @@ tracker:
   #   debug: true
 
 sampler: 
-  type: super_point
+  type: super_point_fps
   params:
     num_points: 20
     density_per_kpx: -1
