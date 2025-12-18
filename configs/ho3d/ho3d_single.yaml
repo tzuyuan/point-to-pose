@@ -119,7 +119,7 @@ tracker:
 sampler: 
   type: super_point
   params:
-    num_points: 30
+    num_points: 20
     density_per_kpx: -1
     fps_oversample_factor: 3
 
@@ -163,7 +163,7 @@ criterion:
     discretization_angle: 60
 
     # rotation threshold criterion
-    max_angle_deg: 15
+    max_angle_deg: 10
 
     # mask area criterion
     fit_mode: convex

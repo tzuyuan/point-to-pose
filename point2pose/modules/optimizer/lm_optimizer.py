@@ -69,29 +69,29 @@ class LMGraphOptimizer(Optimizer):
         frame_id = data.frame_id
 
         # input pose is world_T_cam; optimization uses its inverse
-        cur_pose = inverse_SE3(data.pose)
-        cur_pose_gtsam = gtsam.Pose3(cur_pose)
+        cur_pose_c2w = inverse_SE3(data.pose)
+        cur_pose_c2w_gtsam = gtsam.Pose3(cur_pose_c2w)
 
         Xi = gtsam.symbol("x", frame_id)
 
         # Insert or update pose variable
         if Xi not in self._inserted_poses:
-            self._values.insert(Xi, cur_pose_gtsam)
+            self._values.insert(Xi, cur_pose_c2w_gtsam)
             self._inserted_poses.add(Xi)
 
         # Add prior on first pose or between factor afterward
         if not self._initialized:
             self._graph.push_back(
-                gtsam.PriorFactorPose3(Xi, cur_pose_gtsam, self._prior_noise)
+                gtsam.PriorFactorPose3(Xi, cur_pose_c2w_gtsam, self._prior_noise)
             )
-            self._prev_rel_T = gtsam.Pose3(np.eye(4))
+            # self._prev_rel_T = gtsam.Pose3(np.eye(4))
         elif data.rel_pose is not None:
             prev_id = self._prev_frame_id
             X_prev = gtsam.symbol("x", prev_id)
 
             # relative pose is from previous frame to current frame
             # we need to invert it to get the current frame to the previous frame
-            rel_T = gtsam.Pose3(inverse_SE3(data.rel_pose))
+            rel_T_cim12ci = gtsam.Pose3(inverse_SE3(data.rel_pose))
 
             # Noise scaled by measurement residuals
             base_sigma = (
@@ -110,11 +110,11 @@ class LMGraphOptimizer(Optimizer):
             )
             # between_noise = gtsam.noiseModel.Isotropic.Sigma(6, 0.5)
 
-            self._graph.push_back(
-                gtsam.BetweenFactorPose3(X_prev, Xi, rel_T, between_noise)
-            )
+            # self._graph.push_back(
+            #     gtsam.BetweenFactorPose3(X_prev, Xi, rel_T_cim12ci, between_noise)
+            # )
 
-            self._prev_rel_T = rel_T
+            # self._prev_rel_T = rel_T_cim12ci
 
         self._prev_pose_inv = data.pose
         self._prev_frame_id = frame_id
@@ -126,24 +126,24 @@ class LMGraphOptimizer(Optimizer):
                 try:
                     seed_pose = self._values.atPose3(Xi)
                 except RuntimeError:
-                    seed_pose = cur_pose_gtsam
+                    seed_pose = cur_pose_c2w_gtsam
             else:
-                seed_pose = cur_pose_gtsam
+                seed_pose = cur_pose_c2w_gtsam
 
             for m, lid in enumerate(data.cur_3d_idx):
                 if not data.inliers[m] or np.isnan(data.cur_3d[m]).any():
                     continue
 
-                z_cam = data.cur_3d[m].copy()
+                z_cam = data.cur_3d[m]
                 Lj = gtsam.symbol("l", int(lid))
 
-                sigma_point = float(max(1e-4, data.residuals[m]))
-                # base_noise = gtsam.noiseModel.Isotropic.Sigma(3, sigma_point)
-                # point_noise = gtsam.noiseModel.Robust(
-                #     gtsam.noiseModel.mEstimator.Huber(1.345), base_noise
-                # )
+                sigma_point = float(max(1e-4, data.residuals[m])) * 100.0
+                base_noise = gtsam.noiseModel.Isotropic.Sigma(3, sigma_point)
+                point_noise = gtsam.noiseModel.Robust(
+                    gtsam.noiseModel.mEstimator.Huber(1.345), base_noise
+                )
 
-                point_noise = gtsam.noiseModel.Isotropic.Sigma(3, 0.5)
+                # point_noise = gtsam.noiseModel.Isotropic.Sigma(3, 0.5)
 
                 # Create landmark if missing
                 if Lj not in self._inserted_landmarks:
@@ -187,11 +187,10 @@ class LMGraphOptimizer(Optimizer):
 
         pose_opt = inverse_SE3(Xi_hat.matrix())
 
-        # Extract optimized landmarks
+        ### Extract optimized landmarks
         # landmark_xyz = gtsam.utilities.extractPoint3(result)
 
         num_L = len(self.inserted_landmark_ids)
-
         landmark_xyz = np.empty((num_L, 3), dtype=float)
         ids = np.empty((num_L,), dtype=np.int64)
 
