@@ -52,15 +52,6 @@ class FrontEnd:
             "remove_outside_mask", False
         )
 
-        # -------------- registration mode --------------
-        # "f2f" for frame-to-frame (relative pose), "f2m" for frame-to-map (absolute pose)
-        self.frame_reg_mode = self.pipeline_cfg.get("frame_reg_mode", "f2f")
-        if self.frame_reg_mode not in ["f2f", "f2m"]:
-            raise ValueError(
-                f"Invalid frame_reg_mode: {self.frame_reg_mode}. Must be 'f2f' or 'f2m'"
-            )
-        print(f"[FrontEnd] Registration mode: {self.frame_reg_mode}")
-
         # dense registration for recovering from bad registration
         self.use_dense_registration = self.pipeline_cfg.get(
             "use_dense_registration", False
@@ -148,8 +139,8 @@ class FrontEnd:
         tracks, uncertainties, visibles = self.tracker.track_once(frame)
         fe_timings["tracker"] = time.time() - t_start
 
-        # if frame.id == 261:
-        #     print("tracks: ", tracks)
+        if frame.id == 261:
+            print("tracks: ", tracks)
 
         ##########################################################
         ##              2D -> 3D conversion                     ##
@@ -195,91 +186,34 @@ class FrontEnd:
                 print(f"[FrontEnd] Object {obj_id} not initialized properly.")
                 continue
 
-            # skip registration if the object is marked as lost
+            # skip frame to frame registration if the object is marked as lost
             # (recovery manager should take care of this by performing frame to map registration)
+            if obj.lost:
+                print(f"[FrontEnd] Object {obj_id} is lost, skip registration.")
+                continue
 
             # ----------- Registration Logic -----------
-            stats_reg = {
-                "num_inliers": 0,
-            }
+            t_start = time.time()
+            idx_f2f, prev3d, curr3d, valid_stats = (
+                self._extract_valid_idx_points_for_obj(
+                    obj_id, track_table, track_3d, track_valid, current_visibles
+                )
+            )
+            fe_timings["extract_valid"] += time.time() - t_start
+
+            stats_f2f = {}
             T_rel = None
-            T_c2w_est = None
-            mean_res = -1.0
-            idx = np.array([], dtype=int)
-            key_points = np.empty((0, 3))
-            prev3d = np.empty((0, 3))
-            correspond_curr3d = np.empty((0, 3))
-            valid_stats = {}
+            mean_res_f2f = -1.0
 
-            if self.frame_reg_mode == "f2f":
-                # Frame-to-frame registration (relative pose)
+            # solve frame to frame registration
+            if prev3d.shape[0] >= 3 and curr3d.shape[0] >= 3:
                 t_start = time.time()
-                if obj.lost:
-                    print(f"[FrontEnd] Object {obj_id} is lost, skip f2f registration.")
-                    continue
-
-                idx, prev3d, correspond_curr3d, valid_stats = (
-                    self._extract_valid_idx_points_for_obj(
-                        obj_id, track_table, track_3d, track_valid, current_visibles
-                    )
+                T_rel, stats_f2f = self.register.register(
+                    prev3d, curr3d, sigma_tgt=uncertainties[idx_f2f]
                 )
-                fe_timings["extract_valid"] += time.time() - t_start
+                fe_timings["registration"] += time.time() - t_start
 
-                # solve frame to frame registration
-                if prev3d.shape[0] >= 3 and correspond_curr3d.shape[0] >= 3:
-                    t_start = time.time()
-                    T_rel, stats_reg = self.register.register(
-                        prev3d, correspond_curr3d, sigma_tgt=uncertainties[idx]
-                    )
-                    fe_timings["registration"] += time.time() - t_start
-                    mean_res = self._compute_mean_residual(stats_reg)
-
-                stats_reg["correspond_curr3d"] = correspond_curr3d
-                stats_reg["valid_idx"] = idx
-
-            elif self.frame_reg_mode == "f2m":
-                # Frame-to-map registration (absolute pose)
-                t_start = time.time()
-                # idx, key_points, correspond_curr3d, valid_stats = self._extract_valid_key_points(
-                #     obj,
-                #     track_table.obj2track_map[obj_id],
-                #     track_3d,
-                #     current_visibles,
-                #     track_valid,
-                #     uncertainties,
-                #     uncertainty_thres=self.reg_uncer_thres,
-                # )
-
-                idx, key_points, correspond_curr3d, cur_visible, valid_stats = (
-                    self._extract_valid_key_points_mask_remove(
-                        obj,
-                        track_table.obj2track_map[obj_id],
-                        tracks,
-                        track_3d,
-                        current_visibles,
-                        track_valid,
-                        uncertainties,
-                        frame.mask[obj_id, 0],
-                        uncertainty_thres=self.reg_uncer_thres,
-                    )
-                )
-                fe_timings["extract_valid"] += time.time() - t_start
-
-                # solve frame to map registration
-                if key_points.shape[0] >= 3 and correspond_curr3d.shape[0] >= 3:
-                    # TODO: is this correct?
-                    prev_pose = obj.pose.copy()
-
-                    print(f"prev_pose: {prev_pose}")
-                    t_start = time.time()
-                    T_c2w_est, stats_reg = self.register.register(
-                        key_points, correspond_curr3d, init_pose=prev_pose
-                    )
-                    fe_timings["registration"] += time.time() - t_start
-                    mean_res = self._compute_mean_residual(stats_reg)
-
-                stats_reg["correspond_curr3d"] = correspond_curr3d
-                stats_reg["valid_idx"] = idx
+                mean_res_f2f = self._compute_mean_residual(stats_f2f)
 
             T_rel_dense = None
             # Store before dense recovery info
@@ -291,15 +225,15 @@ class FrontEnd:
             result.dense_recovery_triggered[obj_id] = False
 
             # Check for sudden jump/drop and apply dense registration if needed
-            # Note: Dense recovery currently only works with f2f mode
             if (
                 self.use_dense_registration
                 and self.dense_register is not None
                 and self.prev_frame is not None
-                and self.frame_reg_mode == "f2f"
+                # and T_rel is not None
+                # and mean_res_f2f >= 0
             ):
                 should_recover, reason = self._check_registration_quality(
-                    obj_id, mean_res, stats_reg
+                    obj_id, mean_res_f2f, stats_f2f
                 )
 
                 # if frame.id > 940 and frame.id < 1000:
@@ -311,7 +245,7 @@ class FrontEnd:
                     # Capture state before dense recovery
                     pose_before_dense = obj.pose.copy()
                     rel_before_dense = T_rel.copy() if T_rel is not None else np.eye(4)
-                    stats_before_dense = stats_reg.copy() if stats_reg else {}
+                    stats_before_dense = stats_f2f.copy() if stats_f2f else {}
 
                     print(
                         f"[FrontEnd] Frame {self.frame_id} - Object {obj_id} - "
@@ -343,27 +277,14 @@ class FrontEnd:
             # Predict odom pose
             T_prev = obj.pose.copy()
             if T_rel_dense is not None:
-                # Dense recovery (only for f2f mode)
                 T_odom = T_rel_dense @ T_prev
                 print(
                     f"[FrontEnd] Frame {self.frame_id} - Object {obj_id} - "
                     "Dense recovery successful"
                 )
-            elif self.frame_reg_mode == "f2f":
-                # Frame-to-frame: compose relative pose
-                if T_rel is not None and 0 < mean_res < self.reg_residual_thres:
-                    T_odom = T_rel @ T_prev
-                else:
-                    T_odom = T_prev
-                    obj.lost = True
-            elif self.frame_reg_mode == "f2m":
-                T_odom = T_c2w_est
-                # Frame-to-map: use absolute pose directly
-                # if T_c2w_est is not None and 0 < mean_res < self.reg_residual_thres:
-                #     T_odom = T_c2w_est
-                # else:
-                #     T_odom = T_prev
-                #     obj.lost = True
+            ## TODO: maybe more than simple residual threshold?
+            elif T_rel is not None and 0 < mean_res_f2f < self.reg_residual_thres:
+                T_odom = T_rel @ T_prev
             else:
                 T_odom = T_prev
                 obj.lost = True
@@ -373,63 +294,43 @@ class FrontEnd:
                 result.dense_recovery_pose_after[obj_id] = T_odom.copy()
 
             # update results for the object
-            # For f2f: rel_pose is T_rel, key_points is prev3d
-            # For f2m: rel_pose is None (absolute pose), key_points is key_points
-            rel_pose_for_result = T_rel if self.frame_reg_mode == "f2f" else None
-            key_points_for_result = (
-                prev3d if self.frame_reg_mode == "f2f" else key_points
-            )
-
             self._update_results(
                 result,
                 obj_id,
                 T_odom,
-                rel_pose_for_result,
-                idx,
-                key_points_for_result,
-                correspond_curr3d,
-                mean_res,
-                stats_reg,
+                T_rel,
+                idx_f2f,
+                prev3d,
+                curr3d,
+                mean_res_f2f,
+                stats_f2f,
                 valid_stats,
             )
 
             # debug save
             if self.debug_level > 1:
-                if self.frame_reg_mode == "f2f":
-                    save_reg_pcd(
-                        prev3d,
-                        correspond_curr3d,
-                        T_rel if T_rel is not None else np.eye(4),
-                        self._reg_debug_dir,
-                        f"obj_{obj_id}_frame_{self.frame_id}_f2f",
-                        stats_reg,
-                    )
-                elif self.frame_reg_mode == "f2m":
-                    save_reg_pcd(
-                        key_points,
-                        correspond_curr3d,
-                        T_c2w_est if T_c2w_est is not None else np.eye(4),
-                        self._reg_debug_dir,
-                        f"obj_{obj_id}_frame_{self.frame_id}_f2m",
-                        stats_reg,
-                    )
+                save_reg_pcd(
+                    prev3d,
+                    curr3d,
+                    T_rel if T_rel is not None else np.eye(4),
+                    self._reg_debug_dir,
+                    f"obj_{obj_id}_frame_{self.frame_id}_f2f",
+                    stats_f2f,
+                )
 
             print(
                 f"[FrontEnd] Frame {self.frame_id} - Object {obj_id} - Odom: \n{T_odom}"
             )
 
             # Update previous stats for next frame
-            if mean_res >= 0:
-                self.prev_residuals[obj_id] = mean_res
-                inliers = stats_reg.get("inliers", np.array([]))
+            if mean_res_f2f >= 0:
+                self.prev_residuals[obj_id] = mean_res_f2f
+                inliers = stats_f2f.get("inliers", np.array([]))
                 if len(inliers) > 0:
                     self.prev_inlier_counts[obj_id] = int(np.sum(inliers))
                 else:
                     # If no inliers array, use number of points as fallback
-                    if self.frame_reg_mode == "f2f":
-                        self.prev_inlier_counts[obj_id] = prev3d.shape[0]
-                    elif self.frame_reg_mode == "f2m":
-                        self.prev_inlier_counts[obj_id] = key_points.shape[0]
+                    self.prev_inlier_counts[obj_id] = prev3d.shape[0]
 
         # Optionally save cropped pcd
         if self.save_cropped_pcd:
@@ -461,7 +362,7 @@ class FrontEnd:
         rel_pose: np.ndarray,
         idx: np.ndarray,
         key_points: np.ndarray,
-        correspond_curr3d: np.ndarray,
+        curr3d: np.ndarray,
         mean_res: float,
         stats: dict,
         valid_stats: dict,
@@ -470,7 +371,7 @@ class FrontEnd:
         result.rel_poses[obj_id] = rel_pose
         result.valid_indices[obj_id] = idx
         result.valid_key_points[obj_id] = key_points
-        result.valid_curr_3d[obj_id] = correspond_curr3d
+        result.valid_curr_3d[obj_id] = curr3d
         result.reg_stats[obj_id] = stats
         result.mean_residuals[obj_id] = mean_res
         result.valid_stats[obj_id] = valid_stats
@@ -531,7 +432,7 @@ class FrontEnd:
         Returns:
             idx:     (M,) int indices where correspondence holds and both frames say valid&visible
             prev3d:  (M,3) 3D points from previous frame
-            correspond_curr3d:  (M,3) 3D points from current frame
+            curr3d:  (M,3) 3D points from current frame
             valid_stats: dict with extra masks for debugging
         """
         obj_idx = track_table.obj2track_map[obj_id]
@@ -555,7 +456,7 @@ class FrontEnd:
 
         idx = common_idx[both_mask]
         prev3d = track_table.track_3d[idx].copy()
-        correspond_curr3d = curr_pts_3d[idx].copy()
+        curr3d = curr_pts_3d[idx].copy()
 
         valid_stats = {
             "extract_vis_obj_mask": curr_vis_arr[common_idx],
@@ -570,7 +471,7 @@ class FrontEnd:
             "extract_finite_xy": np.empty(0),
         }
 
-        return idx, prev3d, correspond_curr3d, valid_stats
+        return idx, prev3d, curr3d, valid_stats
 
     def _extract_valid_key_points(
         self,
@@ -594,7 +495,7 @@ class FrontEnd:
 
         idx = obj_idx[both_mask]
         key_points = obj.key_points[both_mask].copy()
-        correspond_curr3d = cur_pts_3d[idx].copy()
+        curr3d = cur_pts_3d[idx].copy()
 
         valid_stats = {
             "extract_vis_obj_mask": vis_obj,
@@ -607,7 +508,7 @@ class FrontEnd:
             "extract_finite_xy": np.empty(0),
         }
 
-        return idx, key_points, correspond_curr3d, valid_stats
+        return idx, key_points, curr3d, valid_stats
 
     def _extract_valid_key_points_mask_remove(
         self,
@@ -670,7 +571,7 @@ class FrontEnd:
 
         idx = obj_idx[both_mask]
         key_points = obj.key_points[both_mask].copy()
-        correspond_curr3d = cur_pts_3d[idx].copy()
+        curr3d = cur_pts_3d[idx].copy()
 
         valid_stats = {
             "extract_vis_obj_mask": vis_obj,
@@ -683,7 +584,7 @@ class FrontEnd:
             "extract_finite_xy": finite_xy,
         }
 
-        return idx, key_points, correspond_curr3d, cur_visible, valid_stats
+        return idx, key_points, curr3d, cur_visible, valid_stats
 
     def _check_registration_quality(self, obj_id, mean_residual, stats):
         """

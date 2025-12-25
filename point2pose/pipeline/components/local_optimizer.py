@@ -57,28 +57,28 @@ class LocalOptimizer:
             return
 
         # Vectorized remapping from track IDs -> object-local keypoint indices
-        track_ids_opt = np.asarray(opt_result.key_points_idx_optimized, dtype=int)
-        pts_opt = np.asarray(opt_result.key_points_optimized, dtype=float)
+        # track_ids_opt = np.asarray(opt_result.key_points_idx_optimized, dtype=int)
+        # pts_opt = np.asarray(opt_result.key_points_optimized, dtype=float)
 
-        obj_track_ids = np.asarray(track_table.obj2track_map[obj.id], dtype=int)
+        # obj_track_ids = np.asarray(track_table.obj2track_map[obj.id], dtype=int)
 
         # Build vectorized lookup:
         # For each optimized track_id, find its index in obj_track_ids.
-        matches = obj_track_ids[:, None] == track_ids_opt[None, :]
+        # matches = obj_track_ids[:, None] == track_ids_opt[None, :]
 
         # Convert boolean matrix to indices (rows where match=True)
-        local_kp_idx, opt_col_idx = np.where(matches)
+        # local_kp_idx, opt_col_idx = np.where(matches)
 
-        # Select the optimized points that correspond to matched columns
-        pts_to_update = pts_opt[opt_col_idx]
+        # # Select the optimized points that correspond to matched columns
+        # pts_to_update = pts_opt[opt_col_idx]
 
         # Update object keypoints in one shot
-        if len(local_kp_idx) > 0:
-            obj.key_points[local_kp_idx] = pts_to_update
+        # if len(local_kp_idx) > 0:
+        #     obj.key_points[local_kp_idx] = pts_to_update
 
         # Update pose
-        before = obj.pose.copy()
-        obj.pose = opt_result.pose_optimized
+        # before = obj.pose.copy()
+        obj.pose = opt_result.pose_optimized.copy()
 
         # delta = np.linalg.norm(before[:3, 3] - obj.pose[:3, 3])
         # print(f"[LocalOptimizer] obj {obj.id}, frame {opt_result.frame_id}, Δt = {delta:.4f} m")

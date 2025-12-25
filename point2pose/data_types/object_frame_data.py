@@ -16,6 +16,7 @@ class ObjectFrameData:
     # registration stats
     cur_3d: np.ndarray
     cur_3d_idx: np.ndarray
+    valid_idx: np.ndarray
     inliers: np.ndarray
     residuals: np.ndarray
     uncertainties: np.ndarray

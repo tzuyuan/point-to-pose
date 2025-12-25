@@ -93,8 +93,8 @@ class KeyFrameGraph:
             1. Dict mapping (obj_id, kf_idx) -> optimized 4x4 pose
             2. Dict mapping obj_id -> (optimized_key_points, optimized_key_point_indices)
         """
-        updated_poses: Dict[Tuple[int, int], np.ndarray] = {}
-        updated_landmarks: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+        updated_poses = {}
+        updated_landmarks = {}
 
         if not keyframes:
             return updated_poses, updated_landmarks
@@ -138,18 +138,16 @@ class KeyFrameGraph:
                 valid_mask = np.asarray(kf.obs_valid, dtype=bool) & np.asarray(
                     kf.obs_visible, dtype=bool
                 )
+                # TODO: this is not correct, remove valid_mask indexing
+                # if np.any(valid_mask):
+                cur_3d = np.asarray(kf.obs_3d_camera, dtype=float)
+                cur_3d_idx = np.asarray(kf.obs_track_indices, dtype=int)
 
-                if np.any(valid_mask):
-                    cur_3d = np.asarray(kf.obs_3d_camera[valid_mask], dtype=float)
-                    cur_3d_idx = np.asarray(kf.obs_track_indices[valid_mask], dtype=int)
-
-                    # Use uncertainties from the KF for those points
-                    if kf.obs_uncertainties is not None:
-                        uncertainties = np.asarray(
-                            kf.obs_uncertainties[valid_mask], dtype=float
-                        )
-                    else:
-                        uncertainties = 0.5 * np.ones((cur_3d.shape[0],), dtype=float)
+                # Use uncertainties from the KF for those points
+                if kf.obs_uncertainties is not None:
+                    uncertainties = np.asarray(kf.obs_uncertainties, dtype=float)
+                else:
+                    uncertainties = 0.5 * np.ones((cur_3d.shape[0],), dtype=float)
             else:
                 # No observed points in this keyframe
                 cur_3d = np.zeros((0, 3), dtype=float)
@@ -157,15 +155,11 @@ class KeyFrameGraph:
 
             num_meas = cur_3d.shape[0]
 
-            if num_meas > 0:
-                inliers = np.ones((num_meas,), dtype=bool)
-                # You can later wire reg_stats to get residual-based weights
-                residuals = np.zeros((num_meas,), dtype=float)
-                uncertainties = 0.5 * np.ones((num_meas,), dtype=float)
-            else:
-                inliers = np.zeros((0,), dtype=bool)
-                residuals = np.zeros((0,), dtype=float)
-                uncertainties = np.zeros((0,), dtype=float)
+            # registration stats
+            inliers = kf.reg_inliers
+            residuals = kf.reg_residuals
+            valid_idx = kf.reg_valid_idx
+            reg_cur_3d = kf.reg_correspond_curr3d
 
             # -------------------------------------------------------------
             # 3) Wrap into ObjectFrameData and call the underlying optimizer
@@ -177,6 +171,7 @@ class KeyFrameGraph:
                 rel_pose=rel_pose,  # relative pose to previous keyframe
                 cur_3d=cur_3d,
                 cur_3d_idx=cur_3d_idx,
+                valid_idx=valid_idx,
                 inliers=inliers,
                 residuals=residuals,
                 uncertainties=uncertainties,

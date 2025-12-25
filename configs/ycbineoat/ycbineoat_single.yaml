@@ -21,7 +21,9 @@ pipeline:
     depth_encoder: vitl
 
 
-    use_dense_registration: true
+
+    frame_reg_mode: f2m
+    use_dense_registration: false
     use_local_graph: true
 
     debug_level: 2
@@ -37,34 +39,34 @@ pipeline:
 
 
 
-# register:
-#   type: svd_residual_outlier
-#   params:
-#     remove_outside_mask: true
-#     debug_level: 0
-#     max_iter: 15
-#     uncer_thres: 0.3
-#     threshold_method: mad
-#     inlier_thres: 0.01
-#     thres_reduce_factor: 0.005
-#     mad_scale: 5
-#     min_inliers: 3
+register:
+  type: svd_residual_outlier
+  params:
+    remove_outside_mask: true
+    debug_level: 0
+    max_iter: 15
+    uncer_thres: 0.3
+    threshold_method: mad
+    inlier_thres: 0.01
+    thres_reduce_factor: 0.005
+    mad_scale: 5
+    min_inliers: 3
 
+    # outlier pose
+    residual_thres: 0.01
+
+# register:
+#   type: svd_ransac
+#   params:
+#     sample_size: 5     
+#     max_trials: 300
+#     inlier_thres: 0.01
+#     min_inliers: 5
+#     refine_iters: 1
+#     min_triangle_area: 1e-6
+#     min_pca_ratio: 1e-3
 #     # outlier pose
 #     residual_thres: 0.001
-
-register:
-  type: svd_ransac
-  params:
-    sample_size: 5     
-    max_trials: 300
-    inlier_thres: 0.01
-    min_inliers: 5
-    refine_iters: 1
-    min_triangle_area: 1e-6
-    min_pca_ratio: 1e-3
-    # outlier pose
-    residual_thres: 0.001
 
 dense_register:
   type: cupoch_icp

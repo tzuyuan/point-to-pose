@@ -9,7 +9,7 @@ from pathlib import Path
 # Add project root to path
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from point2pose.io.sources.dataset.datareader import Ho3dReader
+from point2pose.io.sources.dataset.datareader import Ho3dReader, YcbineoatReader
 from point2pose.utils.transform import inverse_SE3
 
 
@@ -135,7 +135,7 @@ def se3_to_xyz_rpy(poses):
     for i in range(N):
         r = R.from_matrix(poses[i, :3, :3])
         # Use 'xyz' convention (intrinsic rotations)
-        euler = r.as_euler('xyz', degrees=False)
+        euler = r.as_euler("xyz", degrees=False)
         rpy.append(euler)
 
     rpy = np.array(rpy)
@@ -1079,16 +1079,42 @@ def plot_full_trajectory(
     fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
     labels = ["x", "y", "z"]
 
+    # Filter keyframe indices to valid range and convert to numpy array
+    if keyframe_indices is not None and len(keyframe_indices) > 0:
+        keyframe_indices_arr = np.asarray(keyframe_indices, dtype=int)
+        valid_kf_indices = keyframe_indices_arr[
+            (keyframe_indices_arr >= 0) & (keyframe_indices_arr < N)
+        ]
+    else:
+        keyframe_indices_arr = np.array([], dtype=int)
+        valid_kf_indices = np.array([], dtype=int)
+
     for i in range(3):
         ax = axes[i]
         ax.plot(frames, fe_xyzq[:, i], label="Frontend", alpha=0.6, linestyle="--")
         ax.plot(frames, lo_xyzq[:, i], label="Local", alpha=0.6, linestyle=":")
-        ax.plot(frames, gl_xyzq[:, i], label="Global (KF)", linewidth=2)
+        # Plot global optimization only at keyframes
+        if len(valid_kf_indices) > 0:
+            # Only add label on first subplot to avoid duplicate legend entries
+            label = "Global (KF)" if i == 0 else ""
+            ax.scatter(
+                valid_kf_indices,
+                gl_xyzq[valid_kf_indices, i],
+                label=label,
+                s=50,
+                zorder=5,
+                linewidths=1.5,
+                edgecolors="darkorange",
+                color="tab:orange",
+                alpha=0.9,
+            )
         if gt_xyzq is not None:
             ax.plot(frames, gt_xyzq[:N, i], label="GT", alpha=0.4)
 
-        for kf_idx in keyframe_indices:
-            ax.axvline(x=kf_idx, alpha=0.2, linestyle="-", linewidth=1)
+        if keyframe_indices is not None:
+            for kf_idx in keyframe_indices:
+                if 0 <= kf_idx < N:
+                    ax.axvline(x=kf_idx, alpha=0.2, linestyle="-", linewidth=1)
 
         ax.set_ylabel(f"{labels[i]} (m)")
         ax.grid(True)
@@ -1327,10 +1353,10 @@ def plot_pose_components_vs_gt(
     """
     Plot x, y, z, roll, pitch, yaw components for frontend, local, and global
     with respect to ground truth.
-    
+
     Frontend and local are plotted as solid lines, global as dots.
     Ground truth is plotted as solid reference lines.
-    
+
     Args:
         pose_frontend: (N, 4, 4) array of frontend poses
         pose_local: (N, 4, 4) array of local optimization poses
@@ -1342,107 +1368,133 @@ def plot_pose_components_vs_gt(
     if gt_poses is None:
         print("Warning: No GT poses available, skipping pose components plot.")
         return
-    
+
     # Convert all poses to xyz + rpy
     fe_xyzrpy = se3_to_xyz_rpy(pose_frontend)
     lo_xyzrpy = se3_to_xyz_rpy(pose_local)
     gl_xyzrpy = se3_to_xyz_rpy(pose_global)
     gt_xyzrpy = se3_to_xyz_rpy(gt_poses)
-    
+
     # Align lengths
     min_len = min(len(fe_xyzrpy), len(lo_xyzrpy), len(gl_xyzrpy), len(gt_xyzrpy))
     fe_xyzrpy = fe_xyzrpy[:min_len]
     lo_xyzrpy = lo_xyzrpy[:min_len]
     gl_xyzrpy = gl_xyzrpy[:min_len]
     gt_xyzrpy = gt_xyzrpy[:min_len]
-    
+
     frames = np.arange(min_len)
-    
+
+    # Filter keyframe indices to valid range and convert to numpy array
+    if kf_indices is not None and len(kf_indices) > 0:
+        kf_indices_arr = np.asarray(kf_indices, dtype=int)
+        valid_kf_indices = kf_indices_arr[
+            (kf_indices_arr >= 0) & (kf_indices_arr < min_len)
+        ]
+    else:
+        kf_indices_arr = np.array([], dtype=int)
+        valid_kf_indices = np.array([], dtype=int)
+
     # Component names and labels
-    component_names = ['x', 'y', 'z', 'roll', 'pitch', 'yaw']
-    component_labels = ['x (m)', 'y (m)', 'z (m)', 'roll (rad)', 'pitch (rad)', 'yaw (rad)']
-    
+    component_names = ["x", "y", "z", "roll", "pitch", "yaw"]
+    component_labels = [
+        "x (m)",
+        "y (m)",
+        "z (m)",
+        "roll (rad)",
+        "pitch (rad)",
+        "yaw (rad)",
+    ]
+
     # Create figure with 6 vertical subplots (6 rows, 1 column)
     fig, axes = plt.subplots(6, 1, figsize=(14, 16), sharex=True)
-    
+
     # Define better colors (avoid pure red and black)
-    color_gt = '#2C3E50'  # Dark slate gray
-    color_frontend = '#3498DB'  # Nice blue
-    color_local = '#27AE60'  # Nice green
-    color_global = '#E74C3C'  # Muted red/coral
-    
+    color_gt = "#2C3E50"  # Dark slate gray
+    color_frontend = "#3498DB"  # Nice blue
+    color_local = "#27AE60"  # Nice green
+    color_global = "#E74C3C"  # Muted red/coral
+
     for i, (name, label) in enumerate(zip(component_names, component_labels)):
         ax = axes[i]
-        
+
         # Plot ground truth as solid reference line
         ax.plot(
             frames,
             gt_xyzrpy[:, i],
-            label='GT',
+            label="GT",
             color=color_gt,
             linewidth=2.0,
-            linestyle='-',
+            linestyle="-",
             alpha=0.8,
         )
-        
+
         # Plot frontend as solid line
         ax.plot(
             frames,
             fe_xyzrpy[:, i],
-            label='Frontend',
+            label="Frontend",
             color=color_frontend,
             linewidth=1.8,
-            linestyle='-',
+            linestyle="-",
             alpha=0.75,
         )
-        
+
         # Plot local optimization as solid line
         ax.plot(
             frames,
             lo_xyzrpy[:, i],
-            label='Local',
+            label="Local",
             color=color_local,
             linewidth=1.8,
-            linestyle='-',
+            linestyle="-",
             alpha=0.75,
         )
-        
-        # Plot global optimization as dots
-        ax.scatter(
-            frames,
-            gl_xyzrpy[:, i],
-            label='Global',
-            color=color_global,
-            s=20,
-            alpha=0.85,
-            marker='o',
-            zorder=5,
-            edgecolors='white',
-            linewidths=0.5,
-        )
-        
+
+        # Plot global optimization as dots only at keyframes
+        if len(valid_kf_indices) > 0:
+            # Only add label on first subplot to avoid duplicate legend entries
+            label_global = "Global" if i == 0 else ""
+            ax.scatter(
+                valid_kf_indices,
+                gl_xyzrpy[valid_kf_indices, i],
+                label=label_global,
+                color=color_global,
+                s=40,
+                alpha=0.85,
+                marker="o",
+                zorder=5,
+                edgecolors="white",
+                linewidths=0.5,
+            )
+
         # Mark keyframes if provided
         if kf_indices is not None:
             for k in kf_indices:
                 if 0 <= k < len(frames):
-                    ax.axvline(x=k, color='gray', alpha=0.2, linewidth=0.8, linestyle='-')
-        
+                    ax.axvline(
+                        x=k, color="gray", alpha=0.2, linewidth=0.8, linestyle="-"
+                    )
+
         ax.set_ylabel(label, fontsize=11)
-        ax.set_title(f'{name.upper()} Component', fontsize=12, pad=5)
-        ax.grid(True, linestyle='--', alpha=0.5)
-        ax.legend(loc='best', fontsize=9, framealpha=0.9)
-    
+        ax.set_title(f"{name.upper()} Component", fontsize=12, pad=5)
+        ax.grid(True, linestyle="--", alpha=0.5)
+        ax.legend(loc="best", fontsize=9, framealpha=0.9)
+
     # Set x-label on bottom subplot only
-    axes[-1].set_xlabel('Frame', fontsize=11)
-    
-    plt.suptitle('Pose Components: Frontend, Local, Global vs. Ground Truth', fontsize=14, y=0.995)
+    axes[-1].set_xlabel("Frame", fontsize=11)
+
+    plt.suptitle(
+        "Pose Components: Frontend, Local, Global vs. Ground Truth",
+        fontsize=14,
+        y=0.995,
+    )
     plt.tight_layout()
-    
+
     if save_prefix:
         out_file = f"{save_prefix}_pose_components_vs_gt.png"
-        plt.savefig(out_file, dpi=180, bbox_inches='tight')
+        plt.savefig(out_file, dpi=180, bbox_inches="tight")
         print(f"Saved pose components plot to {out_file}")
-    
+
     plt.show()
 
 
@@ -1938,7 +1990,18 @@ def main():
         default=None,
         help="Results directory (e.g., /path/to/results/ho3d_single). Used with video_name to find meta_data in new structure.",
     )
-    parser.add_argument("--data_path", type=str, help="Path to HO3D root")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        choices=["ho3d", "ycbineoat"],
+        default="ho3d",
+        help="Dataset type: 'ho3d' or 'ycbineoat' (default: ho3d)",
+    )
+    parser.add_argument(
+        "--data_path",
+        type=str,
+        help="Path to dataset root (HO3D root or YCBInEoat root containing video folders)",
+    )
     parser.add_argument(
         "--video_name",
         type=str,
@@ -2024,21 +2087,43 @@ def main():
                 f"Warning: Data path {args.data_path} does not exist. Skipping GT load."
             )
         else:
-            print(f"Loading GT for {args.video_name} from {args.data_path}...")
-            # typical HO3D layout: root/evaluation/VIDEO_NAME or root/VIDEO_NAME
-            video_path = os.path.join(args.data_path, "evaluation", args.video_name)
-            if not os.path.exists(video_path):
-                video_path = os.path.join(args.data_path, args.video_name)
+            print(
+                f"Loading GT for {args.video_name} from {args.data_path} (dataset: {args.dataset})..."
+            )
 
-            if not os.path.exists(video_path):
+            # Determine video path based on dataset type
+            if args.dataset == "ho3d":
+                # typical HO3D layout: root/evaluation/VIDEO_NAME or root/VIDEO_NAME
+                video_path = os.path.join(args.data_path, "evaluation", args.video_name)
+                if not os.path.exists(video_path):
+                    video_path = os.path.join(args.data_path, args.video_name)
+            elif args.dataset == "ycbineoat":
+                # YCBInEoat layout: root/VIDEO_NAME
+                video_path = os.path.join(args.data_path, args.video_name)
+            else:
+                print(f"Error: Unknown dataset type: {args.dataset}")
+                video_path = None
+
+            if video_path is None or not os.path.exists(video_path):
                 print(
                     f"Warning: Video path {video_path} does not exist. Skipping GT load."
                 )
             else:
                 try:
-                    reader = Ho3dReader(video_path, args.data_path)
+                    # Initialize reader based on dataset type
+                    if args.dataset == "ho3d":
+                        reader = Ho3dReader(video_path, args.data_path)
+                        reader_name = "Ho3dReader"
+                    elif args.dataset == "ycbineoat":
+                        reader = YcbineoatReader(video_path)
+                        reader_name = "YcbineoatReader"
+                    else:
+                        raise ValueError(f"Unknown dataset type: {args.dataset}")
+
                     if len(reader) == 0:
-                        print("Warning: Ho3dReader found no frames. Skipping GT load.")
+                        print(
+                            f"Warning: {reader_name} found no frames. Skipping GT load."
+                        )
                     else:
                         frame_ids = data["frame_id"]
                         gt_list = []

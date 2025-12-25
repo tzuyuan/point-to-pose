@@ -36,6 +36,12 @@ class KeyFrame:
     obs_visible: np.ndarray  # (N_o,) bool mask for visible points
     obs_uncertainties: np.ndarray  # (N_o,) float uncertainties for the points
 
+    # registration stats
+    reg_correspond_curr3d: np.ndarray  # (N_o, 3) current 3D points
+    reg_inliers: np.ndarray  # (N_o,) bool mask for inliers
+    reg_residuals: np.ndarray  # (N_o,) float residuals for the points
+    reg_valid_idx: np.ndarray  # (N_o,) valid indices for the points
+
     # Dense cropped point cloud for the object in this frame
     dense_pts: np.ndarray  # (M, 3) world/camera coordinates
     dense_colors: Optional[np.ndarray] = None  # (M, 3) uint8 RGB

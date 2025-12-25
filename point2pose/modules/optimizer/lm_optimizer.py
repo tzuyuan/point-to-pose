@@ -44,6 +44,7 @@ class LMGraphOptimizer(Optimizer):
         self._lm_params.setMaxIterations(config.get("max_iterations", 20))
         self._lm_params.setRelativeErrorTol(config.get("relative_error_tol", 1e-5))
         self._lm_params.setAbsoluteErrorTol(config.get("absolute_error_tol", 1e-5))
+        self._lm_params.setlambdaInitial(config.get("lambda_initial", 1e-1))
 
         self._lm_params.setVerbosityLM("SUMMARY")
 
@@ -99,16 +100,26 @@ class LMGraphOptimizer(Optimizer):
                 if data.residuals.size > 0
                 else 0.01
             )
-            sigma_between = base_sigma * 10.0  # Relax odometry relative to features
+            # sigma_between = base_sigma  # Relax odometry relative to features
 
             # between_noise = gtsam.noiseModel.Diagonal.Sigmas(
-            #     np.array([sigma_between] * 6, dtype=float)
+            #     np.array(
+            #         [
+            #             sigma_between * 1000,
+            #             sigma_between * 1000,
+            #             sigma_between * 1000,
+            #             sigma_between * 500,
+            #             sigma_between * 500,
+            #             sigma_between * 500,
+            #         ],
+            #         dtype=float,
+            #     )
             # )
 
-            between_noise = gtsam.noiseModel.Diagonal.Sigmas(
-                np.array([5, 5, 5, 0.5, 0.5, 0.5], dtype=float)
-            )
-            # between_noise = gtsam.noiseModel.Isotropic.Sigma(6, 0.5)
+            # # between_noise = gtsam.noiseModel.Diagonal.Sigmas(
+            # #     np.array([5, 5, 5, 0.5, 0.5, 0.5], dtype=float)
+            # # )
+            # # between_noise = gtsam.noiseModel.Isotropic.Sigma(6, 0.5)
 
             # self._graph.push_back(
             #     gtsam.BetweenFactorPose3(X_prev, Xi, rel_T_cim12ci, between_noise)
@@ -120,7 +131,7 @@ class LMGraphOptimizer(Optimizer):
         self._prev_frame_id = frame_id
 
         # Insert landmark variables and their factors
-        if data.inliers.size > 0 and self._initialized:
+        if data.inliers.size > 0:  # and self._initialized:
             # Choose pose used for seeding new landmarks
             if self._values.exists(Xi):
                 try:
@@ -130,20 +141,35 @@ class LMGraphOptimizer(Optimizer):
             else:
                 seed_pose = cur_pose_c2w_gtsam
 
-            for m, lid in enumerate(data.cur_3d_idx):
-                if not data.inliers[m] or np.isnan(data.cur_3d[m]).any():
+            for m, lid in enumerate(data.valid_idx):  # TODO: should not use valid_idx?
+                # if not data.inliers[m] or np.isnan(data.cur_3d[m]).any():
+                if not data.inliers[m] or np.isnan(data.cur_3d[lid]).any():
                     continue
 
-                z_cam = data.cur_3d[m]
+                if data.residuals[m] > 0.001:
+                    continue
+
+                z_cam = data.cur_3d[lid]
                 Lj = gtsam.symbol("l", int(lid))
 
-                sigma_point = float(max(1e-4, data.residuals[m])) * 100.0
-                base_noise = gtsam.noiseModel.Isotropic.Sigma(3, sigma_point)
+                sigma_point = float(max(1e-4, data.residuals[m]))
+                # base_noise = gtsam.noiseModel.Isotropic.Sigma(3, sigma_point)
+                base_noise = gtsam.noiseModel.Diagonal.Sigmas(
+                    np.array(
+                        [sigma_point * 10, sigma_point * 10, sigma_point * 10],
+                        dtype=float,
+                    )
+                )
+                # point_noise = base_noise
                 point_noise = gtsam.noiseModel.Robust(
                     gtsam.noiseModel.mEstimator.Huber(1.345), base_noise
                 )
 
                 # point_noise = gtsam.noiseModel.Isotropic.Sigma(3, 0.5)
+                # point_noise = gtsam.noiseModel.Diagonal.Sigmas(
+                #     np.array([0.1, 0.1, 0.3], dtype=float)
+                # )
+                # # )
 
                 # Create landmark if missing
                 if Lj not in self._inserted_landmarks:
@@ -174,6 +200,7 @@ class LMGraphOptimizer(Optimizer):
             )
             result = optimizer.optimize()
         except RuntimeError:
+            print(f"[LMGraphOptimizer] Optimization failed for frame {frame_id}")
             return None
 
         # Update state with optimized values

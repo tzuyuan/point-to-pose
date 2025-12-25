@@ -22,6 +22,7 @@ REGISTRATION_RAGGED_FIELDS = {
     "reg_curr3d",
     "reg_inliers",
     "reg_residuals",
+    "reg_valid_idx",
 }
 
 DENSE_RECOVERY_RAGGED_FIELDS = {

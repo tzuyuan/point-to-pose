@@ -9,7 +9,7 @@ pipeline:
     max_num_obj: 1
     estimate_init_pose: true
     # frame_reg_mode: f2f, f2m, hybrid
-    frame_reg_mode: f2f
+    frame_reg_mode: f2m
 
     use_segmenter: true
 
@@ -124,7 +124,7 @@ criterion:
     discretization_angle: 60
 
     # rotation threshold criterion
-    max_angle_deg: 30
+    max_angle_deg: 15
 
     # mask area criterion
     fit_mode: convex

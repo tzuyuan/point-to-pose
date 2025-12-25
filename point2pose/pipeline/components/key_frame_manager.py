@@ -95,7 +95,14 @@ class KeyFrameManager:
             obs = kp
 
             # Registration stats are empty on first frame
-            reg_stats = {}
+            valid_idx = np.asarray(kp["track_ids"], dtype=int)
+            valid_idx = valid_idx[kp["valid"]]
+            reg_stats = {
+                "correspond_curr3d": obj.key_points,
+                "inliers": np.ones((len(kp["valid"]),), dtype=bool),
+                "residuals": np.zeros((len(kp["valid"]),), dtype=float),
+                "valid_idx": valid_idx,
+            }
 
             kf = self._create_keyframe(
                 frame=frame,
@@ -130,9 +137,7 @@ class KeyFrameManager:
         self.crit_ctx.update_criterion_context(
             cur_iter=front_end_result.frame_id,
             uncertainty=front_end_result.uncertainties,
-            reg_stats=front_end_result.reg_stats.get(
-                0, {}
-            ),  # TODO: extend to multi-object stats if needed
+            reg_stats=front_end_result.reg_stats,  # TODO: extend to multi-object stats if needed
             track_table=track_table,
             frame=frame,
         )
@@ -269,8 +274,8 @@ class KeyFrameManager:
         visible = track_table.visible[track_ids]
         uncertainties = track_table.uncertainty[track_ids]
 
-        T_co = obj_pose
-        xyz_obj = transform_pts(inverse_SE3(T_co), xyz_cam)
+        T_o2c = obj_pose
+        xyz_obj = transform_pts(inverse_SE3(T_o2c), xyz_cam)
 
         return dict(
             track_ids=track_ids,
@@ -288,7 +293,10 @@ class KeyFrameManager:
         For now, we take all points belonging to this object in the track_table.
         You can refine this to only take visible / valid / recently observed points.
         """
+        # obj_track_ids list the indices of the points belonging to the object in the track_table
         obj_track_ids = np.asarray(track_table.obj2track_map[obj_id], dtype=np.int64)
+
+        # if no points belonging to the object, return empty dict
         if obj_track_ids.size == 0:
             return dict(
                 track_ids=np.zeros((0,), dtype=np.int64),
@@ -298,14 +306,17 @@ class KeyFrameManager:
                 valid=np.zeros((0,), dtype=bool),
             )
 
+        # get the 2d, 3d, valid, visible, and uncertainties of the points belonging to the object
         uv = track_table.track_2d[obj_track_ids]
         xyz_cam = track_table.track_3d[obj_track_ids]
         valid = track_table.valid[obj_track_ids]
         visible = track_table.visible[obj_track_ids]
         uncertainties = track_table.uncertainty[obj_track_ids]
 
-        T_co = obj.pose
-        xyz_obj = transform_pts(inverse_SE3(T_co), xyz_cam)
+        # transform the 3d points to the object frame
+        # T_o2c: transformation points from object frame to camera frame
+        T_o2c = obj.pose
+        xyz_obj = transform_pts(inverse_SE3(T_o2c), xyz_cam)
 
         return dict(
             track_ids=obj_track_ids,
@@ -366,18 +377,19 @@ class KeyFrameManager:
         kp: dict,
         obs: dict,
         reg_stats: dict,
-    ) -> KeyFrame:
+    ):
         """
         Build a KeyFrame from the packed kp / obs dicts and object state.
         """
+        # get the frame id, object id, and keyframe index
         frame_id = frame.id
         obj_id = obj.id
         kf_idx = len(self.keyframes[obj_id])
 
+        # extract the dense point cloud of the object
         dense_pts, dense_colors = self._extract_dense_pcd(frame, obj_id)
 
         metadata = {
-            "reg_stats": reg_stats,
             "kp_valid_mask": kp["valid"],
         }
 
@@ -401,6 +413,11 @@ class KeyFrameManager:
             obs_valid=obs["valid"].copy(),
             obs_visible=obs["visible"].copy(),
             obs_uncertainties=obs["uncertainties"].copy(),
+            # registration stats
+            reg_correspond_curr3d=reg_stats["correspond_curr3d"].copy(),
+            reg_inliers=reg_stats["inliers"].copy(),
+            reg_residuals=reg_stats["residuals"].copy(),
+            reg_valid_idx=reg_stats["valid_idx"].copy(),
             # dense pcd
             dense_pts=dense_pts,
             dense_colors=dense_colors,

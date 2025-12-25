@@ -21,8 +21,10 @@ pipeline:
     depth_encoder: vitl
 
 
+
+    frame_reg_mode: f2m
     use_dense_registration: false
-    use_local_graph: true
+    use_local_graph: false
 
     debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/
@@ -52,7 +54,7 @@ register:
     min_inliers: 3
 
     # outlier pose
-    residual_thres: 0.07
+    residual_thres: 0.007
 
 # register:
 #   type: svd_ransac
@@ -127,7 +129,7 @@ sampler:
     max_points: 50
     edge_margin_px: 3
     remove_convex_hull: false
-    inflate_points: false
+    inflate_points: true
     inflate_radius_px: 20
 
     cell_size: -1
@@ -157,7 +159,7 @@ criterion:
 
     # uncertainty criterion
     uncer_thres: 0.3
-    min_num_pts: 8
+    min_num_pts: 10
 
     # rotation grid criterion
     discretization_angle: 60

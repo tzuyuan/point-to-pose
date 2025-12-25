@@ -5,8 +5,8 @@ from point2pose.core.module_registry import CRITERION
 from point2pose.data_types.criterion_context import CriterionContext
 
 
-@CRITERION.register_module("rotation_threshold")
-class RotationThresholdCriterion(SampleCriterion):
+@CRITERION.register_module("rotation_threshold_and_min_num")
+class RotationThresholdAndMinNumCriterion(SampleCriterion):
     """
     Rotation threshold criterion checks for every N iterations and returns true.
     """
@@ -14,6 +14,7 @@ class RotationThresholdCriterion(SampleCriterion):
     def __init__(self, config):
         super().__init__()
         self._max_angle_deg = config.get("max_angle_deg", 60)
+        self._min_num_pts = config.get("min_num_pts", 10)
 
         # v is a list of direction vectors. (num_dirs, 3)
         # we assume the first vector to be the initial direction as (0, 0, 1)
@@ -29,6 +30,21 @@ class RotationThresholdCriterion(SampleCriterion):
 
     def check_sample_criterion(self, context: CriterionContext, obj_id: int) -> bool:
         obj = context.objects[obj_id]
+
+        reg_stats = context.reg_stats[obj_id]
+        # if reg_stats is None:
+        #     return True
+        num_pts = reg_stats["curr3d"].shape[0]
+        print(f"[Criterion] num visible points: {num_pts}")
+
+        if num_pts < self._min_num_pts:
+            return True
+
+        # pts_id = context.track_table.obj2track_map[obj_id]
+        # cur_visible = context.track_table.visible[pts_id]
+        # if cur_visible.sum() < self._min_num_pts:
+        #     return True
+
         R = obj.pose[:3, :3]
 
         R_relative = R
@@ -40,7 +56,7 @@ class RotationThresholdCriterion(SampleCriterion):
         angle = np.arccos(inner_product)
         angle_deg = np.rad2deg(angle)
 
-        # print(f"[Criterion] angle_deg: {angle_deg}")
+        print(f"[Criterion] angle_deg: {angle_deg}")
 
         if np.any(angle_deg < self._max_angle_deg):
             return False

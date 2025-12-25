@@ -125,6 +125,8 @@ class ModularPipeline:
 
         self.kf_graph.update(new_kfs)
 
+        valid_idx = np.arange(len(self.objects[0].valid))
+        valid_idx = valid_idx[self.objects[0].valid]
         # 4. Initial Optimization
         for obj_id in range(self.num_obj):
             self.local_optimizer.optimize(
@@ -134,7 +136,8 @@ class ModularPipeline:
                     pose=np.eye(4),
                     rel_pose=np.eye(4),
                     cur_3d=self.objects[obj_id].key_points,
-                    cur_3d_idx=np.arange(len(self.objects[obj_id].key_points)),
+                    cur_3d_idx=self.objects[obj_id].key_point_indices,
+                    valid_idx=valid_idx,
                     inliers=np.ones(len(self.objects[obj_id].key_points), dtype=bool),
                     residuals=np.zeros(len(self.objects[obj_id].key_points)),
                     uncertainties=0.01 * np.ones(len(self.objects[obj_id].key_points)),
@@ -169,6 +172,12 @@ class ModularPipeline:
                     "is_key_frame": False,
                     "pose_frontend": np.eye(4),
                     "pose_local": np.eye(4),
+                    "reg_curr3d": self.objects[obj_id].key_points,
+                    "reg_residuals": np.zeros(len(self.objects[obj_id].key_points)),
+                    "reg_inliers": np.ones(
+                        len(self.objects[obj_id].key_points), dtype=bool
+                    ),
+                    "reg_valid_idx": valid_idx,
                     # Dense recovery info (initialized for first frame - no recovery possible)
                     "dense_recovery_triggered": False,
                     "dense_recovery_pose_before": np.eye(4),
@@ -248,6 +257,7 @@ class ModularPipeline:
         #################################################################
         # perform graph optimization of frames between keyframes
         t0 = time.time()
+        pose_local = {}
         if self.use_local_graph:
             for obj_id in range(self.num_obj):
 
@@ -275,6 +285,9 @@ class ModularPipeline:
                     rel_pose=fe_result.rel_poses[obj_id],
                     cur_3d=fe_result.valid_curr_3d[obj_id],
                     cur_3d_idx=fe_result.valid_indices[obj_id],
+                    valid_idx=fe_result.reg_stats[obj_id].get(
+                        "valid_idx", np.array([])
+                    ),
                     inliers=fe_result.reg_stats[obj_id].get("inliers", np.array([])),
                     residuals=fe_result.reg_stats[obj_id].get(
                         "residuals", np.array([])
@@ -288,11 +301,10 @@ class ModularPipeline:
                 self.local_optimizer.update_object_state(
                     self.objects[obj_id], opt_result, self.track_table
                 )
-        module_times["local_opt"] = time.time() - t0
 
-        pose_local = {}
-        for obj_id in range(self.num_obj):
-            pose_local[obj_id] = self.objects[obj_id].pose.copy()
+                pose_local[obj_id] = self.objects[obj_id].pose
+
+        module_times["local_opt"] = time.time() - t0
 
         #################################################################
         ##                     Key Frame Manager                       ##
@@ -317,7 +329,9 @@ class ModularPipeline:
         # perform global optimization of key frames only
         t0 = time.time()
         if new_keyframes:
-            updated_global_poses = self.kf_graph.update(new_keyframes)
+            updated_global_poses, updated_landmarks = self.kf_graph.update(
+                new_keyframes
+            )
 
             for kf in new_keyframes:
                 key = (kf.obj_id, kf.kf_idx)
@@ -325,7 +339,12 @@ class ModularPipeline:
                     global_pose = updated_global_poses[key]
 
                     obj = self.objects[kf.obj_id]
-                    obj.pose = global_pose
+                    obj.pose = global_pose.copy()
+
+                    lm_idx = updated_landmarks[kf.obj_id][1]
+                    lm_pts = updated_landmarks[kf.obj_id][0]
+                    self.objects[kf.obj_id].key_points[lm_idx] = lm_pts
+
         module_times["global_opt"] = time.time() - t0
 
         #################################################################
@@ -415,6 +434,7 @@ class ModularPipeline:
                 "reg_curr3d": fe_result.valid_curr_3d.get(obj_id),
                 "reg_residuals": reg_stats.get("residuals", np.array([])),
                 "reg_inliers": reg_stats.get("inliers", np.array([])),
+                "reg_valid_idx": reg_stats.get("valid_idx", np.array([])),
                 "iter": reg_stats.get("iter", -1),
                 # Intermediate Poses
                 "pose_frontend": (
