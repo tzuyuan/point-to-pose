@@ -141,12 +141,12 @@ class LMGraphOptimizer(Optimizer):
             else:
                 seed_pose = cur_pose_c2w_gtsam
 
-            for m, lid in enumerate(data.valid_idx):  # TODO: should not use valid_idx?
-                # if not data.inliers[m] or np.isnan(data.cur_3d[m]).any():
-                if not data.inliers[m] or np.isnan(data.cur_3d[lid]).any():
-                    continue
+            assert (
+                len(data.valid_idx) == len(data.inliers) == len(data.residuals)
+            ), "inliers/residuals must be aligned with valid_idx if indexed by mask"
 
-                if data.residuals[m] > 0.001:
+            for m, lid in enumerate(data.valid_idx):
+                if not data.inliers[m] or np.isnan(data.cur_3d[lid]).any():
                     continue
 
                 z_cam = data.cur_3d[lid]
@@ -156,7 +156,7 @@ class LMGraphOptimizer(Optimizer):
                 # base_noise = gtsam.noiseModel.Isotropic.Sigma(3, sigma_point)
                 base_noise = gtsam.noiseModel.Diagonal.Sigmas(
                     np.array(
-                        [sigma_point * 10, sigma_point * 10, sigma_point * 10],
+                        [sigma_point * 50, sigma_point * 50, sigma_point * 10],
                         dtype=float,
                     )
                 )

@@ -267,10 +267,7 @@ class FrontEnd:
 
                 # solve frame to map registration
                 if key_points.shape[0] >= 3 and correspond_curr3d.shape[0] >= 3:
-                    # TODO: is this correct?
                     prev_pose = obj.pose.copy()
-
-                    print(f"prev_pose: {prev_pose}")
                     t_start = time.time()
                     T_c2w_est, stats_reg = self.register.register(
                         key_points, correspond_curr3d, init_pose=prev_pose
@@ -551,6 +548,14 @@ class FrontEnd:
             & curr_val_arr[common_idx]
             & track_vis_arr[common_idx]
             & track_val_arr[common_idx]
+        )
+
+        assert (
+            curr_pts_3d.shape[0]
+            == len(curr_valid)
+            == len(curr_visible)
+            == len(track_table.valid)
+            == len(track_table.visible)
         )
 
         idx = common_idx[both_mask]

@@ -128,21 +128,25 @@ class ModularPipeline:
         valid_idx = np.arange(len(self.objects[0].valid))
         valid_idx = valid_idx[self.objects[0].valid]
         # 4. Initial Optimization
-        for obj_id in range(self.num_obj):
-            self.local_optimizer.optimize(
-                ObjectFrameData(
-                    obj_id=obj_id,
-                    frame_id=0,
-                    pose=np.eye(4),
-                    rel_pose=np.eye(4),
-                    cur_3d=self.objects[obj_id].key_points,
-                    cur_3d_idx=self.objects[obj_id].key_point_indices,
-                    valid_idx=valid_idx,
-                    inliers=np.ones(len(self.objects[obj_id].key_points), dtype=bool),
-                    residuals=np.zeros(len(self.objects[obj_id].key_points)),
-                    uncertainties=0.01 * np.ones(len(self.objects[obj_id].key_points)),
+        if self.use_local_graph:
+            for obj_id in range(self.num_obj):
+                self.local_optimizer.optimize(
+                    ObjectFrameData(
+                        obj_id=obj_id,
+                        frame_id=0,
+                        pose=np.eye(4),
+                        rel_pose=np.eye(4),
+                        cur_3d=self.objects[obj_id].key_points,
+                        cur_3d_idx=self.objects[obj_id].key_point_indices,
+                        valid_idx=valid_idx,
+                        inliers=np.ones(
+                            len(self.objects[obj_id].key_points), dtype=bool
+                        ),
+                        residuals=np.zeros(len(self.objects[obj_id].key_points)),
+                        uncertainties=0.01
+                        * np.ones(len(self.objects[obj_id].key_points)),
+                    )
                 )
-            )
 
         # 5. Estimate Initial Pose (if configured)
         out_pose = np.tile(np.eye(4), (self.num_obj, 1, 1))

@@ -1269,6 +1269,7 @@ def analyze_keyframe_improvement(
 ):
     """
     Print simple statistics showing how errors change FE -> Local -> Global on keyframes.
+    Includes FE -> Local, Local -> Global, and FE -> Global comparisons.
     """
     if (
         fe_t_err is None
@@ -1317,8 +1318,10 @@ def analyze_keyframe_improvement(
     print("\n=== Keyframe Improvement Analysis ===")
     t_fe_to_lo = _improvement_rate(fe_t, lo_t)
     t_lo_to_gl = _improvement_rate(lo_t, gl_t)
+    t_fe_to_gl = _improvement_rate(fe_t, gl_t)
     r_fe_to_lo = _improvement_rate(fe_r, lo_r)
     r_lo_to_gl = _improvement_rate(lo_r, gl_r)
+    r_fe_to_gl = _improvement_rate(fe_r, gl_r)
 
     print("Translation FE → Local:")
     print(
@@ -1330,6 +1333,11 @@ def analyze_keyframe_improvement(
         "  better={better} ({better_pct:.1f}%), "
         "worse={worse} ({worse_pct:.1f}%), same={same}".format(**t_lo_to_gl)
     )
+    print("Translation FE → Global:")
+    print(
+        "  better={better} ({better_pct:.1f}%), "
+        "worse={worse} ({worse_pct:.1f}%), same={same}".format(**t_fe_to_gl)
+    )
     print("Rotation FE → Local:")
     print(
         "  better={better} ({better_pct:.1f}%), "
@@ -1339,6 +1347,11 @@ def analyze_keyframe_improvement(
     print(
         "  better={better} ({better_pct:.1f}%), "
         "worse={worse} ({worse_pct:.1f}%), same={same}".format(**r_lo_to_gl)
+    )
+    print("Rotation FE → Global:")
+    print(
+        "  better={better} ({better_pct:.1f}%), "
+        "worse={worse} ({worse_pct:.1f}%), same={same}".format(**r_fe_to_gl)
     )
 
 

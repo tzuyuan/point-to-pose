@@ -99,8 +99,8 @@ class KeyFrameManager:
             valid_idx = valid_idx[kp["valid"]]
             reg_stats = {
                 "correspond_curr3d": obj.key_points,
-                "inliers": np.ones((len(kp["valid"]),), dtype=bool),
-                "residuals": np.zeros((len(kp["valid"]),), dtype=float),
+                "inliers": np.ones((len(valid_idx),), dtype=bool),
+                "residuals": np.zeros((len(valid_idx),), dtype=float),
                 "valid_idx": valid_idx,
             }
 
