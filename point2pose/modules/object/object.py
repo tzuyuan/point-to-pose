@@ -68,7 +68,7 @@ class Object:
             frame_id = -1
 
         if new_indices is None:
-             # Default to -1 if not provided, though typically we want real IDs
+            # Default to -1 if not provided, though typically we want real IDs
             new_indices = np.full(new_key_points.shape[0], -1, dtype=int)
 
         self.key_points = np.vstack((self.key_points, new_key_points))

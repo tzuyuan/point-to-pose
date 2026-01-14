@@ -17,6 +17,9 @@ class SamplerContext:
 
     track_table: Optional[dict] = None
 
+    min_depth: Optional[float] = None
+    max_depth: Optional[float] = None
+
     def update_sampler_context(self, **kwargs):
         """
         Update the criterion context with the given keyword arguments.

@@ -40,8 +40,8 @@ pipeline:
 
 
 register:
-  # svd_ransac, svd_residual_outlier, svd_uncertainty_outlier
-  type: svd_residual_outlier
+  # svd_ransac, svd_residual_outlier, svd_uncertainty_outlier, svd_cluster_ransac
+  type: svd_cluster_ransac
   params:
     remove_outside_mask: true
     debug_level: 0
@@ -52,6 +52,7 @@ register:
     thres_reduce_factor: 0.005
     mad_scale: 5
     min_inliers: 3
+    min_variance: 1e-5
 
     # outlier pose
     residual_thres: 0.007
@@ -149,7 +150,7 @@ criterion:
   ###      uncertainty_ratio, uncertainty_number, 
   ###      rotation_grid, rotation_threshold
   ###      mask_area
-  type: rotation_threshold
+  type: rotation_threshold_and_min_num
   params:
     # iteration criterion
     update_per_iter: 1000000
@@ -159,7 +160,7 @@ criterion:
 
     # uncertainty criterion
     uncer_thres: 0.3
-    min_num_pts: 10
+    min_num_pts: 15
 
     # rotation grid criterion
     discretization_angle: 60

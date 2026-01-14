@@ -20,9 +20,11 @@ if project_root not in sys.path:
 
 try:
     from point2pose.io.sources.dataset.datareader import Ho3dReader, YcbineoatReader
+    from point2pose.utils.transform import inverse_SE3
 except ImportError:
     Ho3dReader = None
     YcbineoatReader = None
+    inverse_SE3 = None
 
 
 def find_meata_data_path(
@@ -564,6 +566,12 @@ def plot_registration_stats(
     reg_key_points_idx: Optional[np.ndarray],
     output_path: Optional[str] = None,
     mode: str = "f2m",
+    key_points: Optional[np.ndarray] = None,
+    curr3d: Optional[np.ndarray] = None,
+    register_folder: Optional[str] = None,
+    results_dir: Optional[str] = None,
+    video_name: Optional[str] = None,
+    ho3d_root: Optional[str] = None,
 ):
     """Create plots showing registration statistics.
 
@@ -576,6 +584,12 @@ def plot_registration_stats(
         reg_key_points_idx: Optional array of indices of registration key points
         output_path: Optional path to save the figure
         mode: Registration mode ("f2f" or "f2m") for title
+        key_points: Optional source points (N, 3) for error vs uncertainty plot
+        curr3d: Optional target points (N, 3) for error vs uncertainty plot
+        register_folder: Optional register folder path for GT pose loading
+        results_dir: Optional results directory for GT pose loading
+        video_name: Optional video name for GT pose loading
+        ho3d_root: Optional HO3D root directory for GT pose loading
     """
     num_points = len(residuals)
     num_inliers = np.sum(inliers)
@@ -598,6 +612,14 @@ def plot_registration_stats(
             )
             reg_keyframe_ids = None
 
+    # Check if we can add error vs uncertainty plot (needs key_points, curr3d, uncertainties, and GT pose)
+    has_error_vs_unc = (
+        key_points is not None
+        and curr3d is not None
+        and uncertainties is not None
+        and register_folder is not None
+    )
+
     # Calculate number of plots needed
     num_plots = 4  # base plots: inlier/outlier, residuals hist (all), residuals hist (split), residuals sorted
     if has_unc:
@@ -606,6 +628,8 @@ def plot_registration_stats(
         num_plots += 1  # residual vs uncertainty (colored by keyframe)
     if reg_keyframe_ids is not None:
         num_plots += 1  # residuals vs frame ID
+    if has_error_vs_unc:
+        num_plots += 1  # error vs uncertainty (GT-aligned)
 
     # Create figure with appropriate layout
     if num_plots <= 6:
@@ -884,6 +908,148 @@ def plot_registration_stats(
         ax.set_title("Residuals vs Frame ID")
         ax.grid(True, alpha=0.3)
 
+    # 9. Error vs Uncertainty plot (GT-aligned)
+    if has_error_vs_unc:
+        # Calculate plot index
+        plot_idx = 4
+        if has_unc:
+            plot_idx += 2
+        if has_unc and has_kfids:
+            plot_idx += 1
+        if reg_keyframe_ids is not None:
+            plot_idx += 1
+
+        ax = axes[plot_idx]
+
+        # Try to extract video_name and results_dir from register_folder if not provided
+        actual_results_dir = results_dir
+        actual_video_name = video_name
+        if (
+            actual_results_dir is None or actual_video_name is None
+        ) and register_folder:
+            detected_results_dir, detected_video_name = extract_video_info_from_path(
+                register_folder
+            )
+            if detected_results_dir and actual_results_dir is None:
+                actual_results_dir = detected_results_dir
+            if detected_video_name and actual_video_name is None:
+                actual_video_name = detected_video_name
+
+        # Get GT pose for current frame
+        gt_pose = get_gt_pose_for_frame(
+            register_folder,
+            frame_number,
+            results_dir=actual_results_dir,
+            video_name=actual_video_name,
+            ho3d_root=ho3d_root,
+        )
+
+        if gt_pose is not None:
+            # Ensure arrays have the same length
+            min_len = min(len(key_points), len(curr3d), len(uncertainties))
+            key_points_aligned = key_points[:min_len]
+            curr3d_aligned = curr3d[:min_len]
+            uncertainties_aligned = uncertainties[:min_len]
+
+            # Get inliers if available (need to check if inliers parameter exists)
+            inliers_aligned = None
+            if "inliers" in locals() or "inliers" in globals():
+                # Try to get inliers from the function's scope
+                try:
+                    # inliers is passed to plot_registration_stats, check if we can access it
+                    pass  # Will handle below
+                except:
+                    pass
+
+            # Transform source points using GT pose
+            # Note: gt_pose is already transformed relative to first frame (first frame = identity)
+            if mode == "f2m":
+                # For f2m mode: key_points are in first frame coordinates
+                # Since first frame is now identity, transform is just gt_pose
+                transform = gt_pose
+            else:
+                # f2f mode: key_points are from previous frame
+                prev_frame_gt_pose = get_gt_pose_for_frame(
+                    register_folder,
+                    frame_number - 1 if frame_number > 0 else 0,
+                    results_dir=actual_results_dir,
+                    video_name=actual_video_name,
+                    ho3d_root=ho3d_root,
+                )
+                if prev_frame_gt_pose is not None and frame_number > 0:
+                    # Both poses are already transformed relative to first frame
+                    # Transform from prev frame to current: gt_pose @ inverse_SE3(prev_frame_gt_pose)
+                    if inverse_SE3 is not None:
+                        transform = gt_pose @ inverse_SE3(prev_frame_gt_pose)
+                    else:
+                        prev_frame_gt_pose_inv = np.linalg.inv(prev_frame_gt_pose)
+                        transform = gt_pose @ prev_frame_gt_pose_inv
+                else:
+                    transform = gt_pose
+
+            # Transform source points to current frame using GT transform
+            # For f2m: key_points are in first frame coordinates, transform to current frame
+            key_points_h = np.hstack(
+                [key_points_aligned, np.ones((len(key_points_aligned), 1))]
+            )
+            key_points_transformed = (transform @ key_points_h.T).T[:, :3]
+
+            # curr3d is already in current frame coordinates, no transformation needed
+            # Compute error as Euclidean distance between transformed source and target
+            errors = np.linalg.norm(key_points_transformed - curr3d_aligned, axis=1)
+
+            # Scatter plot: error vs uncertainty
+            ax.scatter(
+                uncertainties_aligned,
+                errors,
+                alpha=0.6,
+                s=20,
+                edgecolors="black",
+                linewidths=0.5,
+            )
+
+            ax.set_xlabel("Uncertainty", fontsize=10)
+            ax.set_ylabel("Error (m)", fontsize=10)
+            ax.set_title("Error vs Uncertainty (GT-aligned)", fontsize=10)
+            ax.grid(True, alpha=0.3)
+
+            # Add statistics
+            mean_error = np.mean(errors)
+            mean_uncertainty = np.mean(uncertainties_aligned)
+            ax.axhline(
+                mean_error,
+                color="red",
+                linestyle="--",
+                alpha=0.7,
+                linewidth=1,
+                label=f"Mean Error: {mean_error:.4f}m",
+            )
+            ax.axvline(
+                mean_uncertainty,
+                color="blue",
+                linestyle="--",
+                alpha=0.7,
+                linewidth=1,
+                label=f"Mean Unc: {mean_uncertainty:.4f}",
+            )
+            ax.legend(fontsize=8)
+        else:
+            # If GT pose not available, show a message
+            ax.text(
+                0.5,
+                0.5,
+                "GT pose not available",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                fontsize=10,
+                color="gray",
+            )
+            ax.set_title("Error vs Uncertainty (GT-aligned)", fontsize=10)
+            ax.set_xlabel("Uncertainty", fontsize=10)
+            ax.set_ylabel("Error (m)", fontsize=10)
+            ax.grid(True, alpha=0.3)
+
     # Hide unused subplots
     for i in range(num_plots, len(axes)):
         axes[i].set_visible(False)
@@ -1152,17 +1318,26 @@ def load_gt_key_points(
             return None
 
         # Load GT pose for current frame using datareader
-        # Try to infer video directory from results_dir, ho3d_root, and video_name
+        # Try to infer video directory from ho3d_root first (HO3D dataset location)
+        # Then fall back to results_dir if needed
         video_dir = None
-        if results_dir and video_name:
-            video_dir = os.path.join(results_dir, video_name)
-            if not os.path.exists(video_dir):
-                video_dir = None
 
-        # If ho3d_root is provided, try ho3d_root/video_name
-        if video_dir is None and ho3d_root and video_name:
+        # Priority 1: ho3d_root/video_name (actual HO3D dataset location)
+        if ho3d_root and video_name:
             potential_video_dir = os.path.join(ho3d_root, video_name)
-            if os.path.exists(potential_video_dir):
+            # Verify it's a valid HO3D video directory (should have rgb/ subdirectory)
+            if os.path.exists(potential_video_dir) and os.path.exists(
+                os.path.join(potential_video_dir, "rgb")
+            ):
+                video_dir = potential_video_dir
+
+        # Priority 2: results_dir/video_name (fallback, but usually doesn't have rgb/)
+        if video_dir is None and results_dir and video_name:
+            potential_video_dir = os.path.join(results_dir, video_name)
+            # Only use if it has rgb/ subdirectory (unlikely but check anyway)
+            if os.path.exists(potential_video_dir) and os.path.exists(
+                os.path.join(potential_video_dir, "rgb")
+            ):
                 video_dir = potential_video_dir
 
         # If still not found and video_name is provided, try common locations
@@ -1185,7 +1360,8 @@ def load_gt_key_points(
                 potential_paths.insert(0, os.path.join(ho3d_root, video_name))
 
             for path in potential_paths:
-                if os.path.exists(path):
+                # Verify it's a valid HO3D video directory (should have rgb/ subdirectory)
+                if os.path.exists(path) and os.path.exists(os.path.join(path, "rgb")):
                     video_dir = path
                     break
 
@@ -1194,9 +1370,35 @@ def load_gt_key_points(
                 f"Warning: Could not find video directory for {video_name}, cannot load GT pose"
             )
             if ho3d_root:
-                print(f"  Tried: {os.path.join(ho3d_root, video_name)}")
+                searched_path = os.path.join(ho3d_root, video_name)
+                exists = os.path.exists(searched_path)
+                has_rgb = (
+                    os.path.exists(os.path.join(searched_path, "rgb"))
+                    if exists
+                    else False
+                )
+                print(
+                    f"  Tried: {searched_path} (exists: {exists}, has rgb/: {has_rgb})"
+                )
             if results_dir:
-                print(f"  Tried: {os.path.join(results_dir, video_name)}")
+                searched_path = os.path.join(results_dir, video_name)
+                exists = os.path.exists(searched_path)
+                has_rgb = (
+                    os.path.exists(os.path.join(searched_path, "rgb"))
+                    if exists
+                    else False
+                )
+                print(
+                    f"  Tried: {searched_path} (exists: {exists}, has rgb/: {has_rgb})"
+                )
+            return None
+
+        # Verify video_dir has rgb/ subdirectory before proceeding
+        rgb_dir = os.path.join(video_dir, "rgb")
+        if not os.path.exists(rgb_dir):
+            print(
+                f"Warning: Video directory {video_dir} does not contain rgb/ subdirectory, cannot load GT pose"
+            )
             return None
 
         # Try to infer ho3d_root if not provided or if provided ho3d_root doesn't have models
@@ -1265,8 +1467,8 @@ def load_gt_key_points(
             )
             return None
 
-        gt_pose_current = reader.get_gt_pose(frame_number)
-        if gt_pose_current is None:
+        gt_pose_current_raw = reader.get_gt_pose(frame_number)
+        if gt_pose_current_raw is None:
             print(f"GT pose not available for frame {frame_number}")
             return None
 
@@ -1286,6 +1488,7 @@ def load_gt_key_points(
                 pose = reader.get_gt_pose(i)
                 if pose is not None:
                     gt_pose_first = pose
+                    first_frame_idx = i
                     print(
                         f"Using frame {i} as reference for GT pose (first frame was None)"
                     )
@@ -1300,14 +1503,29 @@ def load_gt_key_points(
                 key_points_h = np.hstack(
                     [key_point_map, np.ones((len(key_point_map), 1))]
                 )
-                gt_key_points = (gt_pose_current @ key_points_h.T).T[:, :3]
+                gt_key_points = (gt_pose_current_raw @ key_points_h.T).T[:, :3]
                 return gt_key_points
 
-        # Transform key points from first frame to current frame using GT poses
+        # Transform GT poses by inverse of first frame's pose (assuming first frame is identity)
+        if inverse_SE3 is not None:
+            # gt_pose_current = inverse_SE3(gt_pose_first) @ gt_pose_current_raw
+            gt_pose_current = gt_pose_current_raw @ inverse_SE3(gt_pose_first)
+            gt_pose_first_transformed = (
+                inverse_SE3(gt_pose_first) @ gt_pose_first
+            )  # This should be identity
+        else:
+            # Fallback to numpy inverse if inverse_SE3 not available
+            gt_pose_first_inv = np.linalg.inv(gt_pose_first)
+            gt_pose_current = gt_pose_first_inv @ gt_pose_current_raw
+            gt_pose_first_transformed = (
+                gt_pose_first_inv @ gt_pose_first
+            )  # This should be identity
+
+        # Transform key points from first frame to current frame using transformed GT poses
         # Key points are in first frame coordinate system (reference frame)
-        # Transform: gt_pose_current @ inv(gt_pose_first) @ key_points
-        gt_pose_first_inv = np.linalg.inv(gt_pose_first)
-        transform = gt_pose_current @ gt_pose_first_inv
+        # Since first frame is now identity, transform is just gt_pose_current
+        # Transform: gt_pose_current @ key_points (where gt_pose_current is already relative to first frame)
+        transform = gt_pose_current
 
         key_points_h = np.hstack([key_point_map, np.ones((len(key_point_map), 1))])
         gt_key_points = (transform @ key_points_h.T).T[:, :3]
@@ -2842,6 +3060,348 @@ def plot_3d_key_points_vs_gt(
         pass
 
 
+def get_gt_pose_for_frame(
+    register_folder: str,
+    frame_number: int,
+    results_dir: Optional[str] = None,
+    video_name: Optional[str] = None,
+    ho3d_root: Optional[str] = None,
+) -> Optional[np.ndarray]:
+    """Get ground truth pose for a given frame.
+
+    Args:
+        register_folder: Path to register folder
+        frame_number: Frame number to get GT pose for
+        results_dir: Results directory for new structure (optional)
+        video_name: Video sequence name for new structure (optional)
+        ho3d_root: HO3D dataset root directory (optional, will try to infer)
+
+    Returns:
+        GT pose matrix (4, 4) or None if not found
+    """
+    # Try to infer video directory from ho3d_root first (HO3D dataset location)
+    # Then fall back to results_dir if needed
+    video_dir = None
+
+    # Priority 1: ho3d_root/video_name (actual HO3D dataset location)
+    if ho3d_root and video_name:
+        potential_video_dir = os.path.join(ho3d_root, video_name)
+        # Verify it's a valid HO3D video directory (should have rgb/ subdirectory)
+        if os.path.exists(potential_video_dir) and os.path.exists(
+            os.path.join(potential_video_dir, "rgb")
+        ):
+            video_dir = potential_video_dir
+
+    # Priority 2: results_dir/video_name (fallback, but usually doesn't have rgb/)
+    if video_dir is None and results_dir and video_name:
+        potential_video_dir = os.path.join(results_dir, video_name)
+        # Only use if it has rgb/ subdirectory (unlikely but check anyway)
+        if os.path.exists(potential_video_dir) and os.path.exists(
+            os.path.join(potential_video_dir, "rgb")
+        ):
+            video_dir = potential_video_dir
+
+    # If still not found and video_name is provided, try common locations
+    if video_dir is None and video_name:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(os.path.dirname(script_dir))
+        potential_paths = [
+            os.path.join(project_root, "data", "ho3d", video_name),
+            os.path.join(project_root, "data", video_name),
+            os.path.join(
+                "/mnt",
+                "9a72c439-d0a7-45e8-8d20-d7a235d02763",
+                "DATASET",
+                "HO3D",
+                video_name,
+            ),
+        ]
+        # Also try with ho3d_root if provided
+        if ho3d_root:
+            potential_paths.insert(0, os.path.join(ho3d_root, video_name))
+
+        for path in potential_paths:
+            # Verify it's a valid HO3D video directory (should have rgb/ subdirectory)
+            if os.path.exists(path) and os.path.exists(os.path.join(path, "rgb")):
+                video_dir = path
+                break
+
+    if video_dir is None or not os.path.exists(video_dir):
+        print(
+            f"Warning: Could not find video directory for {video_name}, cannot load GT pose"
+        )
+        if video_name:
+            print(f"  Searched paths (must contain rgb/ subdirectory):")
+            if ho3d_root:
+                searched_path = os.path.join(ho3d_root, video_name)
+                exists = os.path.exists(searched_path)
+                has_rgb = (
+                    os.path.exists(os.path.join(searched_path, "rgb"))
+                    if exists
+                    else False
+                )
+                print(f"    - {searched_path} (exists: {exists}, has rgb/: {has_rgb})")
+            if results_dir:
+                searched_path = os.path.join(results_dir, video_name)
+                exists = os.path.exists(searched_path)
+                has_rgb = (
+                    os.path.exists(os.path.join(searched_path, "rgb"))
+                    if exists
+                    else False
+                )
+                print(f"    - {searched_path} (exists: {exists}, has rgb/: {has_rgb})")
+        return None
+
+    # Verify video_dir has rgb/ subdirectory before proceeding
+    rgb_dir = os.path.join(video_dir, "rgb")
+    if not os.path.exists(rgb_dir):
+        print(
+            f"Warning: Video directory {video_dir} does not contain rgb/ subdirectory, cannot load GT pose"
+        )
+        return None
+
+    # Try to infer ho3d_root if not provided or if provided ho3d_root doesn't have models
+    actual_ho3d_root = ho3d_root
+    if ho3d_root is None or not os.path.exists(os.path.join(ho3d_root, "models")):
+        potential_roots = []
+        if ho3d_root:
+            potential_roots.append(os.path.dirname(ho3d_root))
+        if video_dir:
+            potential_roots.extend(
+                [
+                    os.path.dirname(video_dir),
+                    os.path.join(os.path.dirname(video_dir), ".."),
+                ]
+            )
+        potential_roots.extend(
+            [
+                os.path.join(
+                    "/mnt",
+                    "9a72c439-d0a7-45e8-8d20-d7a235d02763",
+                    "DATASET",
+                    "HO3D",
+                ),
+            ]
+        )
+        for root in potential_roots:
+            if (
+                root
+                and os.path.exists(root)
+                and os.path.exists(os.path.join(root, "models"))
+            ):
+                actual_ho3d_root = root
+                break
+
+    # If we still don't have a valid ho3d_root, use the provided one anyway
+    if actual_ho3d_root is None:
+        actual_ho3d_root = ho3d_root
+
+    # Create datareader
+    reader = None
+    if actual_ho3d_root and os.path.exists(actual_ho3d_root) and video_dir:
+        try:
+            print(
+                f"Creating Ho3dReader with video_dir={video_dir}, ho3d_root={actual_ho3d_root}"
+            )
+            reader = Ho3dReader(video_dir, actual_ho3d_root)
+        except Exception as e:
+            print(f"Warning: Could not create Ho3dReader: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return None
+
+    if reader is None:
+        print("Warning: Could not create datareader, cannot load GT pose")
+        print(f"  video_dir: {video_dir}")
+        print(f"  actual_ho3d_root: {actual_ho3d_root}")
+        print(
+            f"  ho3d_root exists: {os.path.exists(actual_ho3d_root) if actual_ho3d_root else False}"
+        )
+        print(
+            f"  video_dir exists: {os.path.exists(video_dir) if video_dir else False}"
+        )
+        return None
+
+    # Get GT pose for current frame
+    if frame_number >= len(reader):
+        print(
+            f"Frame {frame_number} out of range for datareader (length: {len(reader)})"
+        )
+        return None
+
+    gt_pose = reader.get_gt_pose(frame_number)
+    if gt_pose is None:
+        print(f"Warning: GT pose not available for frame {frame_number}")
+        return None
+
+    # Transform GT pose by inverse of first frame's pose (assuming first frame is identity)
+    # Get first frame GT pose
+    first_frame_idx = 0
+    gt_pose_first = reader.get_gt_pose(first_frame_idx)
+
+    if gt_pose_first is None:
+        # If first frame doesn't have GT, try to find first valid GT pose
+        for i in range(len(reader)):
+            pose = reader.get_gt_pose(i)
+            if pose is not None:
+                gt_pose_first = pose
+                first_frame_idx = i
+                break
+
+    if gt_pose_first is not None:
+        # Transform: gt_pose @ inverse_SE3(gt_pose_first) to make first frame identity
+        # This gives transform from first frame to current frame
+        if inverse_SE3 is not None:
+            gt_pose_transformed = gt_pose @ inverse_SE3(gt_pose_first)
+        else:
+            # Fallback to numpy inverse if inverse_SE3 not available
+            gt_pose_first_inv = np.linalg.inv(gt_pose_first)
+            gt_pose_transformed = gt_pose @ gt_pose_first_inv
+        return gt_pose_transformed
+    else:
+        # If no first frame pose available, return original (shouldn't happen in practice)
+        print(
+            f"Warning: Could not find first frame GT pose, returning untransformed pose"
+        )
+        return gt_pose
+
+
+def plot_error_vs_uncertainty(
+    key_points: np.ndarray,
+    curr3d: np.ndarray,
+    uncertainties: np.ndarray,
+    register_folder: str,
+    frame_number: int,
+    results_dir: Optional[str] = None,
+    video_name: Optional[str] = None,
+    ho3d_root: Optional[str] = None,
+    output_path: Optional[str] = None,
+    mode: str = "f2m",
+):
+    """Plot error vs uncertainty after aligning source and target points using GT pose.
+
+    Args:
+        key_points: Source points (N, 3) - registration key points
+        curr3d: Target points (N, 3) - current frame 3D points
+        uncertainties: Uncertainty values for each point (N,)
+        register_folder: Path to register folder
+        frame_number: Frame number
+        results_dir: Results directory (optional)
+        video_name: Video sequence name (optional)
+        ho3d_root: HO3D dataset root directory (optional)
+        output_path: Optional path to save the figure
+        mode: Registration mode ("f2f" or "f2m") for title
+    """
+    # Ensure arrays have the same length
+    min_len = min(len(key_points), len(curr3d), len(uncertainties))
+    key_points = key_points[:min_len]
+    curr3d = curr3d[:min_len]
+    uncertainties = uncertainties[:min_len]
+
+    if min_len == 0:
+        print("Warning: No points available for error vs uncertainty plot")
+        return
+
+    # Get GT pose for current frame
+    gt_pose = get_gt_pose_for_frame(
+        register_folder,
+        frame_number,
+        results_dir=results_dir,
+        video_name=video_name,
+        ho3d_root=ho3d_root,
+    )
+
+    if gt_pose is None:
+        print("Warning: Could not load GT pose, skipping error vs uncertainty plot")
+        return
+
+    # Transform source points using GT pose
+    # Note: gt_pose is already transformed relative to first frame (first frame = identity)
+    if mode == "f2m":
+        # For f2m mode: key_points are in first frame coordinates
+        # Since first frame is now identity, transform is just gt_pose
+        transform = gt_pose
+    else:
+        # f2f mode: key_points are from previous frame, need previous frame GT pose
+        prev_frame_gt_pose = get_gt_pose_for_frame(
+            register_folder,
+            frame_number - 1,
+            results_dir=results_dir,
+            video_name=video_name,
+            ho3d_root=ho3d_root,
+        )
+        if prev_frame_gt_pose is not None:
+            # Both poses are already transformed relative to first frame
+            # Transform from prev frame to current: gt_pose @ inverse_SE3(prev_frame_gt_pose)
+            if inverse_SE3 is not None:
+                transform = gt_pose @ inverse_SE3(prev_frame_gt_pose)
+            else:
+                prev_frame_gt_pose_inv = np.linalg.inv(prev_frame_gt_pose)
+                transform = gt_pose @ prev_frame_gt_pose_inv
+        else:
+            # Fallback: use current GT pose directly
+            transform = gt_pose
+
+    # Transform source points to current frame using GT transform
+    # For f2m: key_points are in first frame coordinates, transform to current frame
+    key_points_h = np.hstack([key_points, np.ones((len(key_points), 1))])
+    key_points_transformed = (transform @ key_points_h.T).T[:, :3]
+
+    # curr3d is already in current frame coordinates, no transformation needed
+    # Compute error as Euclidean distance between transformed source and target
+    errors = np.linalg.norm(key_points_transformed - curr3d, axis=1)
+
+    # Create plot
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Scatter plot: error vs uncertainty
+    ax.scatter(
+        uncertainties,
+        errors,
+        alpha=0.6,
+        s=20,
+        edgecolors="black",
+        linewidths=0.5,
+    )
+
+    ax.set_xlabel("Uncertainty", fontsize=12)
+    ax.set_ylabel("Error (m)", fontsize=12)
+    ax.set_title(
+        f"Point Error vs Uncertainty ({mode.upper()}) - Frame {frame_number} (N={min_len})",
+        fontsize=14,
+    )
+    ax.grid(True, alpha=0.3)
+
+    # Add statistics
+    mean_error = np.mean(errors)
+    mean_uncertainty = np.mean(uncertainties)
+    ax.axhline(
+        mean_error,
+        color="red",
+        linestyle="--",
+        alpha=0.7,
+        label=f"Mean Error: {mean_error:.4f}m",
+    )
+    ax.axvline(
+        mean_uncertainty,
+        color="blue",
+        linestyle="--",
+        alpha=0.7,
+        label=f"Mean Uncertainty: {mean_uncertainty:.4f}",
+    )
+    ax.legend()
+
+    plt.tight_layout()
+
+    if isinstance(output_path, str) and len(output_path) > 0:
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"Saved error vs uncertainty plot to: {output_path}")
+        plt.close()
+    else:
+        pass
+
+
 def extract_video_info_from_path(
     register_folder: str,
 ) -> Tuple[Optional[str], Optional[str]]:
@@ -3003,6 +3563,7 @@ def main(args):
         plot_3d_points_only_output_path = f"{base_path}_3d_points_only.png"
         plot_3d_gt_output_path = f"{base_path}_3d_gt.png"
         plot_3d_kp_vs_gt_output_path = f"{base_path}_3d_kp_vs_gt.png"
+        plot_error_vs_uncertainty_output_path = f"{base_path}_error_vs_uncertainty.png"
     else:
         plot_3d_output_path = None
         plot_3d_uncertainty_output_path = None
@@ -3010,6 +3571,7 @@ def main(args):
         plot_3d_points_only_output_path = None
         plot_3d_gt_output_path = None
         plot_3d_kp_vs_gt_output_path = None
+        plot_error_vs_uncertainty_output_path = None
 
     # Create statistics plot (don't show yet)
     if len(residuals) > 0:
@@ -3022,6 +3584,12 @@ def main(args):
             reg_key_points_idx=reg_key_points_idx,
             output_path=stats_output_path,
             mode=detected_mode,
+            key_points=key_points,
+            curr3d=curr3d,
+            register_folder=register_folder,
+            results_dir=results_dir,
+            video_name=video_name,
+            ho3d_root=ho3d_root,
         )
     else:
         print("Warning: Skipping registration stats plot due to empty residuals")
@@ -3206,6 +3774,33 @@ def main(args):
                     mode=detected_mode,
                 )
 
+    # Plot error vs uncertainty (using GT pose to align points)
+    # This can be done regardless of whether we have all_key_points
+    if (
+        key_points is not None
+        and curr3d is not None
+        and uncertainties is not None
+        and len(uncertainties) > 0
+    ):
+        plot_error_vs_uncertainty(
+            key_points,
+            curr3d,
+            uncertainties,
+            register_folder,
+            args.frame_number,
+            results_dir=results_dir,
+            video_name=video_name,
+            ho3d_root=ho3d_root,
+            output_path=plot_error_vs_uncertainty_output_path if output_path else None,
+            mode=detected_mode,
+        )
+    elif uncertainties is None or len(uncertainties) == 0:
+        print("Warning: Uncertainties not available for error vs uncertainty plot")
+    elif key_points is None or curr3d is None:
+        print(
+            "Warning: key_points or curr3d not available for error vs uncertainty plot"
+        )
+
     # Show all figures at once if not saving
     if not output_path:
         plt.show()
@@ -3290,7 +3885,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ho3d_root",
         type=str,
-        default=None,
+        default="/home/justin/data/HO3D_V3/evaluation",
         help="HO3D dataset root directory (optional, will try to infer from video path)",
     )
 

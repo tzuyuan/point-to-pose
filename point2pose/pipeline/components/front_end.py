@@ -100,8 +100,6 @@ class FrontEnd:
         self.prev_residuals = {}  # obj_id -> previous mean residual
         self.prev_inlier_counts = {}  # obj_id -> previous inlier count
 
-        self.frame_id = 0
-
     def initialize(self, frame):
         """Initialize segmentation and tracker with the first frame."""
         self.segmenter.initialize(frame.rgb, mask=frame.mask)
@@ -172,7 +170,7 @@ class FrontEnd:
         ##                      register                        ##
         ##########################################################
 
-        result = FrontEndResult(frame_id=self.frame_id)
+        result = FrontEndResult(frame_id=frame.id)
         result.tracks = tracks
         result.uncertainties = uncertainties
         result.visibles = visibles
@@ -225,11 +223,15 @@ class FrontEnd:
                 )
                 fe_timings["extract_valid"] += time.time() - t_start
 
+                prev_pose = obj.pose.copy()
                 # solve frame to frame registration
                 if prev3d.shape[0] >= 3 and correspond_curr3d.shape[0] >= 3:
                     t_start = time.time()
                     T_rel, stats_reg = self.register.register(
-                        prev3d, correspond_curr3d, sigma_tgt=uncertainties[idx]
+                        prev3d,
+                        correspond_curr3d,
+                        sigma_tgt=uncertainties[idx],
+                        prev_T=prev_pose,
                     )
                     fe_timings["registration"] += time.time() - t_start
                     mean_res = self._compute_mean_residual(stats_reg)
@@ -265,15 +267,25 @@ class FrontEnd:
                 )
                 fe_timings["extract_valid"] += time.time() - t_start
 
+                prev_pose = obj.pose.copy()
                 # solve frame to map registration
                 if key_points.shape[0] >= 3 and correspond_curr3d.shape[0] >= 3:
-                    prev_pose = obj.pose.copy()
                     t_start = time.time()
                     T_c2w_est, stats_reg = self.register.register(
-                        key_points, correspond_curr3d, init_pose=prev_pose
+                        key_points,
+                        correspond_curr3d,
+                        init_pose=prev_pose,
+                        prev_T=prev_pose,
                     )
                     fe_timings["registration"] += time.time() - t_start
                     mean_res = self._compute_mean_residual(stats_reg)
+                else:
+                    print(
+                        f"[FrontEnd] Frame {frame.id} - Object {obj_id} - Not enough points for registration."
+                    )
+                    T_c2w_est = prev_pose
+                    mean_res = -1.0
+                    stats_reg = {}
 
                 stats_reg["correspond_curr3d"] = correspond_curr3d
                 stats_reg["valid_idx"] = idx
@@ -311,7 +323,7 @@ class FrontEnd:
                     stats_before_dense = stats_reg.copy() if stats_reg else {}
 
                     print(
-                        f"[FrontEnd] Frame {self.frame_id} - Object {obj_id} - "
+                        f"[FrontEnd] Frame {frame.id} - Object {obj_id} - "
                         f"Dense recovery triggered: {reason}"
                     )
 
@@ -343,7 +355,7 @@ class FrontEnd:
                 # Dense recovery (only for f2f mode)
                 T_odom = T_rel_dense @ T_prev
                 print(
-                    f"[FrontEnd] Frame {self.frame_id} - Object {obj_id} - "
+                    f"[FrontEnd] Frame {frame.id} - Object {obj_id} - "
                     "Dense recovery successful"
                 )
             elif self.frame_reg_mode == "f2f":
@@ -398,7 +410,7 @@ class FrontEnd:
                         correspond_curr3d,
                         T_rel if T_rel is not None else np.eye(4),
                         self._reg_debug_dir,
-                        f"obj_{obj_id}_frame_{self.frame_id}_f2f",
+                        f"obj_{obj_id}_frame_{frame.id}_f2f",
                         stats_reg,
                     )
                 elif self.frame_reg_mode == "f2m":
@@ -407,13 +419,11 @@ class FrontEnd:
                         correspond_curr3d,
                         T_c2w_est if T_c2w_est is not None else np.eye(4),
                         self._reg_debug_dir,
-                        f"obj_{obj_id}_frame_{self.frame_id}_f2m",
+                        f"obj_{obj_id}_frame_{frame.id}_f2m",
                         stats_reg,
                     )
 
-            print(
-                f"[FrontEnd] Frame {self.frame_id} - Object {obj_id} - Odom: \n{T_odom}"
-            )
+            print(f"[FrontEnd] Frame {frame.id} - Object {obj_id} - Odom: \n{T_odom}")
 
             # Update previous stats for next frame
             if mean_res >= 0:
@@ -437,15 +447,13 @@ class FrontEnd:
         # Update previous frame for next step
         self.prev_frame = frame
 
-        self.frame_id += 1
-
         # Print timing summary
         total_fe_time = sum(fe_timings.values())
         timing_str = " | ".join(
             [f"{k}: {v*1000:.2f}ms" for k, v in fe_timings.items() if v > 0]
         )
         print(
-            f"[FrontEnd] Frame {self.frame_id-1} timing: {timing_str} | Total: {total_fe_time*1000:.2f}ms"
+            f"[FrontEnd] Frame {frame.id} timing: {timing_str} | Total: {total_fe_time*1000:.2f}ms"
         )
 
         return result
@@ -511,7 +519,7 @@ class FrontEnd:
                     world_pts,
                     rgb_vals,
                     self.cropped_pcd_dir,
-                    f"obj_{obj_id}_frame_{self.frame_id}",
+                    f"obj_{obj_id}_frame_{frame.id}",
                 )
             except Exception:
                 pass

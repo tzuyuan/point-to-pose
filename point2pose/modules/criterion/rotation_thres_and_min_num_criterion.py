@@ -34,7 +34,7 @@ class RotationThresholdAndMinNumCriterion(SampleCriterion):
         reg_stats = context.reg_stats[obj_id]
         # if reg_stats is None:
         #     return True
-        num_pts = reg_stats["curr3d"].shape[0]
+        num_pts = reg_stats["correspond_curr3d"].shape[0]
         print(f"[Criterion] num visible points: {num_pts}")
 
         if num_pts < self._min_num_pts:

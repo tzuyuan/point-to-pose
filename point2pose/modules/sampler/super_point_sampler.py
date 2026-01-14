@@ -49,6 +49,8 @@ class SuperPointSampler(Sampler):
     def sample(self, context: SamplerContext, obj_id: int):
         frame = context.frame
         rgb = frame.rgb  # HxWx3, uint8 RGB
+        depth = frame.depth  # HxW, float32
+        depth_factor = frame.depth_factor
         H, W = rgb.shape[:2]
 
         # --- 1) Base mask (uint8 0/255 for OpenCV)
@@ -167,6 +169,37 @@ class SuperPointSampler(Sampler):
             if self.debug_level >= 1:
                 print(
                     f"[SuperPoint] All keypoints filtered out by detect_mask (obj {obj_id})"
+                )
+                self._viz_hull(rgb, mask_inner, hull_xy, detect_mask, frame.id, obj_id)
+            return np.empty((0, 2), dtype=np.int32)
+
+        # --- 5.5) Depth filtering (keep only points with valid depth)
+        # Get depth thresholds from context if available, otherwise use config defaults
+        min_depth = context.min_depth
+        max_depth = context.max_depth
+
+        # Convert local coordinates to global coordinates for depth access
+        pts_xy_int_global_for_depth = pts_xy_int_local.copy()
+        pts_xy_int_global_for_depth[:, 0] += x_offset
+        pts_xy_int_global_for_depth[:, 1] += y_offset
+
+        # Sample depth values at keypoint locations
+        x_global = np.clip(pts_xy_int_global_for_depth[:, 0], 0, W - 1)
+        y_global = np.clip(pts_xy_int_global_for_depth[:, 1], 0, H - 1)
+        depths = depth[y_global, x_global] * depth_factor
+
+        # Filter: depth must be finite, > min_depth, and < max_depth
+        valid_depth = np.isfinite(depths) & (depths > min_depth) & (depths < max_depth)
+
+        kps_xy = kps_xy[valid_depth]
+        kp_sc = kp_sc[valid_depth]
+        pts_xy_int_local = pts_xy_int_local[valid_depth]
+        desc = None if desc is None else desc[valid_depth]
+
+        if pts_xy_int_local.shape[0] == 0:
+            if self.debug_level >= 1:
+                print(
+                    f"[SuperPoint] All keypoints filtered out by depth constraints (obj {obj_id})"
                 )
                 self._viz_hull(rgb, mask_inner, hull_xy, detect_mask, frame.id, obj_id)
             return np.empty((0, 2), dtype=np.int32)

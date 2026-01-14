@@ -25,6 +25,8 @@ class KeyFrameManager:
         self.num_obj = self.pipeline_cfg.get("max_num_obj", 1)
         self.save_key_points = self.pipeline_cfg.get("save_key_points", False)
         self.max_rel_rotation_deg = self.pipeline_cfg.get("max_rel_rotation_deg", 45.0)
+        self.min_depth = self.pipeline_cfg.get("min_depth", 0.05)
+        self.max_depth = self.pipeline_cfg.get("max_depth", 1.0)
         self.key_points_save_path = self.pipeline_cfg.get(
             "key_points_save_path", "./key_points"
         )
@@ -36,7 +38,9 @@ class KeyFrameManager:
         self.sampler = build_from_cfg(cfg.sampler, SAMPLER)
 
         self.crit_ctx = CriterionContext()
-        self.samp_ctx = SamplerContext(frame=None)
+        self.samp_ctx = SamplerContext(
+            frame=None, min_depth=self.min_depth, max_depth=self.max_depth
+        )
 
         # Per-object bookkeeping
         self.is_key_frame: Dict[int, bool] = {}  # obj_id -> bool

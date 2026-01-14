@@ -38,11 +38,13 @@ class ModularPipeline:
         self.track_table = PointTrackTable.new(n0=0)
         self.objects = []
         self.num_obj = self.pipeline_cfg.get("max_num_obj", 1)
-        self.frame_id = 0
+        self._initialized = False
 
         # module settings
         self._estimate_init_pose = self.pipeline_cfg.get("estimate_init_pose", False)
         self.use_local_graph = self.pipeline_cfg.get("use_local_graph", False)
+        self.min_depth = self.pipeline_cfg.get("min_depth", 0.05)
+        self.max_depth = self.pipeline_cfg.get("max_depth", 1.0)
         self.local_opt_type = self.cfg.local_optimizer.get("type", "isam2")
         self.local_graph_max_num_frames = self.cfg.local_optimizer.params.get(
             "local_graph_max_num_frames", -1
@@ -173,7 +175,7 @@ class ModularPipeline:
                     "obj_key_points": self.objects[0].key_points,
                     "obj_uncertainties": self.objects[0].uncertainties,
                     "obj_valid": self.objects[0].valid,
-                    "is_key_frame": False,
+                    "is_key_frame": True,
                     "pose_frontend": np.eye(4),
                     "pose_local": np.eye(4),
                     "reg_curr3d": self.objects[obj_id].key_points,
@@ -195,11 +197,12 @@ class ModularPipeline:
                 }
             )
 
-        self.frame_id += 1
+        self._initialized = True
+
         return out_pose
 
     def step(self, frame):
-        if self.frame_id == 0:
+        if not self._initialized:
             return self.initialize_first_frame(frame)
 
         iter_start_time = time.time()
@@ -225,7 +228,10 @@ class ModularPipeline:
 
         pose_frontend = {}
         for obj_id in range(self.num_obj):
-            pose_frontend[obj_id] = self.objects[obj_id].pose.copy()
+            if self.objects[obj_id].pose is not None:
+                pose_frontend[obj_id] = self.objects[obj_id].pose.copy()
+            else:
+                pose_frontend[obj_id] = np.eye(4)
 
         #################################################################
         ##                     Track Table Update                      ##
@@ -274,7 +280,7 @@ class ModularPipeline:
                         obj_id
                     )
                     # print(
-                    #     f"Frame {self.frame_id}: Number of frames in local graph: {num_frames_in_local_graph}"
+                    #     f"Frame {frame.id}: Number of frames in local graph: {num_frames_in_local_graph}"
                     # )
                     if num_frames_in_local_graph >= self.local_graph_max_num_frames:
                         self.local_optimizer.reset(obj_id)
@@ -284,7 +290,7 @@ class ModularPipeline:
 
                 object_frame_data = ObjectFrameData(
                     obj_id=obj_id,
-                    frame_id=self.frame_id,
+                    frame_id=frame.id,
                     pose=self.objects[obj_id].pose,
                     rel_pose=fe_result.rel_poses[obj_id],
                     cur_3d=fe_result.valid_curr_3d[obj_id],
@@ -322,9 +328,7 @@ class ModularPipeline:
 
         # If new keyframe, reset local optimizer
         for kf in new_keyframes:
-            print(
-                f"Frame {self.frame_id}: Keyframe triggered. Resetting local optimizer."
-            )
+            print(f"Frame {frame.id}: Keyframe triggered. Resetting local optimizer.")
             self.local_optimizer.reset(kf.obj_id)
 
         #################################################################
@@ -359,11 +363,9 @@ class ModularPipeline:
         self._log_step(frame, fe_result, new_keyframes, pose_frontend, pose_local)
         module_times["logging"] = time.time() - t0
 
-        self.frame_id += 1
-
         iter_total_time = time.time() - iter_start_time
         print(
-            f"Frame {self.frame_id}: "
+            f"Frame {frame.id}: "
             f"frontend={module_times['frontend']:.4f}s, "
             f"track_table={module_times['track_table']:.4f}s, "
             f"recovery={module_times['recovery']:.4f}s, "
@@ -413,7 +415,7 @@ class ModularPipeline:
 
             log_payload = {
                 "timestamp": frame.timestamp,
-                "frame_id": self.frame_id,
+                "frame_id": frame.id,
                 "track2d": fe_result.tracks,
                 "uncertainties": fe_result.uncertainties,
                 "visibles": fe_result.visibles,
@@ -524,6 +526,8 @@ class ModularPipeline:
                 cam_intrinsics=frame.intrinsics,
                 depth_factor=frame.depth_factor,
                 remove_invalid=True,
+                min_depth=self.min_depth,
+                max_depth=self.max_depth,
             )
             # estimate initial bbox
             pcd = o3d.geometry.PointCloud()

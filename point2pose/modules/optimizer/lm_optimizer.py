@@ -152,11 +152,12 @@ class LMGraphOptimizer(Optimizer):
                 z_cam = data.cur_3d[lid]
                 Lj = gtsam.symbol("l", int(lid))
 
-                sigma_point = float(max(1e-4, data.residuals[m]))
+                # sigma_point = float(max(1e-4, data.residuals[m]))
+                sigma_point = float(max(1e-4, data.uncertainties[m]))
                 # base_noise = gtsam.noiseModel.Isotropic.Sigma(3, sigma_point)
                 base_noise = gtsam.noiseModel.Diagonal.Sigmas(
                     np.array(
-                        [sigma_point * 50, sigma_point * 50, sigma_point * 10],
+                        [sigma_point, sigma_point, sigma_point],
                         dtype=float,
                     )
                 )
