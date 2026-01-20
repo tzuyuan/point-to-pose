@@ -25,6 +25,13 @@ class KeyFrameManager:
         self.num_obj = self.pipeline_cfg.get("max_num_obj", 1)
         self.save_key_points = self.pipeline_cfg.get("save_key_points", False)
         self.max_rel_rotation_deg = self.pipeline_cfg.get("max_rel_rotation_deg", 45.0)
+        self.fill_missing_depth = self.pipeline_cfg.get("fill_missing_depth", False)
+        self.fill_depth_win_size = self.pipeline_cfg.get(
+            "fill_missing_depth_window_size", 3
+        )
+        self.fill_depth_min_neighbors = self.pipeline_cfg.get(
+            "fill_missing_depth_min_neighbors", 1
+        )
         self.min_depth = self.pipeline_cfg.get("min_depth", 0.05)
         self.max_depth = self.pipeline_cfg.get("max_depth", 1.0)
         self.key_points_save_path = self.pipeline_cfg.get(
@@ -153,11 +160,11 @@ class KeyFrameManager:
             obj = objects[obj_id]
             self.is_key_frame[obj_id] = False
 
-            # Check 1: If object is lost, avoid sampling
+            # If object is lost, avoid sampling
             if getattr(obj, "lost", False):
                 continue
 
-            # Check 2: Large rotation jump
+            # Large rotation jump
             rel_pose = front_end_result.rel_poses.get(obj_id)
             if rel_pose is not None:
                 rot_magnitude = scipy_R.from_matrix(rel_pose[:3, :3]).magnitude()
@@ -192,14 +199,21 @@ class KeyFrameManager:
                 depth_image=frame.depth,
                 cam_intrinsics=frame.intrinsics,
                 depth_factor=frame.depth_factor,
+                fill_missing_depth=False,
+                window_size=self.fill_depth_win_size,
+                min_neighbors=self.fill_depth_min_neighbors,
+                max_depth=self.max_depth,
+                min_depth=self.min_depth,
             )
 
             # Transform to object frame-0 coordinate (using current object pose)
-            T_co = obj.pose  # depending on your convention, this may be T_0c or T_wc
+            T_o2c = (
+                obj.pose
+            )  # obj.pose takes the first frame to the current camera frame
             new_points_3d_obj = transform_pts(
-                inverse_SE3(T_co),
+                inverse_SE3(T_o2c),
                 new_points_3d,
-            )
+            )  # inverse of T_co takes the current camera frame to the first frame (object frame-0)
 
             # Update object with these new keypoints
             obj.add_key_points(
@@ -295,7 +309,6 @@ class KeyFrameManager:
         """
         Build the 'obs' dict for this object at this frame.
         For now, we take all points belonging to this object in the track_table.
-        You can refine this to only take visible / valid / recently observed points.
         """
         # obj_track_ids list the indices of the points belonging to the object in the track_table
         obj_track_ids = np.asarray(track_table.obj2track_map[obj_id], dtype=np.int64)

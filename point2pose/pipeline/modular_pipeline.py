@@ -293,8 +293,10 @@ class ModularPipeline:
                     frame_id=frame.id,
                     pose=self.objects[obj_id].pose,
                     rel_pose=fe_result.rel_poses[obj_id],
-                    cur_3d=fe_result.valid_curr_3d[obj_id],
-                    cur_3d_idx=fe_result.valid_indices[obj_id],
+                    cur_3d=self.track_table.track_3d[
+                        self.track_table.obj2track_map[obj_id]
+                    ],
+                    cur_3d_idx=self.track_table.obj2track_map[obj_id],
                     valid_idx=fe_result.reg_stats[obj_id].get(
                         "valid_idx", np.array([])
                     ),
@@ -441,6 +443,10 @@ class ModularPipeline:
                 "reg_residuals": reg_stats.get("residuals", np.array([])),
                 "reg_inliers": reg_stats.get("inliers", np.array([])),
                 "reg_valid_idx": reg_stats.get("valid_idx", np.array([])),
+                # Clustered registration diagnostics (if produced by the register module)
+                # Keep the raw cluster candidate list for later analysis.
+                "reg_clusters": reg_stats.get("clusters", []),
+                "reg_best_cluster_idx": int(reg_stats.get("best_cluster_idx", -1)),
                 "iter": reg_stats.get("iter", -1),
                 # Intermediate Poses
                 "pose_frontend": (

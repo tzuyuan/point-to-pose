@@ -26,47 +26,47 @@ pipeline:
     use_dense_registration: false
     use_local_graph: false
 
-    debug_level: 0
+    debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/
     save_pose: true
     pose_save_path: /home/justin/code/point-to-pose/debug/poses
-    save_key_points: false
+    save_key_points: true
     key_points_save_path: /home/justin/code/point-to-pose/debug/key_points
     save_meta_data: true
     meta_data_save_path: /home/justin/code/point-to-pose/debug/pipeline/meta_data
-    save_cropped_pcd: false
+    save_cropped_pcd: true
     cropped_pcd_dir: /home/justin/code/point-to-pose/debug/cropped_pcd
 
 
 
 # register:
-  # svd_ransac, svd_residual_outlier, svd_uncertainty_outlier, svd_cluster_ransac
-  # type: svd_residual_outlier
-  # params:
-  #   remove_outside_mask: true
-  #   debug_level: 0
-  #   max_iter: 15
-  #   uncer_thres: 0.3
-  #   threshold_method: mad
-  #   inlier_thres: 0.01
-  #   thres_reduce_factor: 0.005
-  #   mad_scale: 5
-  #   min_inliers: 3
-  #   min_variance: 1e-5
+#   # svd_ransac, svd_residual_outlier, svd_uncertainty_outlier, svd_cluster_ransac
+#   type: svd_cluster_ransac
+#   params:
+#     remove_outside_mask: true
+#     debug_level: 0
+#     max_iter: 15
+#     uncer_thres: 0.3
+#     threshold_method: mad
+#     inlier_thres: 0.01
+#     thres_reduce_factor: 0.005
+#     mad_scale: 5
+#     min_inliers: 3
+#     min_variance: 1e-5
 
-  #   # outlier pose
-  #   residual_thres: 0.007
+#     # outlier pose
+#     residual_thres: 0.007
     
 register:
   type: svd_cluster_ransac
   params:
-    ransac_iters: 50
+    ransac_iters: 30
     sample_size: 3
-    inlier_thres: 0.007
-    min_inliers: 8
-    max_clusters: 5
-    use_uncertainty: true
-    min_variance: 1e-3
+    inlier_thres: 0.01
+    min_inliers: 3
+    max_clusters: 10
+    use_uncertainty: false
+    min_variance: 1e-2
 
     # front end
     remove_outside_mask: true
@@ -139,7 +139,7 @@ tracker:
 sampler: 
   type: super_point
   params:
-    num_points: 25
+    num_points: 20
     density_per_kpx: -1
     fps_oversample_factor: 3
 
@@ -147,7 +147,7 @@ sampler:
     max_points: 50
     edge_margin_px: 3
     remove_convex_hull: false
-    inflate_points: false
+    inflate_points: true
     inflate_radius_px: 20
 
     cell_size: -1

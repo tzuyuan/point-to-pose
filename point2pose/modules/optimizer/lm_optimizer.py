@@ -58,6 +58,8 @@ class LMGraphOptimizer(Optimizer):
         self._prev_frame_id = -1
         self._prev_rel_T = None
 
+        self.Xo = gtsam.symbol("x", 0)
+
     def get_num_poses(self) -> int:
         """Return the number of pose variables currently in the graph."""
         return len(self._inserted_poses)
@@ -79,6 +81,7 @@ class LMGraphOptimizer(Optimizer):
         if Xi not in self._inserted_poses:
             self._values.insert(Xi, cur_pose_c2w_gtsam)
             self._inserted_poses.add(Xi)
+            self.Xo = Xi
 
         # Add prior on first pose or between factor afterward
         if not self._initialized:
@@ -94,26 +97,32 @@ class LMGraphOptimizer(Optimizer):
             # we need to invert it to get the current frame to the previous frame
             rel_T_cim12ci = gtsam.Pose3(inverse_SE3(data.rel_pose))
 
+            T_ci2o = gtsam.Pose3(inverse_SE3(data.pose))
+
             # Noise scaled by measurement residuals
             base_sigma = (
                 float(max(1e-4, np.mean(data.residuals)))
                 if data.residuals.size > 0
                 else 0.01
             )
-            # sigma_between = base_sigma  # Relax odometry relative to features
+            sigma_between = base_sigma  # Relax odometry relative to features
 
             # between_noise = gtsam.noiseModel.Diagonal.Sigmas(
             #     np.array(
             #         [
-            #             sigma_between * 1000,
-            #             sigma_between * 1000,
-            #             sigma_between * 1000,
-            #             sigma_between * 500,
-            #             sigma_between * 500,
-            #             sigma_between * 500,
+            #             sigma_between * 100,
+            #             sigma_between * 100,
+            #             sigma_between * 100,
+            #             sigma_between * 50,
+            #             sigma_between * 50,
+            #             sigma_between * 50,
             #         ],
             #         dtype=float,
             #     )
+            # )
+
+            # self._graph.push_back(
+            #     gtsam.BetweenFactorPose3(Xi, self.Xo, T_ci2o, between_noise)
             # )
 
             # # between_noise = gtsam.noiseModel.Diagonal.Sigmas(

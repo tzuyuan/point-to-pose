@@ -525,6 +525,14 @@ class PipelineLocalMap:
                         "reg_thr": reg_stats.get("thr", -1.0),
                         "reg_residuals": reg_stats.get("residuals", np.array([])),
                         "reg_inliers": reg_stats.get("inliers", np.array([])),
+                        # clustered registration diagnostics (if available)
+                        "reg_clusters": reg_stats.get("clusters", []),
+                        "reg_best_cluster_idx": int(
+                            reg_stats.get(
+                                "best_cluster_idx", reg_stats.get("selected_idx", -1)
+                            )
+                            or -1
+                        ),
                     }
                 )
 

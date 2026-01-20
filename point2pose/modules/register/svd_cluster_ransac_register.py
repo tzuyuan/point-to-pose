@@ -4,6 +4,10 @@ from point2pose.core.base_register import Register
 from point2pose.core.module_registry import REGISTER
 from point2pose.utils.transform import transform_pts, inverse_SE3
 from point2pose.utils.lie import log_SE3
+from point2pose.utils.camera import (
+    compute_projection_consistency,
+    extract_cropped_point_cloud,
+)
 
 
 @REGISTER.register_module("svd_cluster_ransac")
@@ -18,9 +22,11 @@ class SVDClusterRANSACRegister(Register):
         self._inlier_thres = config.get("inlier_thres", 0.01)
         self._min_inliers = config.get("min_inliers", 6)
         self._max_clusters = config.get("max_clusters", 10)
+        self._use_uncertainty = config.get("use_uncertainty", False)
 
-        self._trans_w = config.get("trans_weight", 1.0)
         self._min_var = float(config.get("min_variance", 1e-2))
+
+        np.random.seed(0)
 
     def register(
         self,
@@ -31,10 +37,16 @@ class SVDClusterRANSACRegister(Register):
         sigma_tgt=None,
         sigma=None,
         prev_T=None,
+        prev_frame=None,
+        cur_frame=None,
+        obj_id=0,
     ):
         stats = {}
         N = src_pcd.shape[0]
-        w = self._build_weights(N, sigma_src, sigma_tgt, sigma)
+        if self._use_uncertainty:
+            w = self._build_weights(N, sigma_src, sigma_tgt, sigma)
+        else:
+            w = None
 
         p0 = (
             transform_pts(init_pose, src_pcd)
@@ -60,15 +72,30 @@ class SVDClusterRANSACRegister(Register):
         if len(candidates) == 0:
             T0 = init_pose if init_pose is not None else np.eye(4)
             stats["clusters"] = []
-            stats["selected_idx"] = -1
+            stats["best_cluster_idx"] = -1
             stats["remaining_mask"] = remaining
             stats["inliers"] = np.zeros(N, dtype=bool)
             stats["residuals"] = np.ones(N) * -1.0
             return T0, stats
 
-        # choose: closest to previous transform (init_pose) if available
-        if init_pose is not None:
-            d = [self._pose_dist(c["T"], prev_T) for c in candidates]
+        # choose: reprojection error if cur_frame available, otherwise fallback
+        reproj_errors = None
+        if cur_frame is not None:
+            reproj_errors = []
+            src_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
+
+            for c in candidates:
+                src_pcd_full_cur = src_pcd_full.copy()
+                T_cur2prev = prev_T @ inverse_SE3(c["T"])
+                err = compute_projection_consistency(
+                    src_pcd_full_cur, T_cur2prev, prev_frame, obj_id=0
+                )
+                reproj_errors.append(err)
+                c["reproj_error"] = float(err)
+            best_cluster_idx = int(np.argmin(reproj_errors))
+        elif init_pose is not None:
+            ref_T = prev_T if prev_T is not None else init_pose
+            d = [self._pose_dist(c["T"], ref_T) for c in candidates]
             best_cluster_idx = int(np.argmin(d))
         else:
             # fallback: most inliers then lowest mean residual
@@ -93,6 +120,8 @@ class SVDClusterRANSACRegister(Register):
         stats["remaining_mask"] = remaining
         stats["inliers"] = inliers
         stats["residuals"] = residuals
+        if reproj_errors is not None:
+            stats["reproj_errors"] = np.array(reproj_errors, dtype=float)
         return candidates[best_cluster_idx]["T"], stats
 
     def _RANSAC(self, p0, tgt_pcd, w, remaining, init_pose):
@@ -123,6 +152,7 @@ class SVDClusterRANSACRegister(Register):
                 if w is not None
                 else self._svd_fit(p0[samp], tgt_pcd[samp])
             )
+            # Tk = self._svd_fit(p0[samp], tgt_pcd[samp])
             # compute the residuals between the transformed source points and the target points
             r = np.linalg.norm(transform_pts(Tk, p0[idx]) - tgt_pcd[idx], axis=1)
 
@@ -180,6 +210,36 @@ class SVDClusterRANSACRegister(Register):
     def _pose_dist(self, Ta, Tb):
         return np.linalg.norm(log_SE3(Ta @ inverse_SE3(Tb)))
 
+    # def _build_weights(self, N, sigma_src, sigma_tgt, sigma):
+    #     if sigma is None and sigma_src is None and sigma_tgt is None:
+    #         return None
+
+    #     def arr(x):
+    #         if x is None:
+    #             return None
+    #         x = np.asarray(x).astype(float)
+    #         if x.ndim == 0:
+    #             x = np.full((N,), float(x))
+    #         return x
+
+    #     sigma = arr(sigma)
+    #     sigma_src = arr(sigma_src)
+    #     sigma_tgt = arr(sigma_tgt)
+
+    #     if sigma is None:
+    #         var_src = (
+    #             0.0 if sigma_src is None else np.maximum(sigma_src**2, self._min_var)
+    #         )
+    #         var_tgt = (
+    #             0.0 if sigma_tgt is None else np.maximum(sigma_tgt**2, self._min_var)
+    #         )
+    #         var = var_src + var_tgt
+    #     else:
+    #         var = np.maximum(sigma**2, self._min_var)
+
+    #     var = np.maximum(var, self._min_var)
+    #     return 1.0 / var
+
     def _build_weights(self, N, sigma_src, sigma_tgt, sigma):
         if sigma is None and sigma_src is None and sigma_tgt is None:
             return None
@@ -197,18 +257,14 @@ class SVDClusterRANSACRegister(Register):
         sigma_tgt = arr(sigma_tgt)
 
         if sigma is None:
-            var_src = (
-                0.0 if sigma_src is None else np.maximum(sigma_src**2, self._min_var)
-            )
-            var_tgt = (
-                0.0 if sigma_tgt is None else np.maximum(sigma_tgt**2, self._min_var)
-            )
+            var_src = 0.0 if sigma_src is None else np.maximum(sigma_src, self._min_var)
+            var_tgt = 0.0 if sigma_tgt is None else np.maximum(sigma_tgt, self._min_var)
             var = var_src + var_tgt
         else:
-            var = np.maximum(sigma**2, self._min_var)
+            var = np.maximum(sigma, self._min_var)
 
         var = np.maximum(var, self._min_var)
-        return 1.0 / var
+        return np.exp(-var / 0.1)
 
     def _svd_fit(self, pa, qa):
         cp = pa.mean(axis=0)

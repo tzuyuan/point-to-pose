@@ -274,8 +274,12 @@ class FrontEnd:
                     T_c2w_est, stats_reg = self.register.register(
                         key_points,
                         correspond_curr3d,
+                        sigma_tgt=uncertainties[idx],
                         init_pose=prev_pose,
                         prev_T=prev_pose,
+                        prev_frame=self.prev_frame,
+                        cur_frame=frame,
+                        obj_id=obj_id,
                     )
                     fe_timings["registration"] += time.time() - t_start
                     mean_res = self._compute_mean_residual(stats_reg)
@@ -634,6 +638,20 @@ class FrontEnd:
         frame_mask_gpu,
         uncertainty_thres=0.3,
     ):
+
+        # idx, key_points, correspond_curr3d, cur_visible, valid_stats = (
+        #             self._extract_valid_key_points_mask_remove(
+        #                 obj,
+        #                 track_table.obj2track_map[obj_id],
+        #                 tracks,
+        #                 track_3d,
+        #                 current_visibles,
+        #                 track_valid,
+        #                 uncertainties,
+        #                 frame.mask[obj_id, 0],
+        #                 uncertainty_thres=self.reg_uncer_thres,
+        #             )
+        #         )
         # --- normalize mask to boolean 2D on GPU ---
         if frame_mask_gpu.ndim == 3 and frame_mask_gpu.shape[0] == 1:
             mask2d = frame_mask_gpu[0]

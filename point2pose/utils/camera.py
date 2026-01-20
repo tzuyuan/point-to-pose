@@ -1,6 +1,8 @@
 import numpy as np
-
+import torch
 from typing import Tuple
+
+from point2pose.utils.transform import transform_pts
 
 
 # def convert_pixel_to_world(
@@ -269,6 +271,165 @@ def convert_pixel_within_mask_to_world(
     )
 
     return world_pts, valid
+
+
+def extract_cropped_point_cloud(
+    frame,
+    obj_id,
+    min_depth=0.08,
+    max_depth=0.5,
+    fill_missing_depth=False,
+    window_size=3,
+    min_neighbors=1,
+):
+    """
+    Extract cropped point cloud from frame using mask for the specified object.
+
+    Args:
+        frame: Frame object
+        obj_id: Object ID
+
+    Returns:
+        point_cloud: (N, 3) numpy array of 3D points, or empty array if extraction fails
+    """
+    try:
+        if frame.mask is None:
+            return np.empty((0, 3), dtype=np.float32)
+
+        mask = frame.mask[obj_id, 0]
+        coords_yx = torch.nonzero(mask > 0, as_tuple=False)
+        if coords_yx.numel() == 0:
+            return np.empty((0, 3), dtype=np.float32)
+
+        pxl_xy = coords_yx[:, [1, 0]].cpu().numpy()
+        world_pts, valid = convert_pixel_to_world(
+            pixel=pxl_xy,
+            depth_image=frame.depth,
+            cam_intrinsics=frame.intrinsics,
+            depth_factor=frame.depth_factor,
+            min_depth=min_depth,
+            max_depth=max_depth,
+            fill_missing_depth=fill_missing_depth,
+            window_size=window_size,
+            min_neighbors=min_neighbors,
+        )
+
+        if world_pts.size == 0 or not np.any(valid):
+            return np.empty((0, 3), dtype=np.float32)
+
+        return world_pts[valid]
+
+    except Exception as e:
+        print(f"[FrontEnd] Error extracting cropped point cloud for obj {obj_id}: {e}")
+        return np.empty((0, 3), dtype=np.float32)
+
+
+def project_points_to_image(points, K, T):
+    """
+    Project 3D points to image plane.
+
+    Args:
+        points: (N, 3) 3D points in source frame coordinates
+        K: (3, 3) camera intrinsics matrix
+        T: (4, 4) transform from source frame to destination frame (T_dst_src)
+
+    Returns:
+        points_2d: (N, 2) 2D pixel coordinates (x, y)
+        points_3d_dst: (N, 3) 3D points in destination frame coordinates
+    """
+    # Transform points to destination frame
+    points_3d_dst = transform_pts(T, points)
+
+    # Project to image plane: [u, v, w] = K @ [X, Y, Z]
+    points_homog = (K @ points_3d_dst.T).T  # (N, 3)
+
+    # Normalize by depth: [x, y] = [u/w, v/w]
+    points_2d = points_homog[:, :2] / (points_homog[:, 2:3] + 1e-8)  # (N, 2)
+
+    return points_2d, points_3d_dst
+
+
+def compute_projection_consistency(
+    src_pcd,
+    T_src2dst,
+    frame_dst,
+    obj_id=0,
+    min_depth=0.01,
+    max_depth=2.0,
+):
+    """
+    Evaluate projection consistency for registration scoring.
+    This is a vectorized version that works with point clouds instead of Frame objects.
+
+    Args:
+        src_pcd: (N, 3) source points in source frame
+        T_src2dst: (4, 4) transform from source to destination frame
+        frame_dst: Destination Frame object
+        obj_id: Object ID
+        min_depth: Minimum valid depth (meters)
+        max_depth: Maximum valid depth (meters)
+
+    Returns:
+        float: Mean depth error in meters (lower is better), or np.inf if no valid points
+    """
+    # Project points
+    pts_dst_2d, pts_dst_3d = project_points_to_image(
+        src_pcd, frame_dst.intrinsics, T_src2dst
+    )
+
+    # Get frame properties
+    H, W = frame_dst.depth.shape
+    dst_mask = frame_dst.mask[obj_id, 0].cpu().numpy()
+    depth_image = frame_dst.depth
+    depth_factor = frame_dst.depth_factor
+
+    N = len(pts_dst_2d)
+
+    # Convert 2D coordinates to integer pixel indices
+    u_coords = np.round(pts_dst_2d[:, 0]).astype(int)
+    v_coords = np.round(pts_dst_2d[:, 1]).astype(int)
+
+    # Check bounds
+    in_bounds = (u_coords >= 0) & (u_coords < W) & (v_coords >= 0) & (v_coords < H)
+
+    if not np.any(in_bounds):
+        return np.inf
+
+    # Get mask values for valid points
+    mask_values = np.zeros(N, dtype=bool)
+    valid_indices = np.where(in_bounds)[0]
+    mask_values[valid_indices] = (
+        dst_mask[v_coords[valid_indices], u_coords[valid_indices]] > 0
+    )
+
+    # Get measured depths
+    z_measured = np.full(N, np.nan, dtype=float)
+    z_measured[valid_indices] = (
+        depth_image[v_coords[valid_indices], u_coords[valid_indices]] / depth_factor
+    )
+
+    # Get projected depths
+    z_projected = pts_dst_3d[:, 2]
+
+    # Create validity mask: inside mask, valid depth, in range
+    valid_depth = (z_measured > 0) & np.isfinite(z_measured)
+    in_depth_range = (
+        (min_depth <= z_measured)
+        & (z_measured <= max_depth)
+        & (min_depth <= z_projected)
+        & (z_projected <= max_depth)
+    )
+
+    valid = mask_values & valid_depth & in_depth_range
+
+    if not np.any(valid):
+        return np.inf
+
+    # Compute depth errors
+    depth_errors = np.abs(z_projected[valid] - z_measured[valid])
+
+    # Return mean depth error
+    return np.mean(depth_errors)
 
 
 def compute_normals_from_depth(
