@@ -354,8 +354,9 @@ def compute_projection_consistency(
     T_src2dst,
     frame_dst,
     obj_id=0,
-    min_depth=0.01,
+    min_depth=0.001,
     max_depth=2.0,
+    tau_occ=0.05,
 ):
     """
     Evaluate projection consistency for registration scoring.
@@ -402,6 +403,8 @@ def compute_projection_consistency(
         dst_mask[v_coords[valid_indices], u_coords[valid_indices]] > 0
     )
 
+    # mask_values[valid_indices] = True
+
     # Get measured depths
     z_measured = np.full(N, np.nan, dtype=float)
     z_measured[valid_indices] = (
@@ -420,16 +423,160 @@ def compute_projection_consistency(
         & (z_projected <= max_depth)
     )
 
-    valid = mask_values & valid_depth & in_depth_range
+    # please change occluded to be only outside the mask
+    not_occluded = (~valid_depth) | (z_measured >= (z_projected - tau_occ))
 
-    if not np.any(valid):
+    valid_inside = mask_values & valid_depth & in_depth_range & not_occluded
+
+    # Points outside mask (or out of bounds) with valid projected depth
+    valid_outside = (
+        (~mask_values) & (z_projected >= min_depth) & (z_projected <= max_depth)
+    )
+
+    if not np.any(valid_inside) and not np.any(valid_outside):
         return np.inf
 
     # Compute depth errors
-    depth_errors = np.abs(z_projected[valid] - z_measured[valid])
+    depth_errors = np.concatenate(
+        [
+            np.abs(z_projected[valid_inside] - z_measured[valid_inside]),
+            np.full(np.count_nonzero(valid_outside), 0.05),
+        ]
+    )
 
     # Return mean depth error
     return np.mean(depth_errors)
+
+
+# def compute_projection_consistency(
+#     src_pcd,
+#     T_src2dst,
+#     frame_dst,
+#     obj_id=0,
+#     min_depth=0.01,
+#     max_depth=2.0,
+#     cap=0.05,  # clamp depth error (m)
+#     win=1,  # 1 => 3x3 window
+#     out_mask_w=0.2,  # weight outside mask
+#     support_alpha=0.02,  # penalty scale
+#     bad=0.2,  # base penalty when nothing valid
+# ):
+#     pts_dst_2d, pts_dst_3d = project_points_to_image(
+#         src_pcd, frame_dst.intrinsics, T_src2dst
+#     )
+
+#     H, W = frame_dst.depth.shape
+#     depth = frame_dst.depth
+#     df = frame_dst.depth_factor
+
+#     dst_mask = frame_dst.mask[obj_id, 0].cpu().numpy()
+
+#     u = np.round(pts_dst_2d[:, 0]).astype(int)
+#     v = np.round(pts_dst_2d[:, 1]).astype(int)
+
+#     inb = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+#     if not np.any(inb):
+#         return bad + support_alpha
+
+#     idx = np.where(inb)[0]
+#     uu = u[idx]
+#     vv = v[idx]
+
+#     # mask weight (soft)
+#     inside = dst_mask[vv, uu] > 0
+#     wmask = np.ones(len(idx), float)
+#     wmask[~inside] = out_mask_w
+
+#     # read depth with small neighborhood fallback
+#     z = depth[vv, uu].astype(float) / df
+#     ok = (z > 0) & np.isfinite(z)
+
+#     if win > 0:
+#         need = np.where(~ok)[0]
+#         for t in need:
+#             x = uu[t]
+#             y = vv[t]
+#             x0 = max(0, x - win)
+#             x1 = min(W, x + win + 1)
+#             y0 = max(0, y - win)
+#             y1 = min(H, y + win + 1)
+#             patch = depth[y0:y1, x0:x1].astype(float) / df
+#             patch_ok = (patch > 0) & np.isfinite(patch)
+#             if np.any(patch_ok):
+#                 z[t] = np.median(patch[patch_ok])
+#                 ok[t] = True
+
+#     zp = pts_dst_3d[idx, 2]
+#     ok = (
+#         ok & (min_depth <= z) & (z <= max_depth) & (min_depth <= zp) & (zp <= max_depth)
+#     )
+
+#     if not np.any(ok):
+#         return bad + support_alpha * (len(src_pcd) / (1.0))
+
+#     e = np.abs(zp[ok] - z[ok])
+#     e = np.minimum(e, cap)
+
+#     wv = wmask[ok]
+#     err = np.sum(wv * e) / (np.sum(wv) + 1e-12)
+
+#     nvalid = int(ok.sum())
+#     support = support_alpha * (len(src_pcd) / (nvalid + 1.0))
+
+#     return err + support
+
+
+def compute_projection_consistency_mask_counting(
+    src_pcd,
+    T_src2dst,
+    frame_dst,
+    obj_id=0,
+    min_depth=0.01,
+    max_depth=2.0,
+):
+    """
+    Evaluate projection consistency for registration scoring.
+    This is a vectorized version that works with point clouds instead of Frame objects.
+
+    Args:
+        src_pcd: (N, 3) source points in source frame
+        T_src2dst: (4, 4) transform from source to destination frame
+        frame_dst: Destination Frame object
+        obj_id: Object ID
+        min_depth: Minimum valid depth (meters)
+        max_depth: Maximum valid depth (meters)
+
+    Returns:
+        float: Mean depth error in meters (lower is better), or np.inf if no valid points
+    """
+    # Project points
+    pts_dst_2d, pts_dst_3d = project_points_to_image(
+        src_pcd, frame_dst.intrinsics, T_src2dst
+    )
+
+    # Get frame properties
+    H, W = frame_dst.depth.shape
+    dst_mask = frame_dst.mask[obj_id, 0].cpu().numpy()
+
+    N = len(pts_dst_2d)
+
+    # Convert 2D coordinates to integer pixel indices
+    u_coords = np.round(pts_dst_2d[:, 0]).astype(int)
+    v_coords = np.round(pts_dst_2d[:, 1]).astype(int)
+
+    # Check bounds
+    in_bounds = (u_coords >= 0) & (u_coords < W) & (v_coords >= 0) & (v_coords < H)
+
+    if not np.any(in_bounds):
+        return np.inf
+
+    # Get mask values for valid points
+    # mask_values = np.zeros(N, dtype=bool)
+    valid_indices = np.where(in_bounds)[0]
+    # mask_values[valid_indices] = (
+    #     dst_mask[v_coords[valid_indices], u_coords[valid_indices]] > 0
+    # )
+    return -np.sum(dst_mask[v_coords[valid_indices], u_coords[valid_indices]] > 0)
 
 
 def compute_normals_from_depth(

@@ -5,6 +5,8 @@ import numpy as np
 
 from point2pose.utils.transform import transform_pts, inverse_SE3
 
+from point2pose.data_types.frame import Frame
+
 
 @dataclass
 class KeyFrame:
@@ -16,6 +18,7 @@ class KeyFrame:
     obj_id: int  # object id
     kf_idx: int  # index of the key frame in the key frame list for this object
     timestamp: Optional[float]
+    frame: Frame
 
     # Pose of the tracked object in this frame (4x4 SE(3))
     pose: np.ndarray

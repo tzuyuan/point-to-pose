@@ -4,6 +4,10 @@ from point2pose.core.base_register import Register
 from point2pose.core.module_registry import REGISTER
 from point2pose.utils.transform import transform_pts, inverse_SE3
 from point2pose.utils.lie import log_SE3
+from point2pose.utils.camera import (
+    compute_projection_consistency,
+    extract_cropped_point_cloud,
+)
 
 
 @REGISTER.register_module("svd_cluster")
@@ -43,6 +47,9 @@ class SVDClusterRegister(Register):
         sigma_tgt=None,
         sigma=None,
         prev_T=None,
+        prev_frame=None,
+        cur_frame=None,
+        obj_id=0,
     ):
         stats = {}
         N = int(src_pcd.shape[0])
@@ -84,10 +91,20 @@ class SVDClusterRegister(Register):
             return T0, stats
 
         # choose best candidate
-        if init_pose is not None:
-            ref_T = prev_T if prev_T is not None else init_pose
-            d = [self._pose_dist(c["T"], ref_T) for c in candidates]
-            best_cluster_idx = int(np.argmin(d))
+        reproj_errors = None
+        if cur_frame is not None:
+            reproj_errors = []
+            src_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
+
+            for c in candidates:
+                src_pcd_full_cur = src_pcd_full.copy()
+                T_cur2prev = prev_T @ inverse_SE3(c["T"])
+                err = compute_projection_consistency(
+                    src_pcd_full_cur, T_cur2prev, prev_frame, obj_id=0
+                )
+                reproj_errors.append(err)
+                c["reproj_error"] = float(err)
+            best_cluster_idx = int(np.argmin(reproj_errors))
         else:
             # fallback: most inliers then lowest mean residual
             best_cluster_idx = int(
@@ -113,7 +130,8 @@ class SVDClusterRegister(Register):
         stats["remaining_mask"] = remaining
         stats["inliers"] = inliers_full
         stats["residuals"] = residuals_full
-
+        if reproj_errors is not None:
+            stats["reproj_errors"] = np.array(reproj_errors, dtype=float)
         return best["T"], stats
 
     def _register_one_cluster(self, p0, tgt_pcd, w, remaining, init_pose):

@@ -232,6 +232,10 @@ class FrontEnd:
                         correspond_curr3d,
                         sigma_tgt=uncertainties[idx],
                         prev_T=prev_pose,
+                        prev_frame=self.prev_frame,
+                        cur_frame=frame,
+                        obj_id=obj_id,
+                        mode="f2f",
                     )
                     fe_timings["registration"] += time.time() - t_start
                     mean_res = self._compute_mean_residual(stats_reg)
@@ -265,6 +269,21 @@ class FrontEnd:
                         uncertainty_thres=self.reg_uncer_thres,
                     )
                 )
+
+                # idx, key_points, correspond_curr3d, cur_visible, valid_stats = (
+                #     self._extract_valid_key_points_mask_remove_no_depth_check(
+                #         obj,
+                #         track_table.obj2track_map[obj_id],
+                #         tracks,
+                #         track_3d,
+                #         current_visibles,
+                #         track_valid,
+                #         uncertainties,
+                #         frame.mask[obj_id, 0],
+                #         uncertainty_thres=self.reg_uncer_thres,
+                #     )
+                # )
+
                 fe_timings["extract_valid"] += time.time() - t_start
 
                 prev_pose = obj.pose.copy()
@@ -272,14 +291,16 @@ class FrontEnd:
                 if key_points.shape[0] >= 3 and correspond_curr3d.shape[0] >= 3:
                     t_start = time.time()
                     T_c2w_est, stats_reg = self.register.register(
-                        key_points,
-                        correspond_curr3d,
+                        src_pcd=key_points,
+                        tgt_pcd=correspond_curr3d,
                         sigma_tgt=uncertainties[idx],
                         init_pose=prev_pose,
                         prev_T=prev_pose,
                         prev_frame=self.prev_frame,
                         cur_frame=frame,
                         obj_id=obj_id,
+                        mode="f2m",
+                        # img_pts=tracks[idx],
                     )
                     fe_timings["registration"] += time.time() - t_start
                     mean_res = self._compute_mean_residual(stats_reg)
@@ -698,6 +719,94 @@ class FrontEnd:
         both_mask = (
             vis_obj & val_obj & uncer_obj & valid_kp_obj & finite_xy & inside_mask_np
         )
+
+        idx = obj_idx[both_mask]
+        key_points = obj.key_points[both_mask].copy()
+        correspond_curr3d = cur_pts_3d[idx].copy()
+
+        valid_stats = {
+            "extract_vis_obj_mask": vis_obj,
+            "extract_val_obj_mask": val_obj,
+            "extract_uncer_obj_mask": uncer_obj,
+            "extract_valid_kp_mask": valid_kp_obj,
+            "extract_uncertainty_thres": uncertainty_thres,
+            "extract_obj_idx": obj_idx,
+            "extract_inside_mask": inside_mask_np,
+            "extract_finite_xy": finite_xy,
+        }
+
+        return idx, key_points, correspond_curr3d, cur_visible, valid_stats
+
+    def _extract_valid_key_points_mask_remove_no_depth_check(
+        self,
+        obj,
+        obj_idx,
+        cur_pts_2d,
+        cur_pts_3d,
+        cur_visible,
+        cur_valid,
+        cur_uncertainties,
+        frame_mask_gpu,
+        uncertainty_thres=0.3,
+    ):
+
+        # idx, key_points, correspond_curr3d, cur_visible, valid_stats = (
+        #             self._extract_valid_key_points_mask_remove(
+        #                 obj,
+        #                 track_table.obj2track_map[obj_id],
+        #                 tracks,
+        #                 track_3d,
+        #                 current_visibles,
+        #                 track_valid,
+        #                 uncertainties,
+        #                 frame.mask[obj_id, 0],
+        #                 uncertainty_thres=self.reg_uncer_thres,
+        #             )
+        #         )
+        # --- normalize mask to boolean 2D on GPU ---
+        if frame_mask_gpu.ndim == 3 and frame_mask_gpu.shape[0] == 1:
+            mask2d = frame_mask_gpu[0]
+        elif frame_mask_gpu.ndim == 2:
+            mask2d = frame_mask_gpu
+        else:
+            raise ValueError("frame_mask_gpu must be (H,W) or (1,H,W)")
+
+        mask_bool = (mask2d > 0) if mask2d.dtype != torch.bool else mask2d
+        H, W = mask_bool.shape
+
+        obj_idx = np.asarray(obj_idx, dtype=np.int64)
+        cur_pts_2d = np.asarray(cur_pts_2d, dtype=np.float32)
+        cur_pts_3d = np.asarray(cur_pts_3d)
+        cur_visible = np.asarray(cur_visible, dtype=bool)
+        cur_valid = np.asarray(cur_valid, dtype=bool)
+        cur_uncertainties = np.asarray(cur_uncertainties, dtype=np.float32)
+
+        val_obj = cur_valid[obj_idx]
+        uncer_obj = cur_uncertainties[obj_idx] < float(uncertainty_thres)
+        valid_kp_obj = np.asarray(
+            getattr(obj, "valid", np.ones(len(obj_idx), dtype=bool)), dtype=bool
+        )
+
+        pts2d_obj = cur_pts_2d[obj_idx]
+        finite_xy = np.isfinite(pts2d_obj).all(axis=1)
+
+        x = np.rint(pts2d_obj[:, 0]).astype(np.int64)
+        y = np.rint(pts2d_obj[:, 1]).astype(np.int64)
+        np.clip(x, 0, W - 1, out=x)
+        np.clip(y, 0, H - 1, out=y)
+
+        dev = mask_bool.device
+        x_t = torch.from_numpy(x).to(device=dev, dtype=torch.long)
+        y_t = torch.from_numpy(y).to(device=dev, dtype=torch.long)
+        inside_mask_np = mask_bool[y_t, x_t].detach().cpu().numpy()
+
+        outside_or_bad = (~inside_mask_np) | (~finite_xy)
+        if outside_or_bad.any():
+            cur_visible[obj_idx[outside_or_bad]] = False
+
+        vis_obj = cur_visible[obj_idx]
+
+        both_mask = vis_obj & uncer_obj & valid_kp_obj & finite_xy & inside_mask_np
 
         idx = obj_idx[both_mask]
         key_points = obj.key_points[both_mask].copy()

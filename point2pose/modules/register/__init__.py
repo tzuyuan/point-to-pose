@@ -7,3 +7,4 @@ from .cupoch_gicp_register import CupochGICPRegister
 from .svd_ransac_register import SVDRansacRegister
 from .svd_cluster_ransac_register import SVDClusterRANSACRegister
 from .svd_cluster_register import SVDClusterRegister
+from .pnp_cluster_ransac_register import PnPClusterRANSACRegister

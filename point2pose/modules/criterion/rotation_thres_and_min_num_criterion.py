@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 
 from point2pose.core.base_criterion import SampleCriterion
 from point2pose.core.module_registry import CRITERION
@@ -15,6 +16,7 @@ class RotationThresholdAndMinNumCriterion(SampleCriterion):
         super().__init__()
         self._max_angle_deg = config.get("max_angle_deg", 60)
         self._min_num_pts = config.get("min_num_pts", 10)
+        self._min_mask_area = config.get("min_mask_area", 100)
 
         # v is a list of direction vectors. (num_dirs, 3)
         # we assume the first vector to be the initial direction as (0, 0, 1)
@@ -37,7 +39,10 @@ class RotationThresholdAndMinNumCriterion(SampleCriterion):
         num_pts = reg_stats["correspond_curr3d"].shape[0]
         print(f"[Criterion] num visible points: {num_pts}")
 
-        if num_pts < self._min_num_pts:
+        # sum number of pixel being in mask being 1
+        mask_area = torch.sum(context.frame.mask[obj_id, 0])
+
+        if (num_pts < self._min_num_pts) and (mask_area > self._min_mask_area):
             return True
 
         # pts_id = context.track_table.obj2track_map[obj_id]

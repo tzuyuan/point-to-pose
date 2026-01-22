@@ -239,6 +239,7 @@ def load_registration_stats(
         Optional[np.ndarray],
         Optional[np.ndarray],
         str,
+        Optional[np.ndarray],
     ]
 ]:
     """Load registration statistics for a given frame.
@@ -253,7 +254,7 @@ def load_registration_stats(
         video_name: Video sequence name for new structure (optional)
 
     Returns:
-        Tuple of (residuals, inliers, uncertainties, key_points/prev3d, curr3d, keyframe_ids, reg_key_points_idx, mode) if data is found, None otherwise.
+        Tuple of (residuals, inliers, uncertainties, key_points/prev3d, curr3d, keyframe_ids, reg_key_points_idx, mode, key_points_first_frame) if data is found, None otherwise.
         All arrays have the same length (number of registration points).
         mode is either "f2f" or "f2m".
     """
@@ -359,17 +360,18 @@ def load_registration_stats(
         )
 
         # Load source points based on mode
+        key_points_first_frame = None  # keep untransformed copy for GT alignment
         if detected_mode == "f2f":
             key_points = (
                 reg_prev3d_list[frame_idx] if frame_idx < len(reg_prev3d_list) else None
             )
             print("Loaded f2f mode: using reg_prev3d as source points")
         else:  # f2m mode
-            key_points = (
-                reg_key_points_list[frame_idx]
-                if frame_idx < len(reg_key_points_list)
-                else None
-            )
+            if frame_idx < len(reg_key_points_list):
+                key_points_first_frame = reg_key_points_list[frame_idx]
+                key_points = key_points_first_frame
+            else:
+                key_points = None
             print("Loaded f2m mode: using reg_key_points as source points")
 
         curr3d = (
@@ -547,6 +549,7 @@ def load_registration_stats(
             keyframe_ids,
             reg_key_points_idx,
             detected_mode,
+            key_points_first_frame,
         )
 
     except (IOError, ValueError, KeyError) as e:
@@ -1540,6 +1543,82 @@ def load_gt_key_points(
 
     except Exception as e:
         print(f"Error loading GT key points: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return None
+
+
+def get_gt_keypoint_map_for_frame(
+    register_folder: str,
+    frame_number: int,
+    results_dir: Optional[str] = None,
+    video_name: Optional[str] = None,
+    ho3d_root: Optional[str] = None,
+) -> Optional[np.ndarray]:
+    """Get GT keypoint map in the CURRENT frame coordinate system for a given frame.
+
+    This mirrors the notebook's use of a GT-corrected keypoint map: we start from the
+    stored keypoint map in the first-frame coordinates and transform it into the
+    current frame using the GT pose.
+    """
+    meta_data_path = find_meata_data_path(
+        register_folder,
+        meta_data_path_override=None,
+        results_dir=results_dir,
+        video_name=video_name,
+    )
+    if meta_data_path is None:
+        print("No meta_data.npz found for GT keypoint map")
+        return None
+
+    try:
+        data = np.load(meta_data_path, allow_pickle=True)
+
+        if "frame_id" not in data:
+            print("No frame_id field found in meta_data.npz")
+            return None
+
+        frame_ids = data["frame_id"]
+        frame_idx = None
+        for i, fid in enumerate(frame_ids):
+            if fid == frame_number:
+                frame_idx = i
+                break
+
+        if frame_idx is None:
+            print(f"Frame {frame_number} not found in meta_data.npz")
+            return None
+
+        # Keypoint map in first-frame coordinates (no filtering to preserve indices)
+        obj_key_points_list = unpack_ragged("obj_key_points", data, dim=3)
+        if frame_idx >= len(obj_key_points_list):
+            print(f"Frame index {frame_idx} out of range for obj_key_points")
+            return None
+
+        key_point_map_first = obj_key_points_list[frame_idx]
+        if key_point_map_first is None or len(key_point_map_first) == 0:
+            print("Key point map is empty")
+            return None
+
+        # GT pose from first frame to current frame
+        gt_pose_current = get_gt_pose_for_frame(
+            register_folder,
+            frame_number,
+            results_dir=results_dir,
+            video_name=video_name,
+            ho3d_root=ho3d_root,
+        )
+        if gt_pose_current is None:
+            print("Warning: Could not load GT pose for keypoint map")
+            return None
+
+        # Transform map from first frame to current frame
+        kp_h = np.hstack([key_point_map_first, np.ones((len(key_point_map_first), 1))])
+        gt_key_points = (gt_pose_current @ kp_h.T).T[:, :3]
+        return gt_key_points
+    except Exception as e:
+        print(f"Error loading GT keypoint map: {e}")
         import traceback
 
         traceback.print_exc()
@@ -3269,8 +3348,10 @@ def get_gt_pose_for_frame(
 
 def plot_error_vs_uncertainty(
     key_points: np.ndarray,
+    key_points_first_frame: Optional[np.ndarray],
     curr3d: np.ndarray,
     uncertainties: np.ndarray,
+    reg_key_points_idx: Optional[np.ndarray],
     register_folder: str,
     frame_number: int,
     results_dir: Optional[str] = None,
@@ -3282,9 +3363,11 @@ def plot_error_vs_uncertainty(
     """Plot error vs uncertainty after aligning source and target points using GT pose.
 
     Args:
-        key_points: Source points (N, 3) - registration key points
+        key_points: Source points (N, 3) - registration key points (already in current frame for plotting)
+        key_points_first_frame: Untransformed source points in first-frame coordinates (used for GT alignment in f2m)
         curr3d: Target points (N, 3) - current frame 3D points
         uncertainties: Uncertainty values for each point (N,)
+        reg_key_points_idx: Indices into the global keypoint map for each registration pair
         register_folder: Path to register folder
         frame_number: Frame number
         results_dir: Results directory (optional)
@@ -3294,63 +3377,65 @@ def plot_error_vs_uncertainty(
         mode: Registration mode ("f2f" or "f2m") for title
     """
     # Ensure arrays have the same length
-    min_len = min(len(key_points), len(curr3d), len(uncertainties))
-    key_points = key_points[:min_len]
+    min_len = min(len(curr3d), len(uncertainties))
     curr3d = curr3d[:min_len]
     uncertainties = uncertainties[:min_len]
+    if key_points is not None and len(key_points) >= min_len:
+        key_points = key_points[:min_len]
 
     if min_len == 0:
         print("Warning: No points available for error vs uncertainty plot")
         return
 
-    # Get GT pose for current frame
-    gt_pose = get_gt_pose_for_frame(
-        register_folder,
-        frame_number,
-        results_dir=results_dir,
-        video_name=video_name,
-        ho3d_root=ho3d_root,
-    )
-
-    if gt_pose is None:
-        print("Warning: Could not load GT pose, skipping error vs uncertainty plot")
-        return
-
-    # Transform source points using GT pose
-    # Note: gt_pose is already transformed relative to first frame (first frame = identity)
-    if mode == "f2m":
-        # For f2m mode: key_points are in first frame coordinates
-        # Since first frame is now identity, transform is just gt_pose
-        transform = gt_pose
+    # If we don't have keypoint indices, fall back to simple source/target distance
+    if reg_key_points_idx is None:
+        print(
+            "Warning: reg_key_points_idx is None, falling back to key_points vs curr3d error"
+        )
+        if key_points is None or len(key_points) < min_len:
+            print("  key_points not available, skipping error vs uncertainty plot")
+            return
+        errors = np.linalg.norm(key_points - curr3d, axis=1)
     else:
-        # f2f mode: key_points are from previous frame, need previous frame GT pose
-        prev_frame_gt_pose = get_gt_pose_for_frame(
+        # Use GT keypoint map in the CURRENT frame and compare against registered targets.
+        # This mirrors the notebook logic: measure how far each registered point is from
+        # the GT keypoint it should correspond to.
+        gt_map = get_gt_keypoint_map_for_frame(
             register_folder,
-            frame_number - 1,
+            frame_number,
             results_dir=results_dir,
             video_name=video_name,
             ho3d_root=ho3d_root,
         )
-        if prev_frame_gt_pose is not None:
-            # Both poses are already transformed relative to first frame
-            # Transform from prev frame to current: gt_pose @ inverse_SE3(prev_frame_gt_pose)
-            if inverse_SE3 is not None:
-                transform = gt_pose @ inverse_SE3(prev_frame_gt_pose)
-            else:
-                prev_frame_gt_pose_inv = np.linalg.inv(prev_frame_gt_pose)
-                transform = gt_pose @ prev_frame_gt_pose_inv
+        if gt_map is None:
+            print(
+                "Warning: Could not load GT keypoint map, falling back to key_points vs curr3d error"
+            )
+            if key_points is None or len(key_points) < min_len:
+                print("  key_points not available, skipping error vs uncertainty plot")
+                return
+            errors = np.linalg.norm(key_points - curr3d, axis=1)
         else:
-            # Fallback: use current GT pose directly
-            transform = gt_pose
-
-    # Transform source points to current frame using GT transform
-    # For f2m: key_points are in first frame coordinates, transform to current frame
-    key_points_h = np.hstack([key_points, np.ones((len(key_points), 1))])
-    key_points_transformed = (transform @ key_points_h.T).T[:, :3]
-
-    # curr3d is already in current frame coordinates, no transformation needed
-    # Compute error as Euclidean distance between transformed source and target
-    errors = np.linalg.norm(key_points_transformed - curr3d, axis=1)
+            reg_idx_array = np.asarray(reg_key_points_idx, dtype=int)
+            reg_idx_array = reg_idx_array[:min_len]
+            if (
+                np.any(reg_idx_array < 0)
+                or np.any(reg_idx_array >= len(gt_map))
+                or len(reg_idx_array) != min_len
+            ):
+                print(
+                    "Warning: reg_key_points_idx out of bounds for GT map, "
+                    "falling back to key_points vs curr3d error"
+                )
+                if key_points is None or len(key_points) < min_len:
+                    print(
+                        "  key_points not available, skipping error vs uncertainty plot"
+                    )
+                    return
+                errors = np.linalg.norm(key_points - curr3d, axis=1)
+            else:
+                corresponding_gt = gt_map[reg_idx_array]
+                errors = np.linalg.norm(corresponding_gt - curr3d, axis=1)
 
     # Create plot
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -3521,6 +3606,7 @@ def main(args):
         keyframe_ids,
         reg_key_points_idx,
         detected_mode,
+        key_points_first_frame,
     ) = result
     # key_points and curr3d are currently unused but kept for future use
     # _ = (
@@ -3784,8 +3870,10 @@ def main(args):
     ):
         plot_error_vs_uncertainty(
             key_points,
+            key_points_first_frame,
             curr3d,
             uncertainties,
+            reg_key_points_idx,
             register_folder,
             args.frame_number,
             results_dir=results_dir,

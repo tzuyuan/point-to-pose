@@ -6,6 +6,7 @@ from point2pose.utils.transform import transform_pts, inverse_SE3
 from point2pose.utils.lie import log_SE3
 from point2pose.utils.camera import (
     compute_projection_consistency,
+    compute_projection_consistency_mask_counting,
     extract_cropped_point_cloud,
 )
 
@@ -23,6 +24,7 @@ class SVDClusterRANSACRegister(Register):
         self._min_inliers = config.get("min_inliers", 6)
         self._max_clusters = config.get("max_clusters", 10)
         self._use_uncertainty = config.get("use_uncertainty", False)
+        self._select_method = config.get("select_method", "reproj_error")
 
         self._min_var = float(config.get("min_variance", 1e-2))
 
@@ -40,6 +42,7 @@ class SVDClusterRANSACRegister(Register):
         prev_frame=None,
         cur_frame=None,
         obj_id=0,
+        mode="f2m",
     ):
         stats = {}
         N = src_pcd.shape[0]
@@ -80,23 +83,31 @@ class SVDClusterRANSACRegister(Register):
 
         # choose: reprojection error if cur_frame available, otherwise fallback
         reproj_errors = None
-        if cur_frame is not None:
+        if self._select_method == "reproj_error":
             reproj_errors = []
             src_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
 
             for c in candidates:
                 src_pcd_full_cur = src_pcd_full.copy()
-                T_cur2prev = prev_T @ inverse_SE3(c["T"])
+                if mode == "f2f":
+                    T_cur2prev = inverse_SE3(c["T"])
+                elif mode == "f2m":
+                    T_cur2prev = prev_T @ inverse_SE3(c["T"])
+
                 err = compute_projection_consistency(
                     src_pcd_full_cur, T_cur2prev, prev_frame, obj_id=0
                 )
                 reproj_errors.append(err)
                 c["reproj_error"] = float(err)
             best_cluster_idx = int(np.argmin(reproj_errors))
-        elif init_pose is not None:
+        elif self._select_method == "dist_to_prev":
             ref_T = prev_T if prev_T is not None else init_pose
             d = [self._pose_dist(c["T"], ref_T) for c in candidates]
             best_cluster_idx = int(np.argmin(d))
+        elif self._select_method == "inlier_count":
+            best_cluster_idx = int(np.argmax([c["ninliers"] for c in candidates]))
+        elif self._select_method == "mean_residual":
+            best_cluster_idx = int(np.argmin([c["mean_res"] for c in candidates]))
         else:
             # fallback: most inliers then lowest mean residual
             best_cluster_idx = int(

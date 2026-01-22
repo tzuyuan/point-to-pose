@@ -60,37 +60,19 @@ pipeline:
 register:
   type: svd_cluster_ransac
   params:
-    ransac_iters: 100
+    ransac_iters: 50
     sample_size: 3
-    inlier_thres: 0.003
-    min_inliers: 3
-    max_clusters: 10
+    inlier_thres: 0.007
+    min_inliers: 8
+    max_clusters: 5
     use_uncertainty: true
-    min_variance: 1e-2
-
-    select_method: reproj_error
+    min_variance: 1e-3
 
     # front end
     remove_outside_mask: true
     uncer_thres: 0.3
     residual_thres: 0.007
 
-# register:
-#   type: svd_cluster
-#   params:
-#     threshold_method: fixed
-#     ransac_iters: 50
-#     sample_size: 3
-#     inlier_thres: 0.007
-#     min_inliers: 3
-#     max_clusters: 5
-#     use_uncertainty: false
-#     min_variance: 1e-3
-
-#     # front end
-#     remove_outside_mask: true
-#     uncer_thres: 0.3
-#     residual_thres: 0.007
 
 # register:
 #   type: svd_ransac
@@ -142,18 +124,17 @@ tracker:
     checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
  
   
-# tracker:
-#   type: cotracker3_online
-#   params:
-#     img_height: 480
-#     img_width: 640
-#     resize_height: 480
-#     resize_width: 640
-#     device: cuda
-#     window_len: 16
-#     v2: False  
-#     checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
-#     debug: false
+  # type: cotracker3_online
+  # params:
+  #   img_height: 480
+  #   img_width: 640
+  #   resize_height: 480
+  #   resize_width: 640
+  #   device: cuda
+  #   window_len: 16
+  #   v2: False  
+  #   checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
+  #   debug: true
 
 sampler: 
   type: super_point
@@ -196,11 +177,7 @@ criterion:
 
     # uncertainty criterion
     uncer_thres: 0.3
-    min_num_pts: 20
-
-    # rotation threshold and min num criterion
-    # if it's smaller than this it will not trigger sampling
-    min_mask_area: 100  
+    min_num_pts: 15
 
     # rotation grid criterion
     discretization_angle: 60

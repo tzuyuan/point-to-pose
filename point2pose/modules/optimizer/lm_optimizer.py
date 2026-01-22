@@ -162,7 +162,7 @@ class LMGraphOptimizer(Optimizer):
                 Lj = gtsam.symbol("l", int(lid))
 
                 # sigma_point = float(max(1e-4, data.residuals[m]))
-                sigma_point = float(max(1e-4, data.uncertainties[m]))
+                sigma_point = float(max(1e-2, data.uncertainties[m]))
                 # base_noise = gtsam.noiseModel.Isotropic.Sigma(3, sigma_point)
                 base_noise = gtsam.noiseModel.Diagonal.Sigmas(
                     np.array(
