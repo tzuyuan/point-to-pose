@@ -1,4 +1,6 @@
 import numpy as np
+import cupoch as cph
+import copy
 
 from point2pose.core.base_register import Register
 from point2pose.core.module_registry import REGISTER
@@ -7,6 +9,7 @@ from point2pose.utils.lie import log_SE3
 from point2pose.utils.camera import (
     compute_projection_consistency,
     compute_projection_consistency_mask_counting,
+    compute_projection_consistency_iou,
     extract_cropped_point_cloud,
 )
 
@@ -100,6 +103,33 @@ class SVDClusterRANSACRegister(Register):
                 reproj_errors.append(err)
                 c["reproj_error"] = float(err)
             best_cluster_idx = int(np.argmin(reproj_errors))
+        elif self._select_method == "reproj_error_iou":
+            reproj_errors = []
+            src_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
+
+            for c in candidates:
+                src_pcd_full_cur = src_pcd_full.copy()
+                T_cur2prev = prev_T @ inverse_SE3(c["T"])
+                err = compute_projection_consistency_iou(
+                    src_pcd_full_cur, T_cur2prev, prev_frame, obj_id=0
+                )
+                reproj_errors.append(err)
+                c["reproj_error_iou"] = float(err)
+            best_cluster_idx = int(np.argmax(reproj_errors))
+        elif self._select_method == "3d_dist":
+            dist_errors = []
+            src_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
+            tgt_pcd_full = extract_cropped_point_cloud(prev_frame, obj_id)
+            for c in candidates:
+                src_pcd_full_cur = src_pcd_full.copy()
+                T_cur2prev = prev_T @ inverse_SE3(c["T"])
+                dists = self.icp_like_point2point_residuals(
+                    src_pcd_full_cur, tgt_pcd_full, T_cur2prev
+                )
+
+                dist_errors.append(dists)
+                c["3d_dist"] = float(dists)
+            best_cluster_idx = int(np.argmin(dist_errors))
         elif self._select_method == "dist_to_prev":
             ref_T = prev_T if prev_T is not None else init_pose
             d = [self._pose_dist(c["T"], ref_T) for c in candidates]
@@ -319,3 +349,41 @@ class SVDClusterRANSACRegister(Register):
         T[:3, :3] = R
         T[:3, 3] = t
         return T
+
+    def icp_like_point2point_residuals(
+        self, source_pcd, target_pcd, T_src2tgt, max_corr_dist=0.01
+    ):
+        """
+        ICP-style point-to-point residuals WITHOUT running ICP:
+        - transform source points by T_src2tgt (CPU numpy)
+        - 1-NN search in target (Cupoch KDTree)
+        - residual = distance to nearest neighbor
+
+        Returns:
+        dists: (Ns,)
+        inlier_mask: (Ns,) if max_corr_dist is not None
+        rmse: float if max_corr_dist is not None
+        """
+        source = cph.geometry.PointCloud()
+        source.points = cph.utility.Vector3fVector(source_pcd.astype(np.float32))
+        target = cph.geometry.PointCloud()
+        target.points = cph.utility.Vector3fVector(target_pcd.astype(np.float32))
+
+        estimation_method = cph.registration.TransformationEstimationPointToPoint()
+
+        # Set up convergence criteria
+        criteria = cph.registration.ICPConvergenceCriteria()
+        criteria.max_iteration = 0
+
+        # Perform ICP registration
+        result = cph.registration.registration_icp(
+            source=source,
+            target=target,
+            max_correspondence_distance=max_corr_dist,
+            init=T_src2tgt,
+            estimation_method=estimation_method,
+            criteria=criteria,
+        )
+
+        dists = result.inlier_rmse
+        return dists

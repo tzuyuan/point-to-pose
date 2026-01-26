@@ -356,7 +356,7 @@ def compute_projection_consistency(
     obj_id=0,
     min_depth=0.001,
     max_depth=2.0,
-    tau_occ=0.05,
+    tau_occ=0.1,
 ):
     """
     Evaluate projection consistency for registration scoring.
@@ -423,8 +423,10 @@ def compute_projection_consistency(
         & (z_projected <= max_depth)
     )
 
-    # please change occluded to be only outside the mask
-    not_occluded = (~valid_depth) | (z_measured >= (z_projected - tau_occ))
+    occluded_outside = (
+        (~mask_values) & valid_depth & (z_measured < (z_projected - tau_occ))
+    )
+    not_occluded = ~occluded_outside
 
     valid_inside = mask_values & valid_depth & in_depth_range & not_occluded
 
@@ -446,6 +448,36 @@ def compute_projection_consistency(
 
     # Return mean depth error
     return np.mean(depth_errors)
+
+
+def compute_projection_consistency_iou(src_pcd, T_src2dst, frame_dst, obj_id=0):
+    # Project points
+    pts_dst_2d, pts_dst_3d = project_points_to_image(
+        src_pcd, frame_dst.intrinsics, T_src2dst
+    )
+
+    # Get frame properties
+    H, W = frame_dst.depth.shape
+    dst_mask = frame_dst.mask[obj_id, 0].cpu().numpy() > 0
+
+    # Convert to integer coordinates
+    u = np.round(pts_dst_2d[:, 0]).astype(int)
+    v = np.round(pts_dst_2d[:, 1]).astype(int)
+
+    # Filter out-of-bounds
+    valid = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+    u_valid = u[valid]
+    v_valid = v[valid]
+
+    # Create projected mask
+    proj_mask = np.zeros((H, W), dtype=bool)
+    proj_mask[v_valid, u_valid] = True
+
+    # Compute IoU
+    intersection = np.logical_and(proj_mask, dst_mask).sum()
+    union = np.logical_or(proj_mask, dst_mask).sum()
+
+    return intersection / union if union > 0 else 0.0
 
 
 # def compute_projection_consistency(

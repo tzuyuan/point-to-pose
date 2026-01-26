@@ -343,17 +343,17 @@ class ModularPipeline:
                 new_keyframes
             )
 
-            for kf in new_keyframes:
-                key = (kf.obj_id, kf.kf_idx)
-                if key in updated_global_poses:
-                    global_pose = updated_global_poses[key]
+        for kf in new_keyframes:
+            key = (kf.obj_id, kf.kf_idx)
+            if key in updated_global_poses:
+                global_pose = updated_global_poses[key]
 
-                    obj = self.objects[kf.obj_id]
-                    obj.pose = global_pose.copy()
+                obj = self.objects[kf.obj_id]
+                obj.pose = global_pose.copy()
 
-                    lm_idx = updated_landmarks[kf.obj_id][1]
-                    lm_pts = updated_landmarks[kf.obj_id][0]
-                    self.objects[kf.obj_id].key_points[lm_idx] = lm_pts
+                lm_idx = updated_landmarks[kf.obj_id][1]
+                lm_pts = updated_landmarks[kf.obj_id][0]
+                self.objects[kf.obj_id].key_points[lm_idx] = lm_pts
 
         module_times["global_opt"] = time.time() - t0
 

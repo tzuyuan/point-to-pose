@@ -372,31 +372,10 @@ def _build_reader(dataset: str, video_dir: str, ho3d_root: Optional[str]) -> Any
     if dataset == "ho3d":
         # Prefer the full reader if available, but fall back to a lightweight reader.
         if Ho3dReader is not None:
-            # Normalize ho3d_root to point to the actual root (where masks/ and models/ are)
             root = ho3d_root if ho3d_root is not None else os.path.dirname(video_dir)
-
-            # Check if root contains masks/ or models/ directories
-            # If not, try parent directory (e.g., if root is evaluation/, go up to HO3D_V3/)
-            if root and os.path.exists(root):
-                if not (
-                    os.path.exists(os.path.join(root, "masks"))
-                    or os.path.exists(os.path.join(root, "models"))
-                ):
-                    # Try parent directory
-                    parent = os.path.dirname(root)
-                    if parent and os.path.exists(parent):
-                        if os.path.exists(
-                            os.path.join(parent, "masks")
-                        ) or os.path.exists(os.path.join(parent, "models")):
-                            root = parent
-                            print(
-                                f"Adjusted ho3d_root from {ho3d_root} to {root} (masks/models found here)"
-                            )
-
             try:
                 return Ho3dReader(video_dir, root)
-            except Exception as e:
-                print(f"Warning: Failed to create Ho3dReader with root={root}: {e}")
+            except Exception:
                 pass
         try:
             return _SimpleHo3dGTReader(video_dir)
@@ -1008,6 +987,45 @@ def _load_frame_from_reader(reader: Any, frame_idx: int) -> Optional[Any]:
     return None
 
 
+def _compute_projection_consistency_iou(src_pcd, T_src2dst, frame_dst, obj_id=0):
+    # Project points
+    pts_dst_2d, pts_dst_3d = project_points_to_image(
+        src_pcd, frame_dst.intrinsics, T_src2dst
+    )
+
+    # Get frame properties
+    H, W = frame_dst.depth.shape
+    if frame_dst.mask is not None:
+        if torch is not None and isinstance(frame_dst.mask, torch.Tensor):
+            dst_mask = frame_dst.mask[obj_id, 0].cpu().numpy() > 0
+        else:
+            dst_mask = np.asarray(frame_dst.mask[obj_id, 0]) > 0
+    else:
+        # If no mask, assume full image (or empty if strict?)
+        # Let's assume full image is the target mask if none provided,
+        # but usually we want IOU with object mask.
+        dst_mask = np.ones((H, W), dtype=bool)
+
+    # Convert to integer coordinates
+    u = np.round(pts_dst_2d[:, 0]).astype(int)
+    v = np.round(pts_dst_2d[:, 1]).astype(int)
+
+    # Filter out-of-bounds
+    valid = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+    u_valid = u[valid]
+    v_valid = v[valid]
+
+    # Create projected mask
+    proj_mask = np.zeros((H, W), dtype=bool)
+    proj_mask[v_valid, u_valid] = True
+
+    # Compute IoU
+    intersection = np.logical_and(proj_mask, dst_mask).sum()
+    union = np.logical_or(proj_mask, dst_mask).sum()
+
+    return float(intersection / union) if union > 0 else 0.0
+
+
 def _compute_per_point_reprojection_errors(
     src_pcd: np.ndarray,
     T_src2dst: np.ndarray,
@@ -1015,7 +1033,7 @@ def _compute_per_point_reprojection_errors(
     obj_id: int = 0,
     min_depth: float = 0.01,
     max_depth: float = 2.0,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Compute per-point reprojection errors (similar to compute_projection_consistency but returns per-point data).
 
@@ -1032,7 +1050,6 @@ def _compute_per_point_reprojection_errors(
         depth_errors: (N,) per-point depth errors (NaN for invalid points)
         valid_mask: (N,) boolean mask indicating valid points
         pts_3d_dst: (N, 3) 3D points in destination frame
-        invalid_reasons: (N,) integer array: 0=valid, 1=out_of_bounds, 2=not_in_mask, 3=no_depth, 4=depth_out_of_range
     """
     if project_points_to_image is None or frame_dst is None:
         N = src_pcd.shape[0] if src_pcd.size > 0 else 0
@@ -1041,7 +1058,6 @@ def _compute_per_point_reprojection_errors(
             np.full(N, np.nan),
             np.zeros(N, dtype=bool),
             np.empty((N, 3)),
-            np.zeros(N, dtype=int),
         )
 
     # Project points
@@ -1103,17 +1119,7 @@ def _compute_per_point_reprojection_errors(
     depth_errors = np.full(N, np.nan, dtype=float)
     depth_errors[valid] = np.abs(z_projected[valid] - z_measured[valid])
 
-    # Classify invalid reasons: 0=valid, 1=out_of_bounds, 2=not_in_mask, 3=no_depth, 4=depth_out_of_range
-    invalid_reasons = np.zeros(N, dtype=int)
-    invalid_reasons[~in_bounds] = 1  # out_of_bounds
-    invalid_reasons[in_bounds & ~mask_values] = 2  # not_in_mask
-    invalid_reasons[in_bounds & mask_values & ~valid_depth] = 3  # no_depth
-    invalid_reasons[in_bounds & mask_values & valid_depth & ~in_depth_range] = (
-        4  # depth_out_of_range
-    )
-    invalid_reasons[valid] = 0  # valid points
-
-    return pts_dst_2d, depth_errors, valid, pts_dst_3d, invalid_reasons
+    return pts_dst_2d, depth_errors, valid, pts_dst_3d
 
 
 def plot_reprojection_2d(
@@ -1121,23 +1127,22 @@ def plot_reprojection_2d(
     pts_2d: np.ndarray,
     depth_errors: np.ndarray,
     valid_mask: np.ndarray,
-    invalid_reasons: np.ndarray,
     cluster_idx: int,
     *,
     title: str,
+    max_points: int = 5000,
 ) -> Optional[plt.Figure]:
     """
     Visualize reprojected points on 2D image with error coloring.
-    Visualizes ALL points (no subsampling) with different colors for invalid reasons.
 
     Args:
-        frame_dst: Destination Frame object (for RGB and depth images)
+        frame_dst: Destination Frame object (for RGB image)
         pts_2d: (N, 2) projected 2D coordinates
         depth_errors: (N,) per-point depth errors
         valid_mask: (N,) boolean mask indicating valid points
-        invalid_reasons: (N,) integer array: 0=valid, 1=out_of_bounds, 2=not_in_mask, 3=no_depth, 4=depth_out_of_range
         cluster_idx: Cluster index for title
         title: Plot title
+        max_points: Maximum number of points to plot (for performance)
 
     Returns:
         matplotlib Figure or None
@@ -1149,94 +1154,26 @@ def plot_reprojection_2d(
     if rgb.dtype != np.uint8:
         rgb = (rgb * 255).astype(np.uint8) if rgb.max() <= 1.0 else rgb.astype(np.uint8)
 
-    # Separate valid and invalid points
+    # Subsample points if too many
+    N = len(pts_2d)
+    if N > max_points:
+        indices = np.random.choice(N, max_points, replace=False)
+        pts_2d = pts_2d[indices]
+        depth_errors = depth_errors[indices]
+        valid_mask = valid_mask[indices]
+
+    # Filter to valid points only
     valid_pts = pts_2d[valid_mask]
     valid_errors = depth_errors[valid_mask]
-    invalid_pts = pts_2d[~valid_mask]
 
-    # Check if we have any points at all
-    if len(pts_2d) == 0:
+    if len(valid_pts) == 0:
         return None
 
-    # Get depth image for visualization
-    depth_image = None
-    if frame_dst.depth is not None:
-        depth_image = frame_dst.depth.copy()
-        depth_factor = (
-            frame_dst.depth_factor if frame_dst.depth_factor is not None else 1.0
-        )
-        # Normalize depth for visualization
-        if depth_image.dtype != np.uint8:
-            depth_normalized = depth_image / depth_factor
-            depth_normalized = np.clip(
-                (depth_normalized - depth_normalized.min())
-                / (depth_normalized.max() - depth_normalized.min() + 1e-8),
-                0,
-                1,
-            )
-            depth_image = (depth_normalized * 255).astype(np.uint8)
+    # Create figure with two subplots: image with points, error histogram
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
 
-    # Create figure with three subplots: RGB with points, depth with points, error histogram
-    if depth_image is not None:
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(24, 8))
-    else:
-        fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(16, 8))
-        ax2 = None
-
-    # Plot 1: RGB image with ALL reprojected points
+    # Plot 1: Image with reprojected points colored by error
     ax1.imshow(rgb)
-
-    # Plot invalid points with different colors based on reason
-    invalid_reasons_array = invalid_reasons[~valid_mask]
-    if len(invalid_pts) > 0:
-        # Separate invalid points by reason
-        out_of_bounds = invalid_pts[invalid_reasons_array == 1]
-        not_in_mask = invalid_pts[invalid_reasons_array == 2]
-        no_depth = invalid_pts[invalid_reasons_array == 3]
-        depth_out_of_range = invalid_pts[invalid_reasons_array == 4]
-
-        if len(out_of_bounds) > 0:
-            ax1.scatter(
-                out_of_bounds[:, 0],
-                out_of_bounds[:, 1],
-                c="red",
-                s=4,
-                alpha=0.4,
-                marker="x",
-                label=f"Out of bounds ({len(out_of_bounds)})",
-            )
-        if len(not_in_mask) > 0:
-            ax1.scatter(
-                not_in_mask[:, 0],
-                not_in_mask[:, 1],
-                c="yellow",
-                s=4,
-                alpha=0.4,
-                marker="x",
-                label=f"Not in mask ({len(not_in_mask)})",
-            )
-        if len(no_depth) > 0:
-            ax1.scatter(
-                no_depth[:, 0],
-                no_depth[:, 1],
-                c="magenta",
-                s=4,
-                alpha=0.4,
-                marker="x",
-                label=f"No depth ({len(no_depth)})",
-            )
-        if len(depth_out_of_range) > 0:
-            ax1.scatter(
-                depth_out_of_range[:, 0],
-                depth_out_of_range[:, 1],
-                c="cyan",
-                s=4,
-                alpha=0.4,
-                marker="x",
-                label=f"Depth out of range ({len(depth_out_of_range)})",
-            )
-
-    # Then plot valid points colored by error (green=low error, red=high error)
     if len(valid_pts) > 0:
         # Normalize errors for colormap
         if np.isfinite(valid_errors).any():
@@ -1259,127 +1196,44 @@ def plot_reprojection_2d(
             alpha=0.6,
             vmin=0,
             vmax=1,
-            label=f"Valid ({len(valid_pts)})",
         )
         plt.colorbar(scatter, ax=ax1, label="Normalized depth error")
-
-    ax1.set_title(
-        f"{title}\nRGB: All reprojected points ({len(pts_2d)} total, {len(valid_pts)} valid)"
-    )
+    ax1.set_title(f"{title}\nReprojected points (green=low error, red=high error)")
     ax1.set_xlabel("u (pixels)")
     ax1.set_ylabel("v (pixels)")
-    ax1.legend(loc="best", fontsize=8)
 
-    # Plot 2: Depth image with reprojected points
-    if ax2 is not None and depth_image is not None:
-        ax2.imshow(depth_image, cmap="gray")
-
-        # Plot invalid points on depth image
-        if len(invalid_pts) > 0:
-            invalid_reasons_array = invalid_reasons[~valid_mask]
-            out_of_bounds = invalid_pts[invalid_reasons_array == 1]
-            not_in_mask = invalid_pts[invalid_reasons_array == 2]
-            no_depth = invalid_pts[invalid_reasons_array == 3]
-            depth_out_of_range = invalid_pts[invalid_reasons_array == 4]
-
-            if len(out_of_bounds) > 0:
-                ax2.scatter(
-                    out_of_bounds[:, 0],
-                    out_of_bounds[:, 1],
-                    c="red",
-                    s=4,
-                    alpha=0.4,
-                    marker="x",
-                )
-            if len(not_in_mask) > 0:
-                ax2.scatter(
-                    not_in_mask[:, 0],
-                    not_in_mask[:, 1],
-                    c="yellow",
-                    s=4,
-                    alpha=0.4,
-                    marker="x",
-                )
-            if len(no_depth) > 0:
-                ax2.scatter(
-                    no_depth[:, 0],
-                    no_depth[:, 1],
-                    c="magenta",
-                    s=4,
-                    alpha=0.4,
-                    marker="x",
-                )
-            if len(depth_out_of_range) > 0:
-                ax2.scatter(
-                    depth_out_of_range[:, 0],
-                    depth_out_of_range[:, 1],
-                    c="cyan",
-                    s=4,
-                    alpha=0.4,
-                    marker="x",
-                )
-
-        # Plot valid points on depth image
-        if len(valid_pts) > 0:
-            if np.isfinite(valid_errors).any():
-                error_min = np.nanmin(valid_errors)
-                error_max = np.nanmax(valid_errors)
-                if error_max > error_min:
-                    normalized_errors = (valid_errors - error_min) / (
-                        error_max - error_min
-                    )
-                else:
-                    normalized_errors = np.zeros_like(valid_errors)
-            else:
-                normalized_errors = np.zeros_like(valid_errors)
-
-            ax2.scatter(
-                valid_pts[:, 0],
-                valid_pts[:, 1],
-                c=normalized_errors,
-                cmap="RdYlGn_r",
-                s=8,
-                alpha=0.6,
-                vmin=0,
-                vmax=1,
-            )
-
-        ax2.set_title("Depth: Reprojected points overlay")
-        ax2.set_xlabel("u (pixels)")
-        ax2.set_ylabel("v (pixels)")
-
-    # Plot 3: Error histogram (only for valid points)
-    if len(valid_pts) > 0 and np.isfinite(valid_errors).any():
-        ax3.hist(valid_errors, bins=50, alpha=0.7, color="tab:blue", edgecolor="black")
-        ax3.axvline(
+    # Plot 2: Error histogram
+    if np.isfinite(valid_errors).any():
+        ax2.hist(valid_errors, bins=50, alpha=0.7, color="tab:blue", edgecolor="black")
+        ax2.axvline(
             np.nanmean(valid_errors),
             color="red",
             linestyle="--",
             linewidth=2,
             label=f"Mean: {np.nanmean(valid_errors):.4f}m",
         )
-        ax3.axvline(
+        ax2.axvline(
             np.nanmedian(valid_errors),
             color="green",
             linestyle="--",
             linewidth=2,
             label=f"Median: {np.nanmedian(valid_errors):.4f}m",
         )
-        ax3.set_xlabel("Depth error (meters)")
-        ax3.set_ylabel("Frequency")
-        ax3.set_title(f"Depth error distribution (valid points: {len(valid_pts)})")
-        ax3.legend()
-        ax3.grid(True, alpha=0.3)
+        ax2.set_xlabel("Depth error (meters)")
+        ax2.set_ylabel("Frequency")
+        ax2.set_title("Depth error distribution")
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
     else:
-        ax3.text(
+        ax2.text(
             0.5,
             0.5,
-            f"No valid errors\nTotal points: {len(pts_2d)}\nValid: {len(valid_pts)}\nInvalid: {len(invalid_pts)}",
+            "No valid errors",
             ha="center",
             va="center",
-            transform=ax3.transAxes,
+            transform=ax2.transAxes,
         )
-        ax3.set_title("Depth error distribution")
+        ax2.set_title("Depth error distribution")
 
     fig.tight_layout()
     return fig
@@ -1412,7 +1266,7 @@ def plot_reprojection_error_summary(
 
     mean_errors = [e.get("mean_error", np.nan) for e in reproj_errors_per_cluster]
     median_errors = [e.get("median_error", np.nan) for e in reproj_errors_per_cluster]
-    std_errors = [e.get("std_error", np.nan) for e in reproj_errors_per_cluster]
+    ious = [e.get("iou", 0.0) for e in reproj_errors_per_cluster]
     n_valid = [e.get("n_valid", 0) for e in reproj_errors_per_cluster]
 
     fig, axs = plt.subplots(2, 2, figsize=(14, 10))
@@ -1439,15 +1293,16 @@ def plot_reprojection_error_summary(
     axs[0, 1].legend()
     axs[0, 1].grid(True, alpha=0.3)
 
-    # Std errors
-    axs[1, 0].bar(x, std_errors, color="tab:green", alpha=0.8)
+    # IOU
+    axs[1, 0].bar(x, ious, color="tab:green", alpha=0.8)
     if 0 <= best_idx < n_clusters:
         axs[1, 0].axvline(
             best_idx, color="red", linestyle="--", linewidth=2, label="best"
         )
-    axs[1, 0].set_ylabel("Std depth error (m)")
+    axs[1, 0].set_ylabel("IOU")
     axs[1, 0].set_xlabel("Cluster index")
-    axs[1, 0].set_title("Std reprojection error per cluster")
+    axs[1, 0].set_title("Reprojection IOU per cluster")
+    axs[1, 0].set_ylim(0, 1.05)
     axs[1, 0].legend()
     axs[1, 0].grid(True, alpha=0.3)
 
@@ -1532,12 +1387,9 @@ def main():
         type=str,
         default="/home/justin/data/HO3D_V3/",
         help=(
-            "HO3D root directory (should contain masks/ and models/ subdirectories). "
-            "If --video_dir is not provided but --video_name is, the script will "
-            "automatically search for video_dir in common locations based on ho3d_root. "
-            "For HO3D: searches ho3d_root/video_name, ho3d_root/evaluation/video_name, "
-            "and ho3d_root/train/video_name. Also used as hint for YCBInEOAT dataset. "
-            "The script will automatically adjust if ho3d_root points to evaluation/ or train/."
+            "HO3D root directory. If --video_dir is not provided but --video_name is, "
+            "the script will try to auto-set video_dir = ho3d_root/video_name "
+            "(and also ho3d_root/evaluation/video_name if applicable)."
         ),
     )
     ap.add_argument(
@@ -1552,6 +1404,13 @@ def main():
         type=int,
         default=0,
         help="Reference frame id/index for GT normalization (default: 0 / first frame).",
+    )
+    ap.add_argument(
+        "--reproj_target",
+        type=str,
+        default="prev",
+        choices=["prev", "keyframe"],
+        help="Target frame for reprojection visualization: 'prev' (previous frame) or 'keyframe' (last keyframe).",
     )
     args = ap.parse_args()
 
@@ -1649,6 +1508,13 @@ def main():
     reg_prev3d = unpack_ragged("reg_prev3d", store, dim=3)
     reg_inliers = unpack_ragged("reg_inliers", store, dim=-1)
     obj_key_points = unpack_ragged("obj_key_points", store, dim=3)
+
+    # Keyframes
+    is_key_frame = None
+    if "is_key_frame" in store:
+        is_key_frame = store["is_key_frame"]
+    elif "is_key_frame_data" in store:
+        is_key_frame = store["is_key_frame_data"]
 
     if "reg_clusters" not in store:
         raise KeyError(
@@ -1909,21 +1775,53 @@ def main():
                         )
 
         # ---------------- Reprojection visualization ----------------
+        # Determine reprojection target frame
+        target_frame_idx = -1
+        target_T = None
+        target_desc = "prev"
+
+        if args.reproj_target == "prev":
+            if i > 0 and prev_T is not None:
+                target_frame_idx = i - 1
+                target_T = prev_T
+                target_desc = "prev"
+        elif args.reproj_target == "keyframe":
+            # Find last keyframe index < i
+            if is_key_frame is not None and len(is_key_frame) > 0:
+                # Convert to indices
+                kf_indices = np.where(is_key_frame)[0]
+                valid_kf = kf_indices[kf_indices < i]
+                if len(valid_kf) > 0:
+                    kf_idx = valid_kf[-1]
+                    target_frame_idx = int(kf_idx)
+                    # Get pose for keyframe
+                    if "obj_pose" in store:
+                        try:
+                            target_T = np.asarray(
+                                store["obj_pose"][target_frame_idx], dtype=float
+                            )
+                        except Exception:
+                            target_T = None
+                    target_desc = f"keyframe_{kf_idx}"
+
         if (
             args.video_dir
             and gt_reader is not None
             and extract_cropped_point_cloud is not None
             and inverse_SE3 is not None
-            and prev_T is not None
+            and target_T is not None
+            and target_frame_idx >= 0
             and clusters
-            and i > 0
         ):
-            # Load current and previous frames
+            # Load current and target frames
             cur_frame = _load_frame_from_reader(gt_reader, frame_id)
-            prev_frame_id = int(np.asarray(frame_ids)[i - 1])
-            prev_frame = _load_frame_from_reader(gt_reader, prev_frame_id)
 
-            if cur_frame is not None and prev_frame is not None:
+            target_frame = None
+            if 0 <= target_frame_idx < len(frame_ids):
+                target_frame_id_val = int(np.asarray(frame_ids)[target_frame_idx])
+                target_frame = _load_frame_from_reader(gt_reader, target_frame_id_val)
+
+            if cur_frame is not None and target_frame is not None:
                 # Extract full point cloud from current frame
                 src_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id=0)
                 if src_pcd_full.size > 0:
@@ -1933,9 +1831,8 @@ def main():
                     # Compute reprojection for each cluster
                     for j, c in enumerate(clusters):
                         cluster_T = np.asarray(c.get("T", np.eye(4)), dtype=float)
-                        # T_cur2prev = prev_T @ inverse_SE3(cluster_T)
-                        # Following the same logic as svd_cluster_ransac_register.py
-                        T_cur2prev = prev_T @ inverse_SE3(cluster_T)
+                        # T_cur2target = target_T @ inverse_SE3(cluster_T)
+                        T_cur2target = target_T @ inverse_SE3(cluster_T)
 
                         # Compute per-point reprojection errors
                         (
@@ -1943,11 +1840,18 @@ def main():
                             depth_errors,
                             valid_mask,
                             pts_3d_dst,
-                            invalid_reasons,
                         ) = _compute_per_point_reprojection_errors(
                             src_pcd_full.copy(),
-                            T_cur2prev,
-                            prev_frame,
+                            T_cur2target,
+                            target_frame,
+                            obj_id=0,
+                        )
+
+                        # Compute IOU
+                        iou = _compute_projection_consistency_iou(
+                            src_pcd_full.copy(),
+                            T_cur2target,
+                            target_frame,
                             obj_id=0,
                         )
 
@@ -1970,20 +1874,20 @@ def main():
                                 "median_error": median_error,
                                 "std_error": std_error,
                                 "n_valid": n_valid,
+                                "iou": iou,
                             }
                         )
 
                         # Visualize reprojection for this cluster
                         fig_reproj = plot_reprojection_2d(
-                            prev_frame,
+                            target_frame,
                             pts_2d,
                             depth_errors,
                             valid_mask,
-                            invalid_reasons,
                             j,
                             title=(
-                                f"Reprojection - log_idx={i} frame_id={frame_id} "
-                                f"cluster={j} (mean_err={mean_error:.4f}m, n_valid={n_valid})"
+                                f"Reprojection to {target_desc} - log_idx={i} frame_id={frame_id} "
+                                f"cluster={j} (mean_err={mean_error:.4f}m, n_valid={n_valid}, iou={iou:.3f})"
                             ),
                         )
                         if fig_reproj is not None:
@@ -1996,7 +1900,7 @@ def main():
                                 fig_reproj.savefig(
                                     os.path.join(
                                         save_dir,
-                                        f"frame_{i:06d}_cluster_{j:02d}_reprojection.png",
+                                        f"frame_{i:06d}_cluster_{j:02d}_reprojection_{target_desc}.png",
                                     ),
                                     dpi=200,
                                 )
@@ -2012,7 +1916,7 @@ def main():
                             reproj_errors_per_cluster,
                             best_idx,
                             title=(
-                                f"Reprojection error summary - log_idx={i} "
+                                f"Reprojection error summary ({target_desc}) - log_idx={i} "
                                 f"frame_id={frame_id}"
                             ),
                         )
@@ -2025,7 +1929,7 @@ def main():
                                 fig_summary.savefig(
                                     os.path.join(
                                         save_dir,
-                                        f"frame_{i:06d}_reprojection_summary.png",
+                                        f"frame_{i:06d}_reprojection_summary_{target_desc}.png",
                                     ),
                                     dpi=200,
                                 )

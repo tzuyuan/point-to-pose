@@ -31,6 +31,7 @@ class SVDUncertaintyOutlierRegister(Register):
         sigma_src=None,
         sigma_tgt=None,
         sigma=None,
+        **kwargs,
     ):
         """
         Perform a single registration step using (weighted) SVD.
@@ -122,58 +123,84 @@ class SVDUncertaintyOutlierRegister(Register):
 
     # ---------------- internal helpers ----------------
 
+    # def _build_weights(self, N, sigma_src, sigma_tgt, sigma):
+    #     """
+    #     Build inverse-variance weights from uncertainties.
+    #     Returns:
+    #         w: (N,) or None if no uncertainties provided.
+    #     """
+    #     any_sigma = (
+    #         (sigma is not None) or (sigma_src is not None) or (sigma_tgt is not None)
+    #     )
+    #     if not any_sigma:
+    #         return None
+
+    #     # Normalize inputs to arrays
+    #     def _as_arr(x):
+    #         if x is None:
+    #             return None
+    #         x = np.asarray(x).astype(float)
+    #         if x.ndim == 0:
+    #             x = np.full((N,), float(x))
+    #         assert x.shape[0] == N, f"uncertainty length {x.shape[0]} != N={N}"
+    #         return x
+
+    #     sigma = _as_arr(sigma)
+    #     sigma_src = _as_arr(sigma_src)
+    #     sigma_tgt = _as_arr(sigma_tgt)
+
+    #     if sigma is None:
+    #         # combine per correspondence: var = var_src + var_tgt
+    #         var_src = (
+    #             np.zeros(N)
+    #             if sigma_src is None
+    #             else np.maximum(sigma_src**2, self._min_var)
+    #         )
+    #         var_tgt = (
+    #             np.zeros(N)
+    #             if sigma_tgt is None
+    #             else np.maximum(sigma_tgt**2, self._min_var)
+    #         )
+    #         var = var_src + var_tgt
+    #     else:
+    #         var = np.maximum(sigma**2, self._min_var)
+
+    #     var = np.maximum(var, self._min_var)
+    #     # inverse variance weights; safe for zeros via min_var
+    #     w = 1.0 / var
+    #     print(f"w: {w}")
+    #     print(f"var: {var}")
+    #     print(f"sigma_tgt: {sigma_tgt}")
+
+    #     # Optional: normalize weights to sum to 1 to keep scales stable (not required)
+    #     # w = w / (np.sum(w) + 1e-12)
+    #     return w
+
     def _build_weights(self, N, sigma_src, sigma_tgt, sigma):
-        """
-        Build inverse-variance weights from uncertainties.
-        Returns:
-            w: (N,) or None if no uncertainties provided.
-        """
-        any_sigma = (
-            (sigma is not None) or (sigma_src is not None) or (sigma_tgt is not None)
-        )
-        if not any_sigma:
+        if sigma is None and sigma_src is None and sigma_tgt is None:
             return None
 
-        # Normalize inputs to arrays
-        def _as_arr(x):
+        def arr(x):
             if x is None:
                 return None
             x = np.asarray(x).astype(float)
             if x.ndim == 0:
                 x = np.full((N,), float(x))
-            assert x.shape[0] == N, f"uncertainty length {x.shape[0]} != N={N}"
             return x
 
-        sigma = _as_arr(sigma)
-        sigma_src = _as_arr(sigma_src)
-        sigma_tgt = _as_arr(sigma_tgt)
+        sigma = arr(sigma)
+        sigma_src = arr(sigma_src)
+        sigma_tgt = arr(sigma_tgt)
 
         if sigma is None:
-            # combine per correspondence: var = var_src + var_tgt
-            var_src = (
-                np.zeros(N)
-                if sigma_src is None
-                else np.maximum(sigma_src**2, self._min_var)
-            )
-            var_tgt = (
-                np.zeros(N)
-                if sigma_tgt is None
-                else np.maximum(sigma_tgt**2, self._min_var)
-            )
+            var_src = 0.0 if sigma_src is None else np.maximum(sigma_src, self._min_var)
+            var_tgt = 0.0 if sigma_tgt is None else np.maximum(sigma_tgt, self._min_var)
             var = var_src + var_tgt
         else:
-            var = np.maximum(sigma**2, self._min_var)
+            var = np.maximum(sigma, self._min_var)
 
         var = np.maximum(var, self._min_var)
-        # inverse variance weights; safe for zeros via min_var
-        w = 1.0 / var
-        print(f"w: {w}")
-        print(f"var: {var}")
-        print(f"sigma_tgt: {sigma_tgt}")
-
-        # Optional: normalize weights to sum to 1 to keep scales stable (not required)
-        # w = w / (np.sum(w) + 1e-12)
-        return w
+        return np.exp(-var / 0.1)
 
     def _svd_fit(self, pa, qa):
         """
