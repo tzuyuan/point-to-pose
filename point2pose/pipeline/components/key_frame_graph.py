@@ -125,8 +125,8 @@ class KeyFrameGraph:
             #       - obs_track_indices: global track ids (used as landmark IDs)
             #       - obs_valid: depth validity mask
             #
-            #    These become the cur_3d / cur_3d_idx / inliers / residuals /
-            #    uncertainties fields for ObjectFrameData.
+            #    These become the reg_cur_3d / reg_cur_3d_idx / reg_inliers /
+            #    reg_residuals / reg_uncertainties fields for ObjectFrameData.
             # -------------------------------------------------------------
             if (
                 kf.obs_3d_camera is not None
@@ -152,6 +152,7 @@ class KeyFrameGraph:
                 # No observed points in this keyframe
                 cur_3d = np.zeros((0, 3), dtype=float)
                 cur_3d_idx = np.zeros((0,), dtype=int)
+                uncertainties = np.zeros((0,), dtype=float)
 
             num_meas = cur_3d.shape[0]
 
@@ -161,20 +162,28 @@ class KeyFrameGraph:
             valid_idx = kf.reg_valid_idx
             reg_cur_3d = kf.reg_correspond_curr3d
 
+            visible_pts_2d = kf.obs_2d[kf.obs_visible]
+            visible_pts_2d_idx = kf.obs_track_indices[kf.obs_visible]
+            visible_uncertainties = kf.obs_uncertainties[kf.obs_visible]
+
             # -------------------------------------------------------------
             # 3) Wrap into ObjectFrameData and call the underlying optimizer
             # -------------------------------------------------------------
             object_frame_data = ObjectFrameData(
                 obj_id=obj_id,
                 frame_id=kf_idx,  # use keyframe index as "frame id"
+                intrinsics=kf.frame.intrinsics,
                 pose=cur_pose,  # object/world pose at this keyframe
                 rel_pose=rel_pose,  # relative pose to previous keyframe
-                cur_3d=cur_3d,
-                cur_3d_idx=cur_3d_idx,
-                valid_idx=valid_idx,
-                inliers=inliers,
-                residuals=residuals,
-                uncertainties=uncertainties,
+                visible_pts_2d=visible_pts_2d,
+                visible_pts_2d_idx=visible_pts_2d_idx,
+                visible_uncertainties=visible_uncertainties,
+                reg_cur_3d=kf.reg_correspond_curr3d,
+                reg_cur_3d_idx=valid_idx,
+                reg_valid_idx=valid_idx,
+                reg_inliers=inliers,
+                reg_residuals=residuals,
+                reg_uncertainties=uncertainties,
             )
 
             opt_result = opt.optimize(object_frame_data)

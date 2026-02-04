@@ -54,10 +54,17 @@ class KeyFrame:
 
     def update_kps(self):
         """
-        with the new pose, update the key points and observed points in the object frame
+        With the new pose, update BOTH:
+          - key points in object frame
+          - observed points in object frame
         """
-        T = inverse_SE3(self.pose)
-        self.kp_3d_object = transform_pts(T, self.kp_3d_camera)
+        T_c2o = inverse_SE3(self.pose)  # (cam -> object)
+
+        if self.kp_3d_camera is not None and self.kp_3d_camera.size > 0:
+            self.kp_3d_object = transform_pts(T_c2o, self.kp_3d_camera)
+
+        if self.obs_3d_camera is not None and self.obs_3d_camera.size > 0:
+            self.obs_3d_object = transform_pts(T_c2o, self.obs_3d_camera)
 
     def get_num_kps(self):
         """

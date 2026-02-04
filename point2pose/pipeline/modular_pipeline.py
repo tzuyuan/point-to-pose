@@ -127,25 +127,31 @@ class ModularPipeline:
 
         self.kf_graph.update(new_kfs)
 
-        valid_idx = np.arange(len(self.objects[0].valid))
-        valid_idx = valid_idx[self.objects[0].valid]
         # 4. Initial Optimization
         if self.use_local_graph:
             for obj_id in range(self.num_obj):
+                valid_idx = self.objects[obj_id].valid
+                pts_2d_visible, pts_2d_visible_idx, visible_uncertainties = (
+                    self.track_table.get_visible_2d_and_uncertainties_for_obj(obj_id)
+                )
                 self.local_optimizer.optimize(
                     ObjectFrameData(
                         obj_id=obj_id,
                         frame_id=0,
+                        intrinsics=frame.intrinsics,
                         pose=np.eye(4),
                         rel_pose=np.eye(4),
-                        cur_3d=self.objects[obj_id].key_points,
-                        cur_3d_idx=self.objects[obj_id].key_point_indices,
-                        valid_idx=valid_idx,
-                        inliers=np.ones(
+                        visible_pts_2d=pts_2d_visible,
+                        visible_pts_2d_idx=pts_2d_visible_idx,
+                        visible_uncertainties=visible_uncertainties,
+                        reg_cur_3d=self.objects[obj_id].key_points,
+                        reg_cur_3d_idx=self.objects[obj_id].kp_track_indices,
+                        reg_valid_idx=valid_idx,
+                        reg_inliers=np.ones(
                             len(self.objects[obj_id].key_points), dtype=bool
                         ),
-                        residuals=np.zeros(len(self.objects[obj_id].key_points)),
-                        uncertainties=0.01
+                        reg_residuals=np.zeros(len(self.objects[obj_id].key_points)),
+                        reg_uncertainties=0.01
                         * np.ones(len(self.objects[obj_id].key_points)),
                     )
                 )
@@ -183,7 +189,7 @@ class ModularPipeline:
                     "reg_inliers": np.ones(
                         len(self.objects[obj_id].key_points), dtype=bool
                     ),
-                    "reg_valid_idx": valid_idx,
+                    "reg_valid_idx": self.objects[0].valid,
                     # Dense recovery info (initialized for first frame - no recovery possible)
                     "dense_recovery_triggered": False,
                     "dense_recovery_pose_before": np.eye(4),
@@ -288,23 +294,32 @@ class ModularPipeline:
                 # Only optimize if registration was good enough
                 # if self.objects[obj_id].mean_residual < self.reg_residual_thres:
 
+                # get the visible points in the object
+                pts_2d_visible, pts_2d_visible_idx, visible_uncertainties = (
+                    self.track_table.get_visible_2d_and_uncertainties_for_obj(obj_id)
+                )
+
                 object_frame_data = ObjectFrameData(
                     obj_id=obj_id,
                     frame_id=frame.id,
+                    intrinsics=frame.intrinsics,
                     pose=self.objects[obj_id].pose,
                     rel_pose=fe_result.rel_poses[obj_id],
-                    cur_3d=self.track_table.track_3d[
-                        self.track_table.obj2track_map[obj_id]
-                    ],
-                    cur_3d_idx=self.track_table.obj2track_map[obj_id],
-                    valid_idx=fe_result.reg_stats[obj_id].get(
+                    visible_pts_2d=pts_2d_visible,
+                    visible_pts_2d_idx=pts_2d_visible_idx,
+                    visible_uncertainties=visible_uncertainties,
+                    reg_cur_3d=fe_result.valid_curr_3d[obj_id],
+                    reg_cur_3d_idx=fe_result.valid_indices[obj_id],
+                    reg_valid_idx=fe_result.reg_stats[obj_id].get(
                         "valid_idx", np.array([])
                     ),
-                    inliers=fe_result.reg_stats[obj_id].get("inliers", np.array([])),
-                    residuals=fe_result.reg_stats[obj_id].get(
+                    reg_inliers=fe_result.reg_stats[obj_id].get(
+                        "inliers", np.array([])
+                    ),
+                    reg_residuals=fe_result.reg_stats[obj_id].get(
                         "residuals", np.array([])
                     ),
-                    uncertainties=fe_result.uncertainties[
+                    reg_uncertainties=fe_result.uncertainties[
                         fe_result.valid_indices[obj_id]
                     ],
                 )
@@ -351,8 +366,10 @@ class ModularPipeline:
                 obj = self.objects[kf.obj_id]
                 obj.pose = global_pose.copy()
 
-                lm_idx = updated_landmarks[kf.obj_id][1]
+                lm_global_track_ids = updated_landmarks[kf.obj_id][1]
+                lm_idx = obj.track_idx_2_obj_idx[lm_global_track_ids]
                 lm_pts = updated_landmarks[kf.obj_id][0]
+
                 self.objects[kf.obj_id].key_points[lm_idx] = lm_pts
 
         module_times["global_opt"] = time.time() - t0

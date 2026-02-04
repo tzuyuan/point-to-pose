@@ -1,5 +1,6 @@
 import numpy as np
 import open3d as o3d
+from typing import Dict
 
 
 class Object:
@@ -12,7 +13,14 @@ class Object:
 
         # 3D points belonging to the object, represented in the first frame coordinate system
         self.key_points = np.empty((0, 3))  # Mx3
-        self.key_point_indices = np.empty((0,), dtype=int)  # M, global track IDs
+        self.kp_track_indices = np.empty(
+            (0,), dtype=np.int64
+        )  # M, global track IDs. this is object track index to global track ID
+
+        # Dense inverse mapping: global track ID -> object row index (or -1 if missing)
+        # we use np array so that we can use vectorized operations
+        self.track_idx_2_obj_idx = np.full((0,), -1, dtype=np.int32)
+
         self.uncertainties = np.empty((0,))
         self.valid = np.empty((0,))  # M, bool
         self.num_keyframes = 0
@@ -69,16 +77,34 @@ class Object:
             frame_id = -1
 
         if new_indices is None:
-            # Default to -1 if not provided, though typically we want real IDs
-            new_indices = np.full(new_key_points.shape[0], -1, dtype=int)
+            raise ValueError(
+                "[Object] new_indices is required when adding new key points"
+            )
 
+        old_m = self.key_points.shape[0]
+
+        # append new key points to the object
         self.key_points = np.vstack((self.key_points, new_key_points))
-        self.key_point_indices = np.hstack((self.key_point_indices, new_indices))
+        self.kp_track_indices = np.hstack((self.kp_track_indices, new_indices))
         self.uncertainties = np.hstack((self.uncertainties, new_uncertainties))
         self.valid = np.hstack((self.valid, new_valid))
         self.key_point_frames = np.hstack(
             (self.key_point_frames, np.full(new_key_points.shape[0], frame_id))
         )
+
+        new_m = self.key_points.shape[0]
+        # append new track_idx_2_obj_idx to the object
+
+        max_tid = int(new_indices.max())
+        # if the track_idx_2_obj_idx is not large enough, resize it
+        if self.track_idx_2_obj_idx.size <= max_tid:
+            old = self.track_idx_2_obj_idx
+            new = np.full((max_tid + 1,), -1, dtype=old.dtype)
+            new[: old.size] = old
+            self.track_idx_2_obj_idx = new
+
+        new_rows = np.arange(old_m, new_m, dtype=np.int32)
+        self.track_idx_2_obj_idx[new_indices] = new_rows
 
     def save_key_points_with_colors(self, save_path: str, current_frame_id: int = None):
         """

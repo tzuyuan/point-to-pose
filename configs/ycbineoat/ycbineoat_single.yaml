@@ -39,21 +39,40 @@ pipeline:
 
 
 
-register:
-  type: svd_residual_outlier
-  params:
-    remove_outside_mask: true
-    debug_level: 0
-    max_iter: 15
-    uncer_thres: 0.3
-    threshold_method: mad
-    inlier_thres: 0.01
-    thres_reduce_factor: 0.005
-    mad_scale: 5
-    min_inliers: 3
+# register:
+#   type: svd_residual_outlier
+#   params:
+#     remove_outside_mask: true
+#     debug_level: 0
+#     max_iter: 15
+#     uncer_thres: 0.3
+#     threshold_method: mad
+#     inlier_thres: 0.01
+#     thres_reduce_factor: 0.005
+#     mad_scale: 5
+#     min_inliers: 3
 
-    # outlier pose
-    residual_thres: 0.01
+#     # outlier pose
+#     residual_thres: 0.01
+
+register:
+  type: svd_cluster_ransac
+  params:
+    ransac_iters: 100
+    sample_size: 3
+    inlier_thres: 0.003
+    min_inliers: 3
+    max_clusters: 10
+    use_uncertainty: true
+    min_variance: 1e-2
+
+    # reproj_error, dist_to_prev, inlier_count, mean_residual, reproj_error_iou, 3d_dist
+    select_method: reproj_error
+
+    # front end
+    remove_outside_mask: true
+    uncer_thres: 0.3
+    residual_thres: 0.007
 
 # register:
 #   type: svd_ransac
@@ -118,7 +137,7 @@ tracker:
   #   debug: true
 
 sampler: 
-  type: super_point_fps
+  type: super_point
   params:
     num_points: 20
     density_per_kpx: -1
@@ -148,7 +167,7 @@ criterion:
   ###      uncertainty_ratio, uncertainty_number, 
   ###      rotation_grid, rotation_threshold
   ###      mask_area
-  type: rotation_threshold
+  type: rotation_threshold_and_min_num
   params:
     # iteration criterion
     update_per_iter: 1000000
@@ -158,7 +177,11 @@ criterion:
 
     # uncertainty criterion
     uncer_thres: 0.3
-    min_num_pts: 8
+    min_num_pts: 20
+
+    # rotation threshold and min num criterion
+    # if it's smaller than this it will not trigger sampling
+    min_mask_area: 100  
 
     # rotation grid criterion
     discretization_angle: 60

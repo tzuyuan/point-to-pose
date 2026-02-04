@@ -38,9 +38,10 @@ class RotationThresholdAndMinNumCriterion(SampleCriterion):
         #     return True
         num_pts = reg_stats["correspond_curr3d"].shape[0]
         print(f"[Criterion] num visible points: {num_pts}")
-
+        if context.frame.id == 261:
+            print(f"[Criterion] reg_stats: {reg_stats}")
         # sum number of pixel being in mask being 1
-        mask_area = torch.sum(context.frame.mask[obj_id, 0])
+        mask_area = torch.sum(context.frame.mask[obj_id, 0] > 0)
 
         if (num_pts < self._min_num_pts) and (mask_area > self._min_mask_area):
             return True

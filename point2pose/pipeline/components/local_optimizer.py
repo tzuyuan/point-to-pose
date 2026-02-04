@@ -80,5 +80,10 @@ class LocalOptimizer:
         # before = obj.pose.copy()
         obj.pose = opt_result.pose_optimized.copy()
 
+        lm_global_track_ids = opt_result.key_points_idx_optimized
+        lm_idx = obj.track_idx_2_obj_idx[lm_global_track_ids]
+        lm_pts = opt_result.key_points_optimized
+        obj.key_points[lm_idx] = lm_pts
+
         # delta = np.linalg.norm(before[:3, 3] - obj.pose[:3, 3])
         # print(f"[LocalOptimizer] obj {obj.id}, frame {opt_result.frame_id}, Δt = {delta:.4f} m")

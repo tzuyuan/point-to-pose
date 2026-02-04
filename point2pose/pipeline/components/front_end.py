@@ -146,6 +146,8 @@ class FrontEnd:
         tracks, uncertainties, visibles = self.tracker.track_once(frame)
         fe_timings["tracker"] = time.time() - t_start
 
+        print(f"number of tracks: {len(tracks)}")
+
         # if frame.id == 261:
         #     print("tracks: ", tracks)
 
@@ -163,6 +165,12 @@ class FrontEnd:
             fill_missing_depth=self.fill_missing_depth,
             window_size=self.fill_missing_depth_window_size,
             min_neighbors=self.fill_missing_depth_min_neighbors,
+            compute_depth_uncertainty=False,
+            sigma_min=0.002,
+            sigma_max=0.05,
+            sigma_base_a=0.003,
+            sigma_base_b=0.0,
+            edge_alpha=5.0,
         )
         fe_timings["2d_to_3d"] = time.time() - t_start
 

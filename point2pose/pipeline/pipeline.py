@@ -187,7 +187,7 @@ class Pipeline:
             self.objects[obj_id].key_points = self.track_table.track_3d[
                 self.track_table.obj2track_map[obj_id]
             ]
-            self.objects[obj_id].key_point_indices = self.track_table.obj2track_map[
+            self.objects[obj_id].kp_track_indices = self.track_table.obj2track_map[
                 obj_id
             ]
             self.objects[obj_id].valid = self.track_table.valid[
@@ -205,10 +205,12 @@ class Pipeline:
                     obj_id=obj_id,
                     frame_id=0,
                     pose=np.eye(4),
-                    cur_3d=self.objects[obj_id].key_points,
-                    cur_3d_idx=np.arange(len(self.objects[obj_id].key_points)),
-                    inliers=np.ones(len(self.objects[obj_id].key_points), dtype=bool),
-                    residuals=np.zeros(len(self.objects[obj_id].key_points)),
+                    reg_cur_3d=self.objects[obj_id].key_points,
+                    reg_cur_3d_idx=np.arange(len(self.objects[obj_id].key_points)),
+                    reg_inliers=np.ones(
+                        len(self.objects[obj_id].key_points), dtype=bool
+                    ),
+                    reg_residuals=np.zeros(len(self.objects[obj_id].key_points)),
                 ),
             )
 
@@ -471,10 +473,10 @@ class Pipeline:
                     obj_id=obj_id,
                     frame_id=self.frame_id,
                     pose=pose,
-                    cur_3d=curr3d,
-                    cur_3d_idx=idx,
-                    inliers=reg_stats.get("inliers", np.array([])),
-                    residuals=reg_stats.get("residuals", np.array([])),
+                    reg_cur_3d=curr3d,
+                    reg_cur_3d_idx=idx,
+                    reg_inliers=reg_stats.get("inliers", np.array([])),
+                    reg_residuals=reg_stats.get("residuals", np.array([])),
                 )
 
                 # once the input is set, the optimizer manager will start the optimization process

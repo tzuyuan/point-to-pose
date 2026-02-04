@@ -229,11 +229,16 @@ class SVDClusterRANSACRegister(Register):
             else self._svd_fit(p0[inlier_idx], tgt_pcd[inlier_idx])
         )
 
-        # re-evaluate refined residuals and (optionally) tighten inliers once
-        rr = np.linalg.norm(
-            transform_pts(Tr, p0[inlier_idx]) - tgt_pcd[inlier_idx], axis=1
-        )
-        mean_rr = float(rr.mean()) if rr.size else 1e18
+        r_all = np.linalg.norm(transform_pts(Tr, p0[idx]) - tgt_pcd[idx], axis=1)
+
+        # optional: adaptive threshold from MAD (see next section)
+        inl_all = r_all <= self._inlier_thres
+
+        inlier_idx = idx[inl_all]
+        if inlier_idx.size < self._min_inliers:
+            return None
+
+        mean_rr = float(r_all[inl_all].mean())
 
         # 4) remove those inliers from pool
         remaining[inlier_idx] = False

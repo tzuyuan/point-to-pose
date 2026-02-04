@@ -53,11 +53,11 @@ class ISAM2Optimizer(Optimizer):
         frame_id = data.frame_id
         cur_pose = inverse_SE3(data.pose)
         # registration stats
-        cur_3d = data.cur_3d
-        cur_3d_idx = data.cur_3d_idx
-        inliers = data.inliers
-        residuals = data.residuals
-        pts_uncertainties = data.uncertainties
+        cur_3d = data.reg_cur_3d
+        cur_3d_idx = data.reg_cur_3d_idx
+        inliers = data.reg_inliers
+        residuals = data.reg_residuals
+        pts_uncertainties = data.reg_uncertainties
 
         cur_pose_gtsam = gtsam.Pose3(cur_pose)
 

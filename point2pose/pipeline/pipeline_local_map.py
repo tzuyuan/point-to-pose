@@ -276,7 +276,9 @@ class PipelineLocalMap:
             self.objects[obj_id].key_points = self.track_table.track_3d[
                 self.track_table.obj2track_map[obj_id]
             ]
-            self.objects[obj_id].key_point_indices = self.track_table.obj2track_map[obj_id]
+            self.objects[obj_id].kp_track_indices = self.track_table.obj2track_map[
+                obj_id
+            ]
             self.objects[obj_id].valid = self.track_table.valid[
                 self.track_table.obj2track_map[obj_id]
             ]
@@ -290,11 +292,14 @@ class PipelineLocalMap:
                     obj_id=obj_id,
                     frame_id=0,
                     pose=np.eye(4),
-                    cur_3d=self.objects[obj_id].key_points,
-                    cur_3d_idx=np.arange(len(self.objects[obj_id].key_points)),
-                    inliers=np.ones(len(self.objects[obj_id].key_points), dtype=bool),
-                    residuals=np.zeros(len(self.objects[obj_id].key_points)),
-                    uncertainties=0.01 * np.ones(len(self.objects[obj_id].key_points)),
+                    reg_cur_3d=self.objects[obj_id].key_points,
+                    reg_cur_3d_idx=np.arange(len(self.objects[obj_id].key_points)),
+                    reg_inliers=np.ones(
+                        len(self.objects[obj_id].key_points), dtype=bool
+                    ),
+                    reg_residuals=np.zeros(len(self.objects[obj_id].key_points)),
+                    reg_uncertainties=0.01
+                    * np.ones(len(self.objects[obj_id].key_points)),
                 )
             )
 

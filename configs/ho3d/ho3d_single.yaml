@@ -10,7 +10,7 @@ pipeline:
 
     # depth related
     fill_missing_depth: true
-    fill_missing_depth_window_size: 3
+    fill_missing_depth_window_size: 5
     fill_missing_depth_min_neighbors: 1
     min_depth: 0.05
     max_depth: 0.8
@@ -20,6 +20,7 @@ pipeline:
     device: cuda
     depth_encoder: vitl
 
+    max_rel_rotation_deg: 20
 
 
     frame_reg_mode: f2m
@@ -62,7 +63,7 @@ register:
   params:
     ransac_iters: 100
     sample_size: 3
-    inlier_thres: 0.003
+    inlier_thres: 0.004
     min_inliers: 3
     max_clusters: 10
     use_uncertainty: true
@@ -223,6 +224,8 @@ local_optimizer:
     relative_error_tol: 1e-5
     absolute_error_tol: 1e-5
     prior_noise_param: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+    uncertainty_thres: 1.0
+    uncertainty_min: 1e-2
 
 global_optimizer:
   type: lm_graph
@@ -232,6 +235,8 @@ global_optimizer:
     relative_error_tol: 1e-5
     absolute_error_tol: 1e-5
     prior_noise_param: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
+    uncertainty_thres: 0.2
+    uncertainty_min: 1e-2
 
 visualization:
   params:

@@ -2,6 +2,8 @@ import numpy as np
 import torch
 from typing import Tuple
 
+from scipy.ndimage import uniform_filter, median_filter
+
 from point2pose.utils.transform import transform_pts
 
 
@@ -83,6 +85,132 @@ from point2pose.utils.transform import transform_pts
 #         return world_pts, valid
 
 
+# def convert_pixel_to_world(
+#     pixel,
+#     depth_image,
+#     cam_intrinsics,
+#     depth_factor=1.0,
+#     cam2world=np.eye(4),
+#     remove_invalid=False,
+#     min_depth=0.05,
+#     max_depth=1.0,
+#     fill_missing_depth=False,  # NEW: if True, fill NaN depth with n×n neighbor mean
+#     window_size=3,  # odd integer window size (3,5,7,...)
+#     min_neighbors=1,  # require at least this many valid neighbors to fill
+# ):
+#     """
+#     Convert pixel coordinates to world coordinates with optional neighbor-based depth filling.
+#     We assume the depth image is aligned with the RGB image.
+
+#     Args:
+#         pixel (tuple or np.ndarray): Either a single (x, y) or an array of shape (N, 2).
+#         depth_image (np.ndarray): (H, W) raw depth image.
+#         cam_intrinsics (np.ndarray): (3, 3) intrinsics.
+#         cam2world (np.ndarray): (4, 4) camera-to-world transform.
+#         depth_factor (float): depth scale (e.g., 1000 for mm->m).
+#         remove_invalid (bool): if True, drop invalid rows; else keep NaNs, preserving shape.
+#         min_depth (float): minimum valid depth in meters (applied after scaling).
+#         max_depth (float): maximum valid depth in meters (applied after scaling).
+#         fill_missing_depth (bool): if True, fill NaN depth by averaging an n×n neighborhood.
+#         window_size (int): odd integer window size for filling (e.g., 3, 5).
+#         min_neighbors (int): minimum number of valid neighbors required to perform fill.
+
+#     Returns:
+#         world_pts: (N, 3) if remove_invalid=False; else (M, 3) with M <= N.
+#         valid_mask: (N,) boolean validity mask (post-fill).
+#     """
+#     # Normalize input to (N, 2)
+#     pixels = np.asarray(pixel)
+#     if pixels.ndim == 1:
+#         pixels = pixels[None, :]
+
+#     H, W = depth_image.shape[:2]
+#     N = pixels.shape[0]
+
+#     fx, fy = cam_intrinsics[0, 0], cam_intrinsics[1, 1]
+#     cx, cy = cam_intrinsics[0, 2], cam_intrinsics[1, 2]
+
+#     # Integer indices
+#     xs = pixels[:, 0].astype(int)
+#     ys = pixels[:, 1].astype(int)
+
+#     # Bounds
+#     in_bounds = (xs >= 0) & (xs < W) & (ys >= 0) & (ys < H)
+
+#     # Sample depths (raw units)
+#     z_raw = np.full(N, np.nan, dtype=float)
+#     z_raw[in_bounds] = depth_image[ys[in_bounds], xs[in_bounds]].astype(float)
+
+#     # Optional: fill missing (only when the sampled value is NaN)
+#     if fill_missing_depth and window_size >= 3 and (window_size % 2 == 1):
+#         half = window_size // 2
+#         # Work in *scaled* meters for thresholding neighbors
+#         z_scaled = z_raw / float(depth_factor)
+
+#         # Indices that are in-bounds and NaN (missing)
+#         need_fill = in_bounds & ~np.isfinite(z_scaled)
+#         idxs = np.where(need_fill)[0]
+
+#         for i in idxs:
+#             x, y = xs[i], ys[i]
+#             x0 = max(0, x - half)
+#             x1 = min(W, x + half + 1)
+#             y0 = max(0, y - half)
+#             y1 = min(H, y + half + 1)
+
+#             # Extract neighborhood in raw units then scale
+#             neigh_raw = depth_image[y0:y1, x0:x1].astype(float)
+#             neigh_scaled = neigh_raw / float(depth_factor)
+
+#             # Valid neighbors: finite and within depth range
+#             neigh_valid = (
+#                 np.isfinite(neigh_scaled)
+#                 & (neigh_scaled > min_depth)
+#                 & (neigh_scaled < max_depth)
+#             )
+
+#             if np.count_nonzero(neigh_valid) >= min_neighbors:
+#                 # Average of valid neighbors in *scaled* meters
+#                 z_fill = float(np.nanmean(neigh_scaled[neigh_valid]))
+#                 z_scaled[i] = z_fill
+#                 z_raw[i] = z_fill * float(depth_factor)  # keep z_raw consistent
+#             # else: leave as NaN (will remain invalid)
+
+#         # Continue using z_scaled below
+#         z = z_scaled
+#     else:
+#         # Scale (meters)
+#         z = z_raw / float(depth_factor)
+
+#     # Depth validity after (possible) fill
+#     valid_depth = np.isfinite(z) & (z > min_depth) & (z < max_depth)
+
+#     # Final validity mask
+#     valid = in_bounds & valid_depth
+
+#     # Prepare output
+#     world_pts = np.full((N, 3), np.nan, dtype=float)
+
+#     if np.any(valid):
+#         u = xs[valid].astype(float)
+#         v = ys[valid].astype(float)
+#         zv = z[valid]
+
+#         Xc = (u - cx) * zv / fx
+#         Yc = (v - cy) * zv / fy
+#         Zc = zv
+
+#         Pc = np.stack([Xc, Yc, Zc], axis=1)  # (M, 3)
+#         R = cam2world[:3, :3]
+#         t = cam2world[:3, 3]
+#         world_pts[valid] = (R @ Pc.T).T + t
+
+#     if remove_invalid:
+#         return world_pts[valid], valid
+#     else:
+#         return world_pts, valid
+
+
 def convert_pixel_to_world(
     pixel,
     depth_image,
@@ -92,32 +220,20 @@ def convert_pixel_to_world(
     remove_invalid=False,
     min_depth=0.05,
     max_depth=1.0,
-    fill_missing_depth=False,  # NEW: if True, fill NaN depth with n×n neighbor mean
-    window_size=3,  # odd integer window size (3,5,7,...)
-    min_neighbors=1,  # require at least this many valid neighbors to fill
+    fill_missing_depth=False,
+    window_size=3,
+    min_neighbors=1,
+    # NEW (optional): depth uncertainty computed ONLY for queried pixels
+    compute_depth_uncertainty=False,
+    sigma_min=0.002,
+    sigma_max=0.05,
+    sigma_base_a=0.003,
+    sigma_base_b=0.0,
+    edge_alpha=5.0,
 ):
     """
-    Convert pixel coordinates to world coordinates with optional neighbor-based depth filling.
-    We assume the depth image is aligned with the RGB image.
-
-    Args:
-        pixel (tuple or np.ndarray): Either a single (x, y) or an array of shape (N, 2).
-        depth_image (np.ndarray): (H, W) raw depth image.
-        cam_intrinsics (np.ndarray): (3, 3) intrinsics.
-        cam2world (np.ndarray): (4, 4) camera-to-world transform.
-        depth_factor (float): depth scale (e.g., 1000 for mm->m).
-        remove_invalid (bool): if True, drop invalid rows; else keep NaNs, preserving shape.
-        min_depth (float): minimum valid depth in meters (applied after scaling).
-        max_depth (float): maximum valid depth in meters (applied after scaling).
-        fill_missing_depth (bool): if True, fill NaN depth by averaging an n×n neighborhood.
-        window_size (int): odd integer window size for filling (e.g., 3, 5).
-        min_neighbors (int): minimum number of valid neighbors required to perform fill.
-
-    Returns:
-        world_pts: (N, 3) if remove_invalid=False; else (M, 3) with M <= N.
-        valid_mask: (N,) boolean validity mask (post-fill).
+    Original behavior preserved by default.
     """
-    # Normalize input to (N, 2)
     pixels = np.asarray(pixel)
     if pixels.ndim == 1:
         pixels = pixels[None, :]
@@ -125,88 +241,122 @@ def convert_pixel_to_world(
     H, W = depth_image.shape[:2]
     N = pixels.shape[0]
 
-    fx, fy = cam_intrinsics[0, 0], cam_intrinsics[1, 1]
-    cx, cy = cam_intrinsics[0, 2], cam_intrinsics[1, 2]
+    fx, fy = float(cam_intrinsics[0, 0]), float(cam_intrinsics[1, 1])
+    cx, cy = float(cam_intrinsics[0, 2]), float(cam_intrinsics[1, 2])
 
-    # Integer indices
     xs = pixels[:, 0].astype(int)
     ys = pixels[:, 1].astype(int)
 
-    # Bounds
     in_bounds = (xs >= 0) & (xs < W) & (ys >= 0) & (ys < H)
 
-    # Sample depths (raw units)
-    z_raw = np.full(N, np.nan, dtype=float)
-    z_raw[in_bounds] = depth_image[ys[in_bounds], xs[in_bounds]].astype(float)
+    # depth in meters
+    D = depth_image.astype(np.float32) / float(depth_factor)
 
-    # Optional: fill missing (only when the sampled value is NaN)
-    if fill_missing_depth and window_size >= 3 and (window_size % 2 == 1):
+    # sample depth
+    z = np.full(N, np.nan, dtype=np.float64)
+    z[in_bounds] = D[ys[in_bounds], xs[in_bounds]].astype(np.float64)
+
+    # helper: build window indices for each queried pixel (vectorized gather)
+    sigma_z = None
+    if fill_missing_depth or compute_depth_uncertainty:
+        if window_size < 1 or (window_size % 2) != 1:
+            raise ValueError("window_size must be an odd integer >= 1")
         half = window_size // 2
-        # Work in *scaled* meters for thresholding neighbors
-        z_scaled = z_raw / float(depth_factor)
 
-        # Indices that are in-bounds and NaN (missing)
-        need_fill = in_bounds & ~np.isfinite(z_scaled)
-        idxs = np.where(need_fill)[0]
+        # Offsets in window
+        offs = np.arange(-half, half + 1, dtype=int)
+        # For each pixel: build window coords (N, win, win)
+        xw = xs[:, None, None] + offs[None, :, None]
+        yw = ys[:, None, None] + offs[None, None, :]
 
-        for i in idxs:
-            x, y = xs[i], ys[i]
-            x0 = max(0, x - half)
-            x1 = min(W, x + half + 1)
-            y0 = max(0, y - half)
-            y1 = min(H, y + half + 1)
+        # Clip to image bounds for safe gather
+        xw = np.clip(xw, 0, W - 1)
+        yw = np.clip(yw, 0, H - 1)
 
-            # Extract neighborhood in raw units then scale
-            neigh_raw = depth_image[y0:y1, x0:x1].astype(float)
-            neigh_scaled = neigh_raw / float(depth_factor)
+        # Gather window depths (N, win, win)
+        Dw = D[yw, xw].astype(np.float64)
 
-            # Valid neighbors: finite and within depth range
-            neigh_valid = (
-                np.isfinite(neigh_scaled)
-                & (neigh_scaled > min_depth)
-                & (neigh_scaled < max_depth)
-            )
+        # Valid neighbors in window
+        valid_w = np.isfinite(Dw) & (Dw > min_depth) & (Dw < max_depth)
 
-            if np.count_nonzero(neigh_valid) >= min_neighbors:
-                # Average of valid neighbors in *scaled* meters
-                z_fill = float(np.nanmean(neigh_scaled[neigh_valid]))
-                z_scaled[i] = z_fill
-                z_raw[i] = z_fill * float(depth_factor)  # keep z_raw consistent
-            # else: leave as NaN (will remain invalid)
+        # Neighbor count and neighbor mean (for fill + stats)
+        cnt = valid_w.reshape(N, -1).sum(axis=1).astype(np.float64)  # (N,)
+        # Sum only over valid
+        sum_w = np.where(valid_w, Dw, 0.0).reshape(N, -1).sum(axis=1)
+        mean_w = sum_w / np.maximum(cnt, 1e-9)
 
-        # Continue using z_scaled below
-        z = z_scaled
-    else:
-        # Scale (meters)
-        z = z_raw / float(depth_factor)
+        # ---- Fill missing sampled depth (only if sampled z is NaN) ----
+        if fill_missing_depth:
+            need_fill = in_bounds & ~np.isfinite(z)
+            if np.any(need_fill):
+                can_fill = (cnt >= float(min_neighbors)) & need_fill
+                z[can_fill] = mean_w[can_fill]
 
-    # Depth validity after (possible) fill
+    # validity after possible fill
     valid_depth = np.isfinite(z) & (z > min_depth) & (z < max_depth)
-
-    # Final validity mask
     valid = in_bounds & valid_depth
 
-    # Prepare output
-    world_pts = np.full((N, 3), np.nan, dtype=float)
+    # ---- Depth uncertainty sigma_z (queried pixels only) ----
+    if compute_depth_uncertainty:
+        sigma_z = np.full(N, np.nan, dtype=np.float64)
 
+        # local variance over valid neighbors
+        # E[x^2] - E[x]^2
+        sumsq_w = np.where(valid_w, Dw * Dw, 0.0).reshape(N, -1).sum(axis=1)
+        ex2 = sumsq_w / np.maximum(cnt, 1e-9)
+        var = np.maximum(0.0, ex2 - mean_w * mean_w)
+        sigma_local = np.sqrt(var)
+
+        # base model sigma(z)=a + b z^2
+        sigma_base = sigma_base_a + sigma_base_b * (np.maximum(z, 0.0) ** 2)
+
+        # edge inflation using local central differences at queried pixels
+        # (cheap; no full image gradient)
+        xc = np.clip(xs, 1, W - 2)
+        yc = np.clip(ys, 1, H - 2)
+        dzdx = 0.5 * (D[yc, xc + 1] - D[yc, xc - 1])
+        dzdy = 0.5 * (D[yc + 1, xc] - D[yc - 1, xc])
+        gmag = np.sqrt(dzdx * dzdx + dzdy * dzdy)
+
+        sigma = np.maximum(sigma_min, np.maximum(sigma_local, sigma_base))
+        sigma = sigma * (1.0 + edge_alpha * gmag)
+        sigma = np.clip(sigma, sigma_min, sigma_max)
+
+        # if not enough neighbors, treat as unreliable
+        sigma[cnt < float(min_neighbors)] = sigma_max
+
+        # write back; invalid points keep NaN (matches your earlier contract)
+        sigma_z[in_bounds] = sigma[in_bounds]
+        sigma_z[~valid] = np.nan
+
+    # ---- Backproject and transform ----
+    world_pts = np.full((N, 3), np.nan, dtype=np.float64)
     if np.any(valid):
-        u = xs[valid].astype(float)
-        v = ys[valid].astype(float)
+        u = xs[valid].astype(np.float64)
+        v = ys[valid].astype(np.float64)
         zv = z[valid]
 
         Xc = (u - cx) * zv / fx
         Yc = (v - cy) * zv / fy
-        Zc = zv
+        Pc = np.stack([Xc, Yc, zv], axis=1)
 
-        Pc = np.stack([Xc, Yc, Zc], axis=1)  # (M, 3)
-        R = cam2world[:3, :3]
-        t = cam2world[:3, 3]
+        R = cam2world[:3, :3].astype(np.float64)
+        t = cam2world[:3, 3].astype(np.float64)
         world_pts[valid] = (R @ Pc.T).T + t
 
+    # ---- Return (preserve original unless return_depth_uncertainty=True) ----
     if remove_invalid:
+        if compute_depth_uncertainty:
+            return (
+                world_pts[valid],
+                valid,
+                (sigma_z[valid] if sigma_z is not None else None),
+            )
         return world_pts[valid], valid
-    else:
-        return world_pts, valid
+
+    if compute_depth_uncertainty:
+        return world_pts, valid, sigma_z
+    return world_pts, valid
 
 
 def convert_pixel_within_mask_to_world(
@@ -447,7 +597,7 @@ def compute_projection_consistency(
     )
 
     # Return mean depth error
-    return np.mean(depth_errors)
+    return np.median(depth_errors)
 
 
 def compute_projection_consistency_iou(src_pcd, T_src2dst, frame_dst, obj_id=0):

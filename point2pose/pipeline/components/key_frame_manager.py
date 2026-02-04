@@ -80,25 +80,25 @@ class KeyFrameManager:
             obj = objects[obj_id]
 
             # Use track_table mapping to pull this object's initial points
-            obj_track_ids = np.asarray(
-                track_table.obj2track_map[obj_id], dtype=np.int64
-            )
-            if obj_track_ids.size == 0:
+            track_ids = np.asarray(track_table.obj2track_map[obj_id], dtype=np.int64)
+            if track_ids.size == 0:
                 self.is_key_frame[obj_id] = False
                 continue
 
             # Assign keypoints to object
-            obj.key_points = track_table.track_3d[obj_track_ids]
-            obj.key_point_indices = obj_track_ids
-            obj.valid = track_table.valid[obj_track_ids]
-            obj.key_point_frames = np.full(obj_track_ids.shape[0], 0, dtype=int)
-
+            obj.add_key_points(
+                new_key_points=track_table.track_3d[track_ids],
+                new_uncertainties=0.1 * np.ones(track_ids.shape[0], dtype=float),
+                new_valid=track_table.valid[track_ids],
+                new_indices=track_ids,
+                frame_id=0,
+            )
             self.is_key_frame[obj_id] = False
 
             # Build "new keypoints" struct from these initial points
             kp = self._build_kp_from_track_table(
                 track_table=track_table,
-                track_ids=obj_track_ids,
+                track_ids=track_ids,
                 obj_pose=obj.pose,
             )
 
@@ -219,7 +219,7 @@ class KeyFrameManager:
             # Update object with these new keypoints
             obj.add_key_points(
                 new_points_3d_obj,
-                0.5
+                0.1
                 * np.ones(len(new_points_3d_obj), dtype=float),  # initial uncertainty
                 valid_new_points_3d,
                 new_indices,

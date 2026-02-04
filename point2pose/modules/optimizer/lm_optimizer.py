@@ -46,7 +46,30 @@ class LMGraphOptimizer(Optimizer):
         self._lm_params.setAbsoluteErrorTol(config.get("absolute_error_tol", 1e-5))
         self._lm_params.setlambdaInitial(config.get("lambda_initial", 1e-1))
 
-        self._lm_params.setVerbosityLM("SUMMARY")
+        self._lm_params.setVerbosityLM("TRYLAMBDA")
+
+        # ------------------------------------------------------------------
+        # Optional formulation knobs (all default to preserving old behavior)
+        # ------------------------------------------------------------------
+        # 1) Pose-chain constraint (odometry) to reduce pose freedom so map/landmarks
+        #    have to absorb inconsistency across frames.
+        self._use_between_factor = bool(config.get("use_between_factor", False))
+        between_noise_param = config.get("between_noise_param", None)
+        self._between_noise = None
+        if between_noise_param is not None:
+            self._between_noise = gtsam.noiseModel.Diagonal.Sigmas(
+                np.asarray(between_noise_param, dtype=float)
+            )
+
+        # 2) Landmark measurement noise (BearingRangeFactor3D has 3 residual dims:
+        #    2 for bearing + 1 for range). Previously this was effectively [1,1,1].
+        self._landmark_noise_param = config.get("landmark_noise_param", None)  # (3,)
+        self._landmark_use_robust = bool(config.get("landmark_use_robust", True))
+        self._landmark_huber_k = float(config.get("landmark_huber_k", 1.345))
+        self._landmark_sigma_scale_by = str(
+            config.get("landmark_sigma_scale_by", "none")
+        ).lower()  # {"none","residual","uncertainty"}
+        self._landmark_sigma_min = float(config.get("landmark_sigma_min", 1e-6))
 
         # Bookkeeping
         self._inserted_poses = set()
@@ -99,13 +122,22 @@ class LMGraphOptimizer(Optimizer):
 
             T_ci2o = gtsam.Pose3(inverse_SE3(data.pose))
 
-            # Noise scaled by measurement residuals
-            base_sigma = (
-                float(max(1e-4, np.mean(data.residuals)))
-                if data.residuals.size > 0
-                else 0.01
-            )
-            sigma_between = base_sigma  # Relax odometry relative to features
+            # Optional: BetweenFactorPose3 to constrain pose chain
+            # (this makes landmark/map correction more likely, because pose can't
+            # independently absorb all per-frame inconsistencies).
+            if self._use_between_factor and X_prev in self._inserted_poses:
+                if self._between_noise is not None:
+                    between_noise = self._between_noise
+                else:
+                    # Safe fallback (very loose) if user enabled between factors
+                    # but didn't provide between_noise_param.
+                    between_noise = gtsam.noiseModel.Diagonal.Sigmas(
+                        np.array([0.5, 0.5, 0.5, 5.0, 5.0, 5.0], dtype=float)
+                    )
+
+                self._graph.push_back(
+                    gtsam.BetweenFactorPose3(X_prev, Xi, rel_T_cim12ci, between_noise)
+                )
 
             # between_noise = gtsam.noiseModel.Diagonal.Sigmas(
             #     np.array(
@@ -140,7 +172,7 @@ class LMGraphOptimizer(Optimizer):
         self._prev_frame_id = frame_id
 
         # Insert landmark variables and their factors
-        if data.inliers.size > 0:  # and self._initialized:
+        if data.reg_inliers.size > 0:  # and self._initialized:
             # Choose pose used for seeding new landmarks
             if self._values.exists(Xi):
                 try:
@@ -151,29 +183,58 @@ class LMGraphOptimizer(Optimizer):
                 seed_pose = cur_pose_c2w_gtsam
 
             assert (
-                len(data.valid_idx) == len(data.inliers) == len(data.residuals)
-            ), "inliers/residuals must be aligned with valid_idx if indexed by mask"
+                len(data.reg_valid_idx)
+                == len(data.reg_inliers)
+                == len(data.reg_residuals)
+            ), "inliers/residuals must be aligned with reg_valid_idx if indexed by mask"
 
-            for m, lid in enumerate(data.valid_idx):
-                if not data.inliers[m] or np.isnan(data.cur_3d[lid]).any():
+            for m, lid in enumerate(data.reg_valid_idx):
+                if not data.reg_inliers[m] or np.isnan(data.reg_cur_3d[m]).any():
                     continue
 
-                z_cam = data.cur_3d[lid]
+                z_cam = data.reg_cur_3d[m]
                 Lj = gtsam.symbol("l", int(lid))
 
-                # sigma_point = float(max(1e-4, data.residuals[m]))
-                sigma_point = float(max(1e-2, data.uncertainties[m]))
-                # base_noise = gtsam.noiseModel.Isotropic.Sigma(3, sigma_point)
-                base_noise = gtsam.noiseModel.Diagonal.Sigmas(
-                    np.array(
-                        [sigma_point, sigma_point, sigma_point],
-                        dtype=float,
+                # --- Landmark noise model ---
+                # Default keeps old behavior: sigma=[1,1,1] with a Huber kernel.
+                diag = (
+                    np.asarray(self._landmark_noise_param, dtype=float)
+                    if self._landmark_noise_param is not None
+                    else np.array([1.0, 1.0, 1.0], dtype=float)
+                )
+
+                sigma_scale = 1.0
+                if self._landmark_sigma_scale_by == "residual":
+                    if (
+                        getattr(data, "reg_residuals", None) is not None
+                        and data.reg_residuals.size > m
+                    ):
+                        sigma_scale = float(
+                            max(
+                                self._landmark_sigma_min,
+                                float(data.reg_residuals[m] * 100),
+                            )
+                        )
+                elif self._landmark_sigma_scale_by == "uncertainty":
+                    if (
+                        getattr(data, "reg_uncertainties", None) is not None
+                        and data.reg_uncertainties.size > m
+                    ):
+                        sigma_scale = float(
+                            max(
+                                self._landmark_sigma_min,
+                                float(data.reg_uncertainties[m]),
+                            )
+                        )
+
+                base_noise = gtsam.noiseModel.Diagonal.Sigmas(diag * sigma_scale)
+                if self._landmark_use_robust:
+                    point_noise = gtsam.noiseModel.Robust(
+                        gtsam.noiseModel.mEstimator.Huber(self._landmark_huber_k),
+                        base_noise,
                     )
-                )
-                # point_noise = base_noise
-                point_noise = gtsam.noiseModel.Robust(
-                    gtsam.noiseModel.mEstimator.Huber(1.345), base_noise
-                )
+                else:
+                    point_noise = base_noise
 
                 # point_noise = gtsam.noiseModel.Isotropic.Sigma(3, 0.5)
                 # point_noise = gtsam.noiseModel.Diagonal.Sigmas(

@@ -25,10 +25,10 @@ class PointTrackTable:
     # obj is the object id in the pipeline
     track2obj_map: Dict[int, int] = field(
         default_factory=dict
-    )  # index -> obj_id. (int -> int)
+    )  # global index -> obj_id. (int -> int)
     obj2track_map: Dict[int, np.ndarray] = field(
         default_factory=dict
-    )  # obj_id -> indices. (int -> np.ndarray)
+    )  # obj_id -> global indices. (int -> np.ndarray)
 
     def __len__(self):
         """
@@ -113,3 +113,24 @@ class PointTrackTable:
         self.valid = np.concatenate([self.valid, valid])
         self.visible = np.concatenate([self.visible, visibles])
         self.uncertainty = np.concatenate([self.uncertainty, uncertainties])
+
+    def get_visible_2d_and_uncertainties_for_obj(self, obj_id):
+        """
+        Returns:
+            visible_2d: (M,2) float, pixels for this object
+            visible_2d_idx: (M,) int, GLOBAL indices into the track_table arrays
+            visible_uncertainties: (M,) float, uncertainties for the visible points
+        """
+        obj_idx = self.obj2track_map.get(obj_id, None)
+
+        if obj_idx is None or len(obj_idx) == 0:
+            return (
+                np.empty((0, 2), dtype=self.track_2d.dtype),
+                np.empty((0,), dtype=np.int64),
+            )
+
+        keep = self.visible[obj_idx]
+        visible_2d_idx = obj_idx[keep]  # GLOBAL indices
+        visible_2d = self.track_2d[visible_2d_idx]
+        visible_uncertainties = self.uncertainty[visible_2d_idx]
+        return visible_2d, visible_2d_idx, visible_uncertainties
