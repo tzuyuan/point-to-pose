@@ -12,7 +12,7 @@ from point2pose.modules.segmenter.dummy_segmenter import DummySegmenter
 from point2pose.io.outputs.point_cloud_io import save_reg_pcd, save_pcd
 from point2pose.utils.camera import convert_pixel_to_world
 from point2pose.utils.transform import transform_pts, inverse_SE3
-from point2pose.utils.lie import se3_to_vec, log_SE3, exp_se3, vec_to_se3
+from point2pose.utils.lie import se3_to_vec, log_SE3, exp_se3, vec_to_se3, log_SO3
 from point2pose.data_types.front_end_result import FrontEndResult
 
 
@@ -243,6 +243,7 @@ class FrontEnd:
                         prev_frame=self.prev_frame,
                         cur_frame=frame,
                         obj_id=obj_id,
+                        obj=obj,
                         mode="f2f",
                     )
                     fe_timings["registration"] += time.time() - t_start
@@ -306,6 +307,7 @@ class FrontEnd:
                         prev_T=prev_pose,
                         prev_frame=self.prev_frame,
                         cur_frame=frame,
+                        obj=obj,
                         obj_id=obj_id,
                         mode="f2m",
                         # img_pts=tracks[idx],
@@ -400,6 +402,19 @@ class FrontEnd:
                     obj.lost = True
             elif self.frame_reg_mode == "f2m":
                 T_odom = T_c2w_est
+
+                # T_rel = T_c2w_est @ inverse_SE3(T_prev)
+
+                # R_rel = T_rel[:3, :3]
+                # t_rel = T_rel[:3, 3]
+                # theta = np.linalg.norm(log_SO3(R_rel))  # radians
+                # d = np.linalg.norm(t_rel)  # meters
+
+                # if theta > 0.15 or d > 0.05:
+                #     T_odom = T_prev
+                # else:
+                #     T_odom = T_c2w_est
+
                 # Frame-to-map: use absolute pose directly
                 # if T_c2w_est is not None and 0 < mean_res < self.reg_residual_thres:
                 #     T_odom = T_c2w_est

@@ -1,11 +1,14 @@
 import numpy as np
 
+from scipy.spatial import cKDTree
+
 from point2pose.core.base_register import Register
 from point2pose.core.module_registry import REGISTER
-from point2pose.utils.transform import transform_pts, inverse_SE3
+from point2pose.utils.transform import transform_pts, inverse_SE3, to_homo
 from point2pose.utils.lie import log_SE3
 from point2pose.utils.camera import (
     compute_projection_consistency,
+    compute_projection_consistency_iou,
     extract_cropped_point_cloud,
 )
 
@@ -33,6 +36,7 @@ class SVDClusterRegister(Register):
         self._thres_reduce_factor = float(config.get("thres_reduce_factor", 0.01))
         self._mad_scale = float(config.get("mad_scale", 2.5))
         self._min_inliers = int(config.get("min_inliers", 3))
+        self._select_method = config.get("select_method", "reproj_error")
 
         # uncertainty weights (optional)
         self._use_uncertainty = bool(config.get("use_uncertainty", False))
@@ -50,6 +54,8 @@ class SVDClusterRegister(Register):
         prev_frame=None,
         cur_frame=None,
         obj_id=0,
+        obj=None,
+        mode="f2m",
     ):
         stats = {}
         N = int(src_pcd.shape[0])
@@ -90,21 +96,86 @@ class SVDClusterRegister(Register):
             stats["residuals"] = np.ones(N) * -1.0
             return T0, stats
 
-        # choose best candidate
+        # choose: reprojection error if cur_frame available, otherwise fallback
         reproj_errors = None
-        if cur_frame is not None:
+        if self._select_method == "reproj_error":
             reproj_errors = []
             src_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
 
             for c in candidates:
                 src_pcd_full_cur = src_pcd_full.copy()
-                T_cur2prev = prev_T @ inverse_SE3(c["T"])
+                if mode == "f2f":
+                    T_cur2prev = inverse_SE3(c["T"])
+                elif mode == "f2m":
+                    T_cur2prev = prev_T @ inverse_SE3(c["T"])
+
                 err = compute_projection_consistency(
                     src_pcd_full_cur, T_cur2prev, prev_frame, obj_id=0
                 )
                 reproj_errors.append(err)
                 c["reproj_error"] = float(err)
             best_cluster_idx = int(np.argmin(reproj_errors))
+        elif self._select_method == "reproj_error_iou":
+            reproj_errors = []
+            src_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
+
+            for c in candidates:
+                src_pcd_full_cur = src_pcd_full.copy()
+                T_cur2prev = prev_T @ inverse_SE3(c["T"])
+                err = compute_projection_consistency_iou(
+                    src_pcd_full_cur, T_cur2prev, prev_frame, obj_id=0
+                )
+                reproj_errors.append(err)
+                c["reproj_error_iou"] = float(err)
+            best_cluster_idx = int(np.argmax(reproj_errors))
+        elif self._select_method == "3d_dist":
+            dist_errors = []
+            src_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
+            tgt_pcd_full = extract_cropped_point_cloud(prev_frame, obj_id)
+            for c in candidates:
+                src_pcd_full_cur = src_pcd_full.copy()
+                T_cur2prev = prev_T @ inverse_SE3(c["T"])
+                dists = self.icp_like_point2point_residuals(
+                    src_pcd_full_cur, tgt_pcd_full, T_cur2prev
+                )
+
+                dist_errors.append(dists)
+                c["3d_dist"] = float(dists)
+            best_cluster_idx = int(np.argmin(dist_errors))
+
+        elif self._select_method == "3d_dist_prev_and_kf":
+            dist_errors = []
+            src_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
+            tgt_pcd_full_prev = extract_cropped_point_cloud(prev_frame, obj_id)
+            tgt_pcd_full_kf = extract_cropped_point_cloud(
+                obj.keyframes[-1].frame, obj_id
+            )
+
+            for c in candidates:
+                src_pcd_full_cur = src_pcd_full.copy()
+
+                T_cur2prev = prev_T @ inverse_SE3(c["T"])
+                T_cur2kf = obj.keyframes[-1].pose @ inverse_SE3(c["T"])
+
+                dists_prev = self.icp_like_point2point_residuals(
+                    src_pcd_full_cur, tgt_pcd_full_prev, T_cur2prev
+                )
+                dists_kf = self.icp_like_point2point_residuals(
+                    src_pcd_full_cur, tgt_pcd_full_kf, T_cur2kf
+                )
+
+                dist_errors.append(dists_prev + dists_kf)
+                c["3d_dist_prev_and_kf"] = float(dists_prev + dists_kf)
+            best_cluster_idx = int(np.argmin(dist_errors))
+
+        elif self._select_method == "dist_to_prev":
+            ref_T = prev_T if prev_T is not None else init_pose
+            d = [self._pose_dist(c["T"], ref_T) for c in candidates]
+            best_cluster_idx = int(np.argmin(d))
+        elif self._select_method == "inlier_count":
+            best_cluster_idx = int(np.argmax([c["ninliers"] for c in candidates]))
+        elif self._select_method == "mean_residual":
+            best_cluster_idx = int(np.argmin([c["mean_res"] for c in candidates]))
         else:
             # fallback: most inliers then lowest mean residual
             best_cluster_idx = int(
@@ -116,13 +187,18 @@ class SVDClusterRegister(Register):
                 )[0]
             )
 
-        best = candidates[best_cluster_idx]
+        # recompute inliers and residuals from the best cluster
+        inliers = np.zeros(N, dtype=bool)
+        inliers[candidates[best_cluster_idx]["inliers"]] = True
+        residuals = np.linalg.norm(
+            transform_pts(candidates[best_cluster_idx]["T"], src_pcd) - tgt_pcd, axis=1
+        )
 
         # recompute inliers/residuals for the selected cluster (for full N)
         inliers_full = np.zeros(N, dtype=bool)
-        inliers_full[best["inliers"]] = True
+        inliers_full[candidates[best_cluster_idx]["inliers"]] = True
         residuals_full = np.linalg.norm(
-            transform_pts(best["T"], src_pcd) - tgt_pcd, axis=1
+            transform_pts(candidates[best_cluster_idx]["T"], src_pcd) - tgt_pcd, axis=1
         )
 
         stats["clusters"] = candidates
@@ -132,7 +208,7 @@ class SVDClusterRegister(Register):
         stats["residuals"] = residuals_full
         if reproj_errors is not None:
             stats["reproj_errors"] = np.array(reproj_errors, dtype=float)
-        return best["T"], stats
+        return candidates[best_cluster_idx]["T"], stats
 
     def _register_one_cluster(self, p0, tgt_pcd, w, remaining, init_pose):
         """
@@ -315,3 +391,45 @@ class SVDClusterRegister(Register):
         T[:3, :3] = R
         T[:3, 3] = t
         return T
+
+    def icp_like_point2point_residuals(
+        self, source_pcd, target_pcd, T_src2tgt, max_corr_dist=0.01
+    ):
+        """
+        ICP-style point-to-point residuals WITHOUT running ICP:
+        - transform source points by T_src2tgt (CPU numpy)
+        - 1-NN search in target (Cupoch KDTree)
+        - residual = distance to nearest neighbor
+
+        Returns:
+        dists: (Ns,)
+        inlier_mask: (Ns,) if max_corr_dist is not None
+        rmse: float if max_corr_dist is not None
+        """
+        # source = cph.geometry.PointCloud()
+        # source.points = cph.utility.Vector3fVector(source_pcd.astype(np.float32))
+        # target = cph.geometry.PointCloud()
+        # target.points = cph.utility.Vector3fVector(target_pcd.astype(np.float32))
+
+        # estimation_method = cph.registration.TransformationEstimationPointToPoint()
+
+        # # Set up convergence criteria
+        # criteria = cph.registration.ICPConvergenceCriteria()
+        # criteria.max_iteration = 0
+
+        # # Perform ICP registration
+        # result = cph.registration.registration_icp(
+        #     source=source,
+        #     target=target,
+        #     max_correspondence_distance=max_corr_dist,
+        #     init=T_src2tgt,
+        #     estimation_method=estimation_method,
+        #     criteria=criteria,
+        # )
+
+        # dists = result.inlier_rmse
+
+        source_pcd = (T_src2tgt @ to_homo(source_pcd).T).T[:, :3]
+        nn_index = cKDTree(source_pcd)
+        nn_dists, _ = nn_index.query(target_pcd, k=1, workers=-1)
+        return nn_dists.mean()

@@ -3561,9 +3561,9 @@ def main(args):
         )
         register_folder = os.path.join(project_root, "debug", "register")
 
-    if not os.path.exists(register_folder):
-        print(f"Error: Register folder {register_folder} does not exist")
-        return
+    # if not os.path.exists(register_folder):
+    #     print(f"Error: Register folder {register_folder} does not exist")
+    #     return
 
     # Auto-detect video sequence info from register_folder path if not provided
     mode = getattr(args, "mode", "auto")

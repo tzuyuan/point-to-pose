@@ -32,6 +32,102 @@ def depth2xyzmap(depth, K):
     return xyz_map.astype(np.float32)
 
 
+class YCBInIsaacReader:
+    def __init__(self, video_dir, downscale=1, shorter_side=None):
+        self.video_dir = video_dir
+        self.downscale = downscale
+        self.color_files = sorted(glob.glob(f"{self.video_dir}/rgb/*.png"))
+        self.K = np.loadtxt(f"{video_dir}/cam_K.txt").reshape(3, 3)
+        self.id_strs = []
+        for color_file in self.color_files:
+            id_str = os.path.basename(color_file).replace(".png", "")
+            self.id_strs.append(id_str)
+        self.H, self.W = cv2.imread(self.color_files[0]).shape[:2]
+
+        if shorter_side is not None:
+            self.downscale = shorter_side / min(self.H, self.W)
+
+        self.H = int(self.H * self.downscale)
+        self.W = int(self.W * self.downscale)
+        self.K[:2] *= self.downscale
+
+        self.gt_pose_files = sorted(glob.glob(f"{self.video_dir}/annotated_poses/*"))
+
+        self.videoname_to_object = {
+            "cracker_box": "003_cracker_box",
+            "mustard_bottle": "006_mustard_bottle",
+            "extra_large_clamp": "052_extra_large_clamp",
+        }
+
+    def get_video_name(self):
+        return self.video_dir.split("/")[-1]
+
+    def __len__(self):
+        return len(self.color_files)
+
+    def get_gt_pose(self, i):
+        try:
+            pose = np.loadtxt(self.gt_pose_files[i]).reshape(4, 4)
+            return pose
+        except:
+            logging.info("GT pose not found, return None")
+            return None
+
+    def get_color(self, i):
+        color = imageio.imread(self.color_files[i])
+        if color.shape[-1] == 4:
+            color = color[..., :3]  # Drop alpha channel
+
+        color = cv2.resize(color, (self.W, self.H), interpolation=cv2.INTER_NEAREST)
+        return color
+
+    def get_mask(self, i):
+        mask = cv2.imread(self.color_files[i].replace("rgb", "masks"), -1)
+        if len(mask.shape) == 3:
+            mask = (mask.sum(axis=-1) > 0).astype(np.uint8)
+        mask = cv2.resize(mask, (self.W, self.H), interpolation=cv2.INTER_NEAREST)
+        return mask
+
+    def get_depth(self, i):
+        depth = (
+            cv2.imread(
+                self.color_files[i].replace("rgb", "depth"), cv2.IMREAD_UNCHANGED
+            )
+            / 1e3
+        )
+        depth = cv2.resize(depth, (self.W, self.H), interpolation=cv2.INTER_NEAREST)
+        # print(depth)
+        return depth
+
+    def get_xyz_map(self, i):
+        depth = self.get_depth(i)
+        xyz_map = depth2xyzmap(depth, self.K)
+        return xyz_map
+
+    def get_occ_mask(self, i):
+        hand_mask_file = self.color_files[i].replace("rgb", "masks_hand")
+        occ_mask = np.zeros((self.H, self.W), dtype=bool)
+        if os.path.exists(hand_mask_file):
+            occ_mask = occ_mask | (cv2.imread(hand_mask_file, -1) > 0)
+
+        right_hand_mask_file = self.color_files[i].replace("rgb", "masks_hand_right")
+        if os.path.exists(right_hand_mask_file):
+            occ_mask = occ_mask | (cv2.imread(right_hand_mask_file, -1) > 0)
+
+        occ_mask = cv2.resize(
+            occ_mask, (self.W, self.H), interpolation=cv2.INTER_NEAREST
+        )
+
+        return occ_mask.astype(np.uint8)
+
+    def get_gt_mesh(self):
+        ob_name = self.videoname_to_object[self.get_video_name()]
+        mesh = trimesh.load(
+            f"/mnt/9a72c439-d0a7-45e8-8d20-d7a235d02763/DATASET/YCB_Video/YCB_Video_Models/models/{ob_name}/textured_simple.obj"
+        )
+        return mesh
+
+
 class YcbineoatReader:
     def __init__(self, video_dir, downscale=1, shorter_side=None):
         self.video_dir = video_dir
@@ -63,6 +159,7 @@ class YcbineoatReader:
             "sugar_box1": "004_sugar_box",
             "sugar_box_yalehand0": "004_sugar_box",
             "tomato_soup_can_yalehand0": "005_tomato_soup_can",
+            "cracker_box": "003_cracker_box",
         }
 
     def get_video_name(self):

@@ -13,7 +13,7 @@ pipeline:
     fill_missing_depth_window_size: 5
     fill_missing_depth_min_neighbors: 1
     min_depth: 0.05
-    max_depth: 0.8
+    max_depth: 2
 
     use_depth_estimate: false
     depth_estimator_type: depth_anything
@@ -62,15 +62,15 @@ register:
   type: svd_cluster_ransac
   params:
     ransac_iters: 100
-    sample_size: 3
-    inlier_thres: 0.004
-    min_inliers: 3
+    sample_size: 4
+    inlier_thres: 0.005
+    min_inliers: 4
     max_clusters: 10
     use_uncertainty: true
     min_variance: 1e-2
 
-    # reproj_error, dist_to_prev, inlier_count, mean_residual, reproj_error_iou, 3d_dist
-    select_method: reproj_error
+    # reproj_error, dist_to_prev, inlier_count, mean_residual, reproj_error_iou, 3d_dist, 3d_dist_prev_kf
+    select_method: 3d_dist
 
     # front end
     remove_outside_mask: true
@@ -82,12 +82,14 @@ register:
 #   params:
 #     threshold_method: fixed
 #     ransac_iters: 50
-#     sample_size: 3
-#     inlier_thres: 0.007
-#     min_inliers: 3
-#     max_clusters: 5
-#     use_uncertainty: false
+#     sample_size: 4
+#     inlier_thres: 0.005
+#     min_inliers: 4
+#     max_clusters: 10
+#     use_uncertainty: true
 #     min_variance: 1e-3
+
+#     select_method: 3d_dist
 
 #     # front end
 #     remove_outside_mask: true
@@ -223,9 +225,12 @@ local_optimizer:
     max_iterations: 20
     relative_error_tol: 1e-5
     absolute_error_tol: 1e-5
-    prior_noise_param: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
-    uncertainty_thres: 1.0
+    prior_noise_param: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
+    uncertainty_thres: 0.3
     uncertainty_min: 1e-2
+    landmark_sigma_scale_by: residual
+    landmark_sigma_min: 1e-3
+    landmark_huber_k: 1.0
 
 global_optimizer:
   type: lm_graph
@@ -234,9 +239,12 @@ global_optimizer:
     relinearize_skip: 1
     relative_error_tol: 1e-5
     absolute_error_tol: 1e-5
-    prior_noise_param: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
-    uncertainty_thres: 0.2
+    prior_noise_param: [0.00001, 0.00001, 0.00001, 0.00001, 0.00001, 0.00001]
+    uncertainty_thres: 0.3
     uncertainty_min: 1e-2
+    landmark_sigma_scale_by: residual
+    landmark_sigma_min: 1e-4
+    landmark_huber_k: 1.0
 
 visualization:
   params:

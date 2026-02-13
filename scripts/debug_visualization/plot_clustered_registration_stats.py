@@ -463,13 +463,16 @@ def plot_clusters_vs_gt_pose(
         trans_err[j] = te
         rot_err[j] = re
 
+    d_3d = np.array([float(c.get("3d_dist", np.nan)) for c in clusters], dtype=float)
+    has_3d = np.isfinite(d_3d).any()
+
     reproj_errors = np.array(
         [float(c.get("reproj_error", np.nan)) for c in clusters], dtype=float
     )
     has_reproj = np.isfinite(reproj_errors).any()
 
     x = np.arange(len(clusters))
-    n_plots = 6 if has_reproj else 5
+    n_plots = 5 + (1 if has_3d else 0) + (1 if has_reproj else 0)
     fig, axs = plt.subplots(n_plots, 1, figsize=(10, 2 * n_plots), sharex=True)
 
     axs[0].bar(x, ninliers, color="tab:blue", alpha=0.8)
@@ -486,15 +489,15 @@ def plot_clusters_vs_gt_pose(
 
     axs[4].plot(x, rot_err, "o-", color="tab:red", alpha=0.9)
     axs[4].set_ylabel("rot err (deg)")
+    row = 5
+    if has_3d:
+        axs[row].plot(x, d_3d, "o-", color="tab:olive", alpha=0.9)
+        axs[row].set_ylabel("3d_dist")
+        row += 1
     if has_reproj:
-        axs[4].set_ylabel("rot err (deg)")
-    else:
-        axs[4].set_xlabel("cluster candidate index")
-
-    if has_reproj:
-        axs[5].plot(x, reproj_errors, "o-", color="tab:pink", alpha=0.9)
-        axs[5].set_ylabel("reproj_error")
-        axs[5].set_xlabel("cluster candidate index")
+        axs[row].plot(x, reproj_errors, "o-", color="tab:pink", alpha=0.9)
+        axs[row].set_ylabel("reproj_error")
+    axs[-1].set_xlabel("cluster candidate index")
 
     if 0 <= best_idx < len(clusters):
         for ax in axs:
@@ -578,6 +581,7 @@ def plot_cluster_summary_for_frame(
     d_gt: Optional[np.ndarray] = None,
     t_err_gt: Optional[np.ndarray] = None,
     r_err_gt: Optional[np.ndarray] = None,
+    d_3d: Optional[np.ndarray] = None,
     reproj_errors: Optional[np.ndarray] = None,
 ):
     if not clusters:
@@ -598,6 +602,7 @@ def plot_cluster_summary_for_frame(
         + (1 if d_gt is not None else 0)
         + (1 if t_err_gt is not None else 0)
         + (1 if r_err_gt is not None else 0)
+        + (1 if d_3d is not None else 0)
         + (1 if reproj_errors is not None else 0)
     )
     fig, axs = plt.subplots(rows, 1, figsize=(10, 2.3 * rows), sharex=True)
@@ -619,6 +624,7 @@ def plot_cluster_summary_for_frame(
     best_prev_idx = -1
     best_tgt_idx = -1
     best_rgt_idx = -1
+    best_3d_idx = -1
     best_reproj_idx = -1
     if d_prev is not None:
         d_prev = np.asarray(d_prev, dtype=float).reshape(-1)
@@ -654,6 +660,15 @@ def plot_cluster_summary_for_frame(
             best_rgt_idx = int(np.nanargmin(r_err_gt))
         row += 1
 
+    if d_3d is not None:
+        d_3d = np.asarray(d_3d, dtype=float).reshape(-1)
+        axs[row].plot(x, d_3d, "o-", color="tab:olive", alpha=0.9)
+        axs[row].set_ylabel("3d_dist")
+        axs[row].set_xlabel("cluster candidate index")
+        if np.isfinite(d_3d).any():
+            best_3d_idx = int(np.nanargmin(d_3d))
+        row += 1
+
     if reproj_errors is not None:
         reproj_errors = np.asarray(reproj_errors, dtype=float).reshape(-1)
         axs[row].plot(x, reproj_errors, "o-", color="tab:pink", alpha=0.9)
@@ -675,6 +690,8 @@ def plot_cluster_summary_for_frame(
             extra.append(f"min t_err(GT)={best_tgt_idx}")
         if best_rgt_idx >= 0:
             extra.append(f"min r_err(GT)={best_rgt_idx}")
+        if best_3d_idx >= 0:
+            extra.append(f"min 3d_dist={best_3d_idx}")
         if best_reproj_idx >= 0:
             extra.append(f"min reproj_error={best_reproj_idx}")
         extra_str = f" | {'; '.join(extra)}" if extra else ""
@@ -1690,6 +1707,13 @@ def main():
             if any(np.isfinite(reproj_errors_list)):
                 reproj_errors = np.asarray(reproj_errors_list, dtype=float)
 
+        # Extract 3d_dist (used by select_method=3d_dist in clustered register)
+        d_3d = None
+        if clusters:
+            d_3d_list = [float(c.get("3d_dist", np.nan)) for c in clusters]
+            if any(np.isfinite(d_3d_list)):
+                d_3d = np.asarray(d_3d_list, dtype=float)
+
         fig1 = plot_cluster_summary_for_frame(
             clusters,
             best_idx,
@@ -1698,6 +1722,7 @@ def main():
             d_gt=d_gt,
             t_err_gt=t_err_gt,
             r_err_gt=r_err_gt,
+            d_3d=d_3d,
             reproj_errors=reproj_errors,
         )
         if fig1 is not None:

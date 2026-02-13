@@ -46,7 +46,7 @@ class LMGraphOptimizer(Optimizer):
         self._lm_params.setAbsoluteErrorTol(config.get("absolute_error_tol", 1e-5))
         self._lm_params.setlambdaInitial(config.get("lambda_initial", 1e-1))
 
-        self._lm_params.setVerbosityLM("TRYLAMBDA")
+        # self._lm_params.setVerbosityLM("TRYLAMBDA")
 
         # ------------------------------------------------------------------
         # Optional formulation knobs (all default to preserving old behavior)
@@ -195,15 +195,16 @@ class LMGraphOptimizer(Optimizer):
                 z_cam = data.reg_cur_3d[m]
                 Lj = gtsam.symbol("l", int(lid))
 
+                # z_range = float(np.linalg.norm(z_cam))
+                # sigma_bearing = 0.007 / max(z_range, 1e-3)
                 # --- Landmark noise model ---
-                # Default keeps old behavior: sigma=[1,1,1] with a Huber kernel.
                 diag = (
                     np.asarray(self._landmark_noise_param, dtype=float)
                     if self._landmark_noise_param is not None
-                    else np.array([1.0, 1.0, 1.0], dtype=float)
+                    else np.array([0.04, 0.04, 0.07], dtype=float)
                 )
 
-                sigma_scale = 1.0
+                sigma_scale = 1
                 if self._landmark_sigma_scale_by == "residual":
                     if (
                         getattr(data, "reg_residuals", None) is not None
@@ -212,7 +213,7 @@ class LMGraphOptimizer(Optimizer):
                         sigma_scale = float(
                             max(
                                 self._landmark_sigma_min,
-                                float(data.reg_residuals[m] * 100),
+                                float(data.reg_residuals[m]),
                             )
                         )
                 elif self._landmark_sigma_scale_by == "uncertainty":
@@ -223,7 +224,7 @@ class LMGraphOptimizer(Optimizer):
                         sigma_scale = float(
                             max(
                                 self._landmark_sigma_min,
-                                float(data.reg_uncertainties[m]),
+                                float(data.reg_uncertainties[m] * 0.1),
                             )
                         )
 
@@ -233,6 +234,10 @@ class LMGraphOptimizer(Optimizer):
                         gtsam.noiseModel.mEstimator.Huber(self._landmark_huber_k),
                         base_noise,
                     )
+                    # point_noise = gtsam.noiseModel.Robust(
+                    #     gtsam.noiseModel.mEstimator.Cauchy(1.0),
+                    #     base_noise,
+                    # )
                 else:
                     point_noise = base_noise
 

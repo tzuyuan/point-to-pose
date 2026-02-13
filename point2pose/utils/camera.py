@@ -506,7 +506,7 @@ def compute_projection_consistency(
     obj_id=0,
     min_depth=0.001,
     max_depth=2.0,
-    tau_occ=0.1,
+    tau_occ=0.05,
 ):
     """
     Evaluate projection consistency for registration scoring.
@@ -573,10 +573,8 @@ def compute_projection_consistency(
         & (z_projected <= max_depth)
     )
 
-    occluded_outside = (
-        (~mask_values) & valid_depth & (z_measured < (z_projected - tau_occ))
-    )
-    not_occluded = ~occluded_outside
+    occluded = z_measured < (z_projected - tau_occ)
+    not_occluded = ~occluded
 
     valid_inside = mask_values & valid_depth & in_depth_range & not_occluded
 
@@ -597,7 +595,227 @@ def compute_projection_consistency(
     )
 
     # Return mean depth error
-    return np.median(depth_errors)
+    return np.mean(depth_errors)
+
+
+# def compute_projection_consistency(
+#     src_pcd,
+#     T_src2dst,
+#     frame_dst,
+#     obj_id=0,
+#     min_depth=0.001,
+#     max_depth=2.0,
+#     tau_occ=0.1,
+#     # ---- added (simple defaults) ----
+#     tau_in=0.03,  # inlier threshold for |z_proj - z_meas| (m)
+#     tau_err=0.06,  # truncation for robust mean (m)
+#     min_compare=80,  # require enough compared points
+#     w_inlier=1.0,
+#     w_fit=0.5,
+#     w_support=0.6,
+#     w_outside=0.4,
+#     w_oob=0.2,
+#     w_small=0.2,
+# ):
+#     """
+#     Score projection consistency for candidate selection.
+
+#     Key change vs your original:
+#       - residuals are computed ONLY for valid in-mask comparisons
+#       - "outside points" are handled via an explicit ratio penalty (not fake residuals)
+#       - score includes inlier ratio + robust residual magnitude + support/leak penalties
+
+#     Returns:
+#         float: score (lower is better), or np.inf if not enough evidence
+#     """
+#     # Project points
+#     pts_dst_2d, pts_dst_3d = project_points_to_image(
+#         src_pcd, frame_dst.intrinsics, T_src2dst
+#     )
+
+#     # Frame properties
+#     H, W = frame_dst.depth.shape
+#     dst_mask = frame_dst.mask[obj_id, 0].cpu().numpy()
+#     depth_image = frame_dst.depth
+#     depth_factor = frame_dst.depth_factor
+
+#     N = len(pts_dst_2d)
+#     if N == 0:
+#         return np.inf
+
+#     # Pixel indices (NN)
+#     u_coords = np.round(pts_dst_2d[:, 0]).astype(int)
+#     v_coords = np.round(pts_dst_2d[:, 1]).astype(int)
+
+#     # Bounds
+#     in_bounds = (u_coords >= 0) & (u_coords < W) & (v_coords >= 0) & (v_coords < H)
+#     if not np.any(in_bounds):
+#         return np.inf
+
+#     valid_indices = np.where(in_bounds)[0]
+
+#     # Mask values (for in-bounds points)
+#     mask_values = np.zeros(N, dtype=bool)
+#     mask_values[valid_indices] = (
+#         dst_mask[v_coords[valid_indices], u_coords[valid_indices]] > 0
+#     )
+
+#     # Measured depths (only in-bounds)
+#     z_measured = np.full(N, np.nan, dtype=float)
+#     z_measured[valid_indices] = (
+#         depth_image[v_coords[valid_indices], u_coords[valid_indices]] / depth_factor
+#     )
+
+#     # Projected depths
+#     z_projected = pts_dst_3d[:, 2]
+
+#     # Depth validity / range
+#     meas_valid = np.isfinite(z_measured) & (z_measured > 0)
+#     proj_valid = np.isfinite(z_projected)
+
+#     meas_in_range = meas_valid & (min_depth <= z_measured) & (z_measured <= max_depth)
+#     proj_in_range = proj_valid & (min_depth <= z_projected) & (z_projected <= max_depth)
+
+#     # ---- sets for penalties ----
+#     proj_in_range_all = proj_in_range  # includes OOB points too
+#     proj_in_range_inbounds = proj_in_range & in_bounds
+
+#     n_proj = int(np.count_nonzero(proj_in_range_all))
+#     if n_proj == 0:
+#         return np.inf
+
+#     n_oob = int(np.count_nonzero(proj_in_range_all & (~in_bounds)))
+#     oob_ratio = n_oob / max(1, n_proj)
+
+#     n_outside = int(np.count_nonzero(proj_in_range_inbounds & (~mask_values)))
+#     outside_ratio = n_outside / max(1, n_proj)
+
+#     n_inside_proj = int(np.count_nonzero(proj_in_range_inbounds & mask_values))
+#     if n_inside_proj == 0:
+#         return np.inf
+
+#     # ---- compare residuals ONLY for inside-mask + valid measured depth ----
+#     base_inside = proj_in_range_inbounds & mask_values & meas_in_range
+
+#     # Occlusion handling (simple): if measured is much closer than predicted, predicted is behind -> ignore
+#     occluded = base_inside & (z_measured < (z_projected - tau_occ))
+#     compare = base_inside & (~occluded)
+
+#     n_compare = int(np.count_nonzero(compare))
+#     if n_compare < min_compare:
+#         return np.inf
+
+#     residuals = np.abs(z_projected[compare] - z_measured[compare])
+
+#     # Inlier ratio
+#     inliers = residuals < tau_in
+#     inlier_ratio = float(np.count_nonzero(inliers)) / float(n_compare)
+
+#     # Robust fit magnitude (truncated mean)
+#     fit = float(np.mean(np.minimum(residuals, tau_err)))
+
+#     # Support: how much of projected-inside we could actually compare (depth valid + not occluded)
+#     support_ratio = n_compare / max(1, n_inside_proj)
+
+#     # Small-sample penalty (discourage “wins on tiny subset”)
+#     small_pen = 1.0 / np.sqrt(n_compare + 1e-6)
+
+#     # Final score (lower is better)
+#     score = (
+#         w_inlier * (1.0 - inlier_ratio)
+#         + w_fit * fit
+#         + w_support * (1.0 - support_ratio)
+#         + w_outside * outside_ratio
+#         + w_oob * oob_ratio
+#         + w_small * small_pen
+#     )
+
+#     return float(score)
+
+
+#     src_pcd,
+#     T_src2dst,
+#     frame_dst,
+#     obj_id=0,
+#     min_depth=0.001,
+#     max_depth=2.0,
+#     tau_occ=0.1,
+# def compute_projection_consistency(
+#     src_pcd,
+#     T_src2dst,
+#     frame_dst,
+#     obj_id=0,
+#     min_depth=0.001,
+#     max_depth=2.0,
+#     tau_occ=0.02,  # occlusion threshold (m)
+#     tau_err=0.05,  # truncation for robust L1 (m)
+#     lam_support=0.3,  # penalty weights
+#     mu_outside=0.2,
+#     nu_oob=0.2,
+#     min_compare=50,
+# ):
+#     pts_uv, pts_dst = project_points_to_image(src_pcd, frame_dst.intrinsics, T_src2dst)
+
+#     H, W = frame_dst.depth.shape
+#     dst_mask = frame_dst.mask[obj_id, 0].cpu().numpy().astype(bool)
+#     depth = frame_dst.depth.astype(np.float32)
+#     depth_factor = float(frame_dst.depth_factor)
+
+#     u = np.round(pts_uv[:, 0]).astype(np.int32)
+#     v = np.round(pts_uv[:, 1]).astype(np.int32)
+
+#     in_bounds = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+#     z_proj = pts_dst[:, 2]
+
+#     # projected depth range (for meaningful points)
+#     proj_in_range = (z_proj >= min_depth) & (z_proj <= max_depth)
+
+#     # mask membership for in-bounds pixels
+#     in_mask = np.zeros_like(in_bounds, dtype=bool)
+#     idx = np.where(in_bounds)[0]
+#     in_mask[idx] = dst_mask[v[idx], u[idx]]
+
+#     # measured depths for in-bounds pixels
+#     z_meas = np.full_like(z_proj, np.nan, dtype=np.float32)
+#     z_meas[idx] = depth[v[idx], u[idx]] / depth_factor
+
+#     meas_valid = np.isfinite(z_meas) & (z_meas > 0)
+#     meas_in_range = meas_valid & (z_meas >= min_depth) & (z_meas <= max_depth)
+
+#     # Compare only inside mask, in-bounds, with valid depths and proj depth
+#     base = in_bounds & in_mask & proj_in_range & meas_in_range
+
+#     # Occlusion: measured much closer than predicted => predicted behind something
+#     occluded = base & (z_meas < (z_proj - tau_occ))
+#     compare = base & (~occluded)
+
+#     if np.count_nonzero(compare) < min_compare:
+#         return np.inf
+
+#     r = z_proj[compare] - z_meas[compare]
+#     abs_r = np.abs(r)
+
+#     # Robust truncated L1 cost
+#     cost = np.mean(np.minimum(abs_r, tau_err))
+
+#     # Support: how much of the in-mask projection we could actually compare
+#     denom_support = np.count_nonzero(in_bounds & in_mask & proj_in_range)
+#     support_ratio = np.count_nonzero(compare) / max(1, denom_support)
+
+#     # Outside / OOB ratios (explicit, instead of stuffing constants into median)
+#     denom_proj = np.count_nonzero(proj_in_range)
+#     outside_ratio = np.count_nonzero(in_bounds & (~in_mask) & proj_in_range) / max(
+#         1, denom_proj
+#     )
+#     oob_ratio = np.count_nonzero((~in_bounds) & proj_in_range) / max(1, denom_proj)
+
+#     score = (
+#         cost
+#         + lam_support * (1.0 - support_ratio)
+#         + mu_outside * outside_ratio
+#         + nu_oob * oob_ratio
+#     )
+#     return float(score)
 
 
 def compute_projection_consistency_iou(src_pcd, T_src2dst, frame_dst, obj_id=0):

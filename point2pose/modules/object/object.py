@@ -28,7 +28,7 @@ class Object:
             (0,), dtype=int
         )  # M, frame IDs when points were added
 
-        self.last_keyframe = None
+        self.keyframes = []
         # pose of the object
         # init_pose is the transformation from the object frame to the first frame
         # e.g. the estimated pose of the object in the first frame

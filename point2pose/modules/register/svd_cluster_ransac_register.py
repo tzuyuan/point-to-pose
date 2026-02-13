@@ -2,9 +2,11 @@ import numpy as np
 import cupoch as cph
 import copy
 
+from scipy.spatial import cKDTree
+
 from point2pose.core.base_register import Register
 from point2pose.core.module_registry import REGISTER
-from point2pose.utils.transform import transform_pts, inverse_SE3
+from point2pose.utils.transform import transform_pts, inverse_SE3, to_homo
 from point2pose.utils.lie import log_SE3
 from point2pose.utils.camera import (
     compute_projection_consistency,
@@ -44,6 +46,7 @@ class SVDClusterRANSACRegister(Register):
         prev_T=None,
         prev_frame=None,
         cur_frame=None,
+        obj=None,
         obj_id=0,
         mode="f2m",
     ):
@@ -127,9 +130,101 @@ class SVDClusterRANSACRegister(Register):
                     src_pcd_full_cur, tgt_pcd_full, T_cur2prev
                 )
 
+                # dists, _, _ = self.icp_like_point2point_score(
+                #     src_pcd_full_cur, tgt_pcd_full, T_cur2prev
+                # )
+
                 dist_errors.append(dists)
                 c["3d_dist"] = float(dists)
             best_cluster_idx = int(np.argmin(dist_errors))
+        # elif self._selected_method == "3d_dist"
+        elif self._select_method == "3d_dist_kf":
+            dist_errors = []
+            pcd_kf = []
+            num_kf = 1
+            src_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
+            for k in obj.keyframes[-num_kf:]:
+                if k.frame is None:
+                    continue
+                tgt_kf = extract_cropped_point_cloud(k.frame, obj_id)
+                pcd_kf.append(tgt_kf)
+
+            nn_index = cKDTree(src_pcd_full)
+            for c in candidates:
+                dists = []
+                for i, k in enumerate(obj.keyframes[-num_kf:]):
+
+                    trg_pcd = pcd_kf[i].copy()
+
+                    T_cur2kf = k.pose @ inverse_SE3(c["T"])
+                    nn_dists, _ = nn_index.query(trg_pcd, k=1, workers=-1)
+                    dists.append(float(np.median(nn_dists)))
+
+                dist_errors.append(float(np.mean(dists)))
+                c["3d_dist_kf"] = float(np.mean(dists))
+            best_cluster_idx = int(np.argmin(dist_errors))
+
+        elif self._select_method == "3d_dist_prev_kf":
+            scores = []
+            src_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
+            tgt_prev = extract_cropped_point_cloud(prev_frame, obj_id)
+            tgt_kf = extract_cropped_point_cloud(obj.keyframes[-1].frame, obj_id)
+
+            # tune these to your depth noise / object scale
+            max_corr = 0.05  # e.g. 2cm if inlier_thres=1cm
+            min_ratio = 0.15
+            min_inl = 200
+
+            lam_smooth = float(self.config.get("select_smooth_lambda", 0.05))  # small
+            eps = 1e-6
+
+            for c in candidates:
+                T_cur2prev = prev_T @ inverse_SE3(c["T"])
+                T_cur2kf = obj.keyframes[-1].pose @ inverse_SE3(c["T"])
+
+                # s_prev, r_prev, _ = self.icp_like_point2point_score(
+                #     src_pcd_full,
+                #     tgt_prev,
+                #     T_cur2prev,
+                #     max_corr_dist=max_corr,
+                #     min_inlier_ratio=min_ratio,
+                #     min_inliers=min_inl,
+                # )
+                # s_kf, r_kf, _ = self.icp_like_point2point_score(
+                #     src_pcd_full,
+                #     tgt_kf,
+                #     T_cur2kf,
+                #     max_corr_dist=max_corr,
+                #     min_inlier_ratio=min_ratio,
+                #     min_inliers=min_inl,
+                # )
+
+                s_prev = self.icp_like_point2point_residuals(
+                    src_pcd_full, tgt_prev, T_cur2prev
+                )
+
+                s_kf = self.icp_like_point2point_residuals(
+                    src_pcd_full, tgt_kf, T_cur2kf
+                )
+
+                # if np.isinf(s_prev) and np.isinf(s_kf):
+                #     # fallback that doesn't depend on prev_T
+                #     s = c["mean_res"] - 0.001 * c["ninliers"]
+                # else:
+                #     w_prev = r_prev / (r_prev + r_kf + eps)
+                #     s = w_prev * s_prev + (1.0 - w_prev) * s_kf
+
+                # # hysteresis: discourage switching when scores are close
+                # if getattr(self, "_last_selected_T", None) is not None:
+                #     s += lam_smooth * self._pose_dist(c["T"], self._last_selected_T)
+
+                # scores.append(float(s))
+                s = np.min([s_prev, s_kf])
+                scores.append(s)
+                c["3d_score_prev_kf"] = float(s)
+
+            best_cluster_idx = int(np.argmin(scores))
+
         elif self._select_method == "dist_to_prev":
             ref_T = prev_T if prev_T is not None else init_pose
             d = [self._pose_dist(c["T"], ref_T) for c in candidates]
@@ -163,6 +258,8 @@ class SVDClusterRANSACRegister(Register):
         stats["residuals"] = residuals
         if reproj_errors is not None:
             stats["reproj_errors"] = np.array(reproj_errors, dtype=float)
+
+        self._last_selected_T = candidates[best_cluster_idx]["T"]
         return candidates[best_cluster_idx]["T"], stats
 
     def _RANSAC(self, p0, tgt_pcd, w, remaining, init_pose):
@@ -369,26 +466,33 @@ class SVDClusterRANSACRegister(Register):
         inlier_mask: (Ns,) if max_corr_dist is not None
         rmse: float if max_corr_dist is not None
         """
-        source = cph.geometry.PointCloud()
-        source.points = cph.utility.Vector3fVector(source_pcd.astype(np.float32))
-        target = cph.geometry.PointCloud()
-        target.points = cph.utility.Vector3fVector(target_pcd.astype(np.float32))
 
-        estimation_method = cph.registration.TransformationEstimationPointToPoint()
+        source_pcd = (T_src2tgt @ to_homo(source_pcd).T).T[:, :3]
+        nn_index = cKDTree(source_pcd)
+        nn_dists, _ = nn_index.query(target_pcd, k=1, workers=-1)
+        return nn_dists.mean()
 
-        # Set up convergence criteria
-        criteria = cph.registration.ICPConvergenceCriteria()
-        criteria.max_iteration = 0
+    def icp_like_point2point_score(
+        self,
+        source_pcd,
+        target_pcd,
+        T_src2tgt,
+        max_corr_dist=0.05,
+        min_inlier_ratio=0.25,
+        min_inliers=200,
+    ):
+        src = (T_src2tgt @ to_homo(source_pcd).T).T[:, :3]
 
-        # Perform ICP registration
-        result = cph.registration.registration_icp(
-            source=source,
-            target=target,
-            max_correspondence_distance=max_corr_dist,
-            init=T_src2tgt,
-            estimation_method=estimation_method,
-            criteria=criteria,
-        )
+        tree = cKDTree(target_pcd)
+        dists, _ = tree.query(src, k=1, workers=-1)
 
-        dists = result.inlier_rmse
-        return dists
+        inl = dists <= max_corr_dist
+        ninl = int(inl.sum())
+        ratio = ninl / max(1, src.shape[0])
+
+        if ninl < min_inliers or ratio < min_inlier_ratio:
+            return np.inf, ratio, ninl
+
+        # robust score: median or p80 works great
+        score = float(np.median(dists[inl]))  # or np.percentile(dists[inl], 80)
+        return score, ratio, ninl

@@ -3,14 +3,138 @@ import matplotlib.pyplot as plt
 import argparse
 import os
 import sys
-from scipy.spatial.transform import Rotation as R
 from pathlib import Path
 
 # Add project root to path
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from point2pose.io.sources.dataset.datareader import Ho3dReader, YcbineoatReader
+try:
+    from point2pose.io.sources.dataset.datareader import Ho3dReader, YcbineoatReader
+except Exception:
+    Ho3dReader = None
+    YcbineoatReader = None
+
 from point2pose.utils.transform import inverse_SE3
+
+
+def _rotmat_to_quat_xyzw(Rm: np.ndarray) -> np.ndarray:
+    """
+    Convert a 3x3 rotation matrix to quaternion [x, y, z, w] (scalar-last).
+    """
+    Rm = np.asarray(Rm, dtype=float).reshape(3, 3)
+    tr = float(np.trace(Rm))
+    if tr > 0.0:
+        S = np.sqrt(tr + 1.0) * 2.0  # S=4*qw
+        qw = 0.25 * S
+        qx = (Rm[2, 1] - Rm[1, 2]) / S
+        qy = (Rm[0, 2] - Rm[2, 0]) / S
+        qz = (Rm[1, 0] - Rm[0, 1]) / S
+    else:
+        # Find the largest diagonal element and proceed accordingly
+        if (Rm[0, 0] > Rm[1, 1]) and (Rm[0, 0] > Rm[2, 2]):
+            S = np.sqrt(1.0 + Rm[0, 0] - Rm[1, 1] - Rm[2, 2]) * 2.0  # S=4*qx
+            qw = (Rm[2, 1] - Rm[1, 2]) / S
+            qx = 0.25 * S
+            qy = (Rm[0, 1] + Rm[1, 0]) / S
+            qz = (Rm[0, 2] + Rm[2, 0]) / S
+        elif Rm[1, 1] > Rm[2, 2]:
+            S = np.sqrt(1.0 + Rm[1, 1] - Rm[0, 0] - Rm[2, 2]) * 2.0  # S=4*qy
+            qw = (Rm[0, 2] - Rm[2, 0]) / S
+            qx = (Rm[0, 1] + Rm[1, 0]) / S
+            qy = 0.25 * S
+            qz = (Rm[1, 2] + Rm[2, 1]) / S
+        else:
+            S = np.sqrt(1.0 + Rm[2, 2] - Rm[0, 0] - Rm[1, 1]) * 2.0  # S=4*qz
+            qw = (Rm[1, 0] - Rm[0, 1]) / S
+            qx = (Rm[0, 2] + Rm[2, 0]) / S
+            qy = (Rm[1, 2] + Rm[2, 1]) / S
+            qz = 0.25 * S
+    return np.array([qx, qy, qz, qw], dtype=float)
+
+
+def _rotmat_to_rotvec(Rm: np.ndarray) -> np.ndarray:
+    """
+    Convert a 3x3 rotation matrix to rotation vector (axis * angle), angle in radians.
+    """
+    Rm = np.asarray(Rm, dtype=float).reshape(3, 3)
+    cos_theta = (np.trace(Rm) - 1.0) * 0.5
+    cos_theta = float(np.clip(cos_theta, -1.0, 1.0))
+    theta = float(np.arccos(cos_theta))
+    if theta < 1e-12:
+        return np.zeros(3, dtype=float)
+    sin_theta = float(np.sin(theta))
+    # Guard for numerical issues near pi
+    if abs(sin_theta) < 1e-12:
+        # Fallback: derive axis from diagonal
+        axis = np.sqrt(np.maximum(np.diag(Rm) + 1.0, 0.0)) / np.sqrt(2.0)
+        axis = np.where(np.isfinite(axis), axis, 0.0)
+        # Fix signs using off-diagonals
+        axis[0] = np.copysign(axis[0], Rm[2, 1] - Rm[1, 2])
+        axis[1] = np.copysign(axis[1], Rm[0, 2] - Rm[2, 0])
+        axis[2] = np.copysign(axis[2], Rm[1, 0] - Rm[0, 1])
+        n = float(np.linalg.norm(axis))
+        if n < 1e-12:
+            return np.zeros(3, dtype=float)
+        axis = axis / n
+        return axis * theta
+    axis = np.array(
+        [Rm[2, 1] - Rm[1, 2], Rm[0, 2] - Rm[2, 0], Rm[1, 0] - Rm[0, 1]],
+        dtype=float,
+    ) / (2.0 * sin_theta)
+    return axis * theta
+
+
+def _rotmat_to_euler_xyz(Rm: np.ndarray) -> np.ndarray:
+    """
+    Convert rotation matrix to roll, pitch, yaw using an XYZ intrinsic (roll-pitch-yaw) convention.
+
+    Returns [roll, pitch, yaw] in radians.
+    """
+    Rm = np.asarray(Rm, dtype=float).reshape(3, 3)
+    # Convention equivalent to R = Rz(yaw) * Ry(pitch) * Rx(roll)
+    sy = np.sqrt(Rm[0, 0] * Rm[0, 0] + Rm[1, 0] * Rm[1, 0])
+    singular = sy < 1e-12
+    if not singular:
+        roll = np.arctan2(Rm[2, 1], Rm[2, 2])
+        pitch = np.arctan2(-Rm[2, 0], sy)
+        yaw = np.arctan2(Rm[1, 0], Rm[0, 0])
+    else:
+        # Gimbal lock: yaw set to 0
+        roll = np.arctan2(-Rm[1, 2], Rm[1, 1])
+        pitch = np.arctan2(-Rm[2, 0], sy)
+        yaw = 0.0
+    return np.array([float(roll), float(pitch), float(yaw)], dtype=float)
+
+
+# Use a small numpy-only Rotation fallback here.
+# Rationale: these debug scripts are often run in minimal environments where SciPy/OpenCV
+# may be missing or binary-incompatible with the installed NumPy.
+class _RotationFallback:
+    def __init__(self, mat: np.ndarray):
+        self._mat = np.asarray(mat, dtype=float).reshape(3, 3)
+
+    def as_quat(self) -> np.ndarray:
+        return _rotmat_to_quat_xyzw(self._mat)
+
+    def as_rotvec(self) -> np.ndarray:
+        return _rotmat_to_rotvec(self._mat)
+
+    def as_euler(self, seq: str, degrees: bool = False) -> np.ndarray:
+        seq = (seq or "").lower()
+        if seq != "xyz":
+            raise ValueError(
+                f"Rotation fallback only supports as_euler('xyz'), got {seq!r}"
+            )
+        e = _rotmat_to_euler_xyz(self._mat)
+        if degrees:
+            return np.degrees(e)
+        return e
+
+
+class R:
+    @staticmethod
+    def from_matrix(mat):
+        return _RotationFallback(mat)
 
 
 def _set_plot_style():
@@ -265,6 +389,596 @@ def compute_residual_stats(reg_residuals, reg_inliers):
         inlier_counts[i] = count
 
     return mean_residuals, inlier_counts
+
+
+def _as_py(obj):
+    """
+    Lightweight conversion of numpy/object wrappers to plain Python objects.
+    Mirrors the helper in plot_clustered_registration_stats, but kept minimal.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, np.ndarray):
+        if obj.shape == ():
+            return _as_py(obj.item())
+        return obj.tolist()
+    return obj
+
+
+def _extract_best_cluster_metric_series(data, metric_key: str):
+    """
+    Extract per-frame scalar metric for the *selected* registration cluster.
+
+    Requires:
+      - data['reg_clusters']: object array of per-frame cluster dicts
+      - data['reg_best_cluster_idx']: chosen cluster index per frame
+
+    Returns:
+      series: (N,) float array with NaN where unavailable, or None if required keys missing.
+    """
+    if "reg_clusters" not in data or "reg_best_cluster_idx" not in data:
+        return None
+
+    clusters_arr = data["reg_clusters"]
+    try:
+        N = len(clusters_arr)
+    except TypeError:
+        return None
+
+    try:
+        best_idx_raw = data["reg_best_cluster_idx"]
+        # Handle None values in best_idx array
+        best_idx_arr = []
+        for val in best_idx_raw:
+            if val is None:
+                best_idx_arr.append(-1)  # Use -1 as sentinel for "no cluster"
+            else:
+                try:
+                    best_idx_arr.append(int(val))
+                except (ValueError, TypeError):
+                    best_idx_arr.append(-1)
+        best_idx_arr = np.asarray(best_idx_arr, dtype=int)
+    except Exception:
+        return None
+
+    series = np.full(N, np.nan, dtype=float)
+    sample_keys_checked = set()  # Track what keys we've seen in clusters
+    for i in range(N):
+        clusters_i = _as_py(clusters_arr[i])
+        if clusters_i is None:
+            continue
+        if isinstance(clusters_i, dict):
+            clusters_i = [clusters_i]
+        if not isinstance(clusters_i, list) or not clusters_i:
+            continue
+
+        if i >= len(best_idx_arr):
+            continue
+        idx = int(best_idx_arr[i])
+        if idx < 0:  # Sentinel value means no cluster selected
+            continue
+        if not (0 <= idx < len(clusters_i)):
+            continue
+
+        c = clusters_i[idx]
+        if not isinstance(c, dict):
+            continue
+
+        # Debug: sample first few frames to see what keys exist
+        if i < 3 and len(sample_keys_checked) == 0:
+            sample_keys_checked.update(c.keys())
+
+        val = c.get(metric_key, None)
+        if val is None:
+            continue
+        try:
+            series[i] = float(val)
+        except Exception:
+            continue
+
+    if not np.isfinite(series).any():
+        if len(sample_keys_checked) > 0:
+            print(
+                f"  Debug: {metric_key} not found in clusters. Sample cluster keys: {sorted(sample_keys_checked)}"
+            )
+        return None
+    return series
+
+
+def _extract_best_cluster_reproj_error_series(data):
+    """
+    Extract per-frame reprojection error for the *selected* registration cluster.
+
+    Uses:
+      - data['reg_clusters']: object array of per-frame cluster dicts
+      - data['reg_best_cluster_idx']: index of chosen cluster per frame (if present)
+
+    Returns:
+      best_reproj: (N,) float array, NaN where unavailable, or None if keys missing.
+    """
+    if "reg_clusters" not in data:
+        return None
+
+    clusters_arr = data["reg_clusters"]
+    try:
+        N = len(clusters_arr)
+    except TypeError:
+        return None
+
+    best_reproj = np.full(N, np.nan, dtype=float)
+
+    best_idx_arr = None
+    if "reg_best_cluster_idx" in data:
+        try:
+            best_idx_arr = np.asarray(data["reg_best_cluster_idx"]).astype(int)
+        except Exception:
+            best_idx_arr = None
+
+    if best_idx_arr is None:
+        # We currently only support the explicit best-cluster index path,
+        # to avoid duplicating the inlier-overlap logic. Fall back to None.
+        return None
+
+    for i in range(N):
+        # Get clusters for this frame and convert to plain Python objects
+        clusters_i = _as_py(clusters_arr[i])
+        if clusters_i is None:
+            continue
+        if isinstance(clusters_i, dict):
+            clusters_i = [clusters_i]
+        if not isinstance(clusters_i, list) or not clusters_i:
+            continue
+
+        if i >= len(best_idx_arr):
+            continue
+        idx = int(best_idx_arr[i])
+        if not (0 <= idx < len(clusters_i)):
+            continue
+
+        c = clusters_i[idx]
+        if not isinstance(c, dict):
+            continue
+
+        val = c.get("reproj_error", None)
+        if val is None:
+            continue
+        try:
+            best_reproj[i] = float(val)
+        except Exception:
+            continue
+
+    if not np.isfinite(best_reproj).any():
+        return None
+    return best_reproj
+
+
+def _extract_reproj_error_series(data, name="reproj_error"):
+    """
+    Extract a 1D per-frame reprojection error series from the logs.
+
+    Handles both:
+      - direct scalar array: data['reproj_error'] -> (N,)
+      - ragged format:      data['reproj_error'] is a list/array of per-frame arrays
+        (we then take the mean per frame).
+    Returns (priority order):
+      1) best-cluster reproj_error per frame (if cluster logs exist)
+      2) generic per-frame series under `name`
+    """
+    # 1) Prefer per-frame best-cluster reprojection errors if available
+    best_cluster_series = _extract_best_cluster_reproj_error_series(data)
+    if best_cluster_series is not None:
+        return best_cluster_series
+
+    # 2) Fallback: generic series named `name`
+    reproj = unpack_ragged(data, name)
+    if reproj is None:
+        return None
+
+    # Case 1: direct numeric 1D array
+    if isinstance(reproj, np.ndarray) and reproj.dtype != object and reproj.ndim == 1:
+        return reproj.astype(float)
+
+    # Case 2: object / list-of-arrays -> take mean per frame
+    try:
+        N = len(reproj)
+    except TypeError:
+        return None
+
+    series = np.full(N, np.nan, dtype=float)
+    for i, v in enumerate(reproj):
+        if v is None:
+            continue
+        arr = np.asarray(v, dtype=float).ravel()
+        if arr.size == 0:
+            continue
+        series[i] = float(np.nanmean(arr))
+
+    # If everything is NaN, treat as missing
+    if not np.isfinite(series).any():
+        return None
+    return series
+
+
+def plot_reprojection_error_vs_pose_error(
+    reproj_err, gl_t_err=None, gl_r_err=None, save_prefix=None
+):
+    """
+    Scatter plot: reprojection error vs. global pose error.
+
+    X-axis: per-frame reprojection error (e.g. mean depth reprojection error)
+    Y-axis: global translation error (m) and, if available, rotation error (deg).
+    """
+    if reproj_err is None or gl_t_err is None:
+        print("No reprojection error or global translation error available; skipping.")
+        return
+
+    reproj_err = np.asarray(reproj_err, dtype=float)
+    gl_t_err = np.asarray(gl_t_err, dtype=float)
+
+    n = min(len(reproj_err), len(gl_t_err))
+    if gl_r_err is not None:
+        gl_r_err = np.asarray(gl_r_err, dtype=float)
+        n = min(n, len(gl_r_err))
+
+    if n == 0:
+        print("Reprojection / error arrays are empty; skipping reprojection plot.")
+        return
+
+    x = reproj_err[:n]
+    y_t = gl_t_err[:n]
+    mask = np.isfinite(x) & np.isfinite(y_t)
+    if not np.any(mask):
+        print("No finite reprojection+translation error pairs; skipping plot.")
+        return
+
+    x = x[mask]
+    y_t = y_t[mask]
+
+    y_r = None
+    if gl_r_err is not None:
+        y_r = np.degrees(gl_r_err[:n])[mask]
+
+    plt.figure(figsize=(7, 5))
+    plt.scatter(x, y_t, s=10, alpha=0.6, color="tab:blue", label="Trans. Err (m)")
+
+    if y_r is not None and np.isfinite(y_r).any():
+        plt.scatter(
+            x,
+            y_r,
+            s=10,
+            alpha=0.6,
+            color="tab:orange",
+            label="Rot. Err (deg)",
+        )
+
+    # Simple correlation diagnostics
+    try:
+        corr_t = np.corrcoef(x, y_t)[0, 1]
+        print(
+            "[Reproj] Corr(reproj_err, global translation error) = {:.3f}".format(
+                float(corr_t)
+            )
+        )
+        if y_r is not None and np.isfinite(y_r).any():
+            corr_r = np.corrcoef(x, y_r)[0, 1]
+            print(
+                "[Reproj] Corr(reproj_err, global rotation error) = {:.3f}".format(
+                    float(corr_r)
+                )
+            )
+    except Exception as e:
+        print(f"[Reproj] Correlation computation failed: {e}")
+
+    plt.xlabel("Reprojection Error")
+    plt.ylabel("Pose Error")
+    plt.title("Reprojection Error vs Global Pose Error")
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.legend(loc="upper left")
+    plt.tight_layout()
+
+    plt.show()
+
+
+def plot_reproj_over_3d_dist_vs_pose_error(
+    best_reproj_err,
+    best_3d_dist,
+    gl_t_err=None,
+    gl_r_err=None,
+    metric_label="reproj_error",
+    save_prefix=None,
+):
+    """
+    Scatter plot using ONLY the selected cluster per frame:
+
+      y = metric / 3d_dist  (where metric is reproj_error or mean_res)
+      x = pose error (translation error in meters; optional 2nd panel for rotation error in deg)
+    """
+    if best_reproj_err is None or best_3d_dist is None or gl_t_err is None:
+        print(
+            "No best-cluster reproj/3d_dist or global translation error; skipping ratio plot."
+        )
+        return
+
+    best_reproj_err = np.asarray(best_reproj_err, dtype=float)
+    best_3d_dist = np.asarray(best_3d_dist, dtype=float)
+    gl_t_err = np.asarray(gl_t_err, dtype=float)
+
+    n = min(len(best_reproj_err), len(best_3d_dist), len(gl_t_err))
+    if gl_r_err is not None:
+        gl_r_err = np.asarray(gl_r_err, dtype=float)
+        n = min(n, len(gl_r_err))
+
+    if n == 0:
+        print("Ratio plot arrays are empty; skipping.")
+        return
+
+    reproj = best_reproj_err[:n]
+    d3 = best_3d_dist[:n]
+    x_t = gl_t_err[:n]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        y = reproj / d3
+
+    mask = np.isfinite(x_t) & np.isfinite(y) & (d3 > 0)
+    if not np.any(mask):
+        print(f"No finite (error, reproj/3d_dist) pairs; skipping ratio plot.")
+        print(
+            f"  Debug: n={n}, finite(x_t)={np.sum(np.isfinite(x_t))}, finite(y)={np.sum(np.isfinite(y))}, (d3>0)={np.sum(d3 > 0)}"
+        )
+        print(
+            f"  Debug: finite(reproj)={np.sum(np.isfinite(reproj))}, finite(d3)={np.sum(np.isfinite(d3))}"
+        )
+        return
+
+    x_t = x_t[mask]
+    y = y[mask]
+
+    # Optional rotation error panel
+    x_r = None
+    if gl_r_err is not None:
+        x_r = np.degrees(gl_r_err[:n])[mask]
+
+    if x_r is None:
+        plt.figure(figsize=(7, 5))
+        ax = plt.gca()
+        ax.scatter(x_t, y, s=10, alpha=0.6, color="tab:purple")
+        ax.set_xlabel("Global Translation Error (m)")
+        ax.set_ylabel(f"{metric_label} / 3d_dist")
+        ax.set_title(f"Selected Cluster: {metric_label}/3d_dist vs Translation Error")
+        ax.grid(True, linestyle="--", alpha=0.6)
+    else:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+
+        ax1.scatter(x_t, y, s=10, alpha=0.6, color="tab:purple")
+        ax1.set_xlabel("Global Translation Error (m)")
+        ax1.set_ylabel(f"{metric_label} / 3d_dist")
+        ax1.set_title("... vs Translation Error")
+        ax1.grid(True, linestyle="--", alpha=0.6)
+
+        ax2.scatter(x_r, y, s=10, alpha=0.6, color="tab:purple")
+        ax2.set_xlabel("Global Rotation Error (deg)")
+        ax2.set_ylabel(f"{metric_label} / 3d_dist")
+        ax2.set_title("... vs Rotation Error")
+        ax2.grid(True, linestyle="--", alpha=0.6)
+
+        plt.tight_layout()
+
+    # Simple correlation diagnostics (translation / rotation)
+    try:
+        if x_t.size > 1:
+            corr_t = np.corrcoef(x_t, y)[0, 1]
+            print(
+                f"[Reproj/3D] Corr(global translation error, {metric_label}/3d_dist) = {float(corr_t):.3f}"
+            )
+        if x_r is not None and x_r.size > 1:
+            corr_r = np.corrcoef(x_r, y)[0, 1]
+            print(
+                f"[Reproj/3D] Corr(global rotation error, {metric_label}/3d_dist) = {float(corr_r):.3f}"
+            )
+    except Exception as e:
+        print(f"[Reproj/3D] Correlation computation failed: {e}")
+
+    print(f"[Reproj/3D] Plotting figure with {len(x_t)} points...")
+    plt.show()
+    print("[Reproj/3D] Figure displayed.")
+
+
+def plot_selected_cluster_metric_vs_frames(
+    metric_values,
+    gl_t_err=None,
+    gl_r_err=None,
+    metric_label="3d_dist",
+    save_prefix=None,
+):
+    """
+    Line plot using ONLY the selected cluster per frame:
+
+      y = metric (either 3d_dist or reproj_error)
+      x = frame index
+
+    Optionally overlays translation and rotation errors on secondary y-axes.
+    """
+    if metric_values is None:
+        print(f"No best-cluster {metric_label}; skipping plot.")
+        return
+
+    metric_values = np.asarray(metric_values, dtype=float)
+    n = len(metric_values)
+
+    if n == 0:
+        print("Metric array is empty; skipping plot.")
+        return
+
+    frames = np.arange(n)
+    mask = np.isfinite(metric_values)
+
+    if not np.any(mask):
+        print(f"No finite {metric_label} values; skipping plot.")
+        print(f"  Debug: n={n}, finite(values)={np.sum(mask)}")
+        return
+
+    frames_valid = frames[mask]
+    y_valid = metric_values[mask]
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+
+    # Determine units based on metric type
+    if metric_label == "3d_dist":
+        ylabel = "3d_dist"
+        yunit = ""
+    elif metric_label == "reproj_error":
+        ylabel = "Reprojection Error"
+        yunit = " (m)"
+    else:
+        ylabel = metric_label
+        yunit = ""
+
+    # Main plot: metric over frames
+    ax.plot(
+        frames_valid,
+        y_valid,
+        ".-",
+        color="tab:purple",
+        alpha=0.7,
+        markersize=3,
+        linewidth=1.0,
+        label=metric_label,
+    )
+    ax.set_xlabel("Frame Index")
+    ax.set_ylabel(f"{ylabel}{yunit}", color="tab:purple")
+    ax.tick_params(axis="y", labelcolor="tab:purple")
+    ax.grid(True, linestyle="--", alpha=0.6)
+
+    # Overlay translation error if available
+    ax_t = None
+    if gl_t_err is not None:
+        gl_t_err = np.asarray(gl_t_err, dtype=float)
+        n_err = min(n, len(gl_t_err))
+        ax_t = ax.twinx()
+        ax_t.plot(
+            frames[:n_err],
+            gl_t_err[:n_err],
+            "-",
+            color="tab:blue",
+            alpha=0.6,
+            linewidth=1.0,
+            label="Translation Error",
+        )
+        ax_t.set_ylabel("Translation Error (m)", color="tab:blue")
+        ax_t.tick_params(axis="y", labelcolor="tab:blue")
+        # Offset the right spine to make room for rotation error axis if needed
+        if gl_r_err is not None:
+            ax_t.spines["right"].set_position(("outward", 60))
+
+    # Overlay rotation error if available
+    ax_r = None
+    if gl_r_err is not None:
+        gl_r_err = np.asarray(gl_r_err, dtype=float)
+        n_err = min(n, len(gl_r_err))
+        ax_r = ax.twinx()
+        if gl_t_err is not None:
+            # Offset further right for rotation error
+            ax_r.spines["right"].set_position(("outward", 60))
+        ax_r.plot(
+            frames[:n_err],
+            np.degrees(gl_r_err[:n_err]),
+            "--",
+            color="tab:orange",
+            alpha=0.6,
+            linewidth=1.0,
+            label="Rotation Error",
+        )
+        ax_r.set_ylabel("Rotation Error (deg)", color="tab:orange")
+        ax_r.tick_params(axis="y", labelcolor="tab:orange")
+
+    # Combine legends
+    handles, labels = ax.get_legend_handles_labels()
+    if ax_t is not None:
+        h_t, l_t = ax_t.get_legend_handles_labels()
+        handles.extend(h_t)
+        labels.extend(l_t)
+    if ax_r is not None:
+        h_r, l_r = ax_r.get_legend_handles_labels()
+        handles.extend(h_r)
+        labels.extend(l_r)
+    ax.legend(handles, labels, loc="upper left")
+
+    title_suffix = (
+        " (with GT Errors)" if (gl_t_err is not None or gl_r_err is not None) else ""
+    )
+    ax.set_title(f"Selected Cluster: {metric_label} Over Frames{title_suffix}")
+
+    print(
+        f"[Reproj/3D] Plotting figure with {len(frames_valid)} points over {n} frames..."
+    )
+    plt.tight_layout()
+    plt.show()
+    print("[Reproj/3D] Figure displayed.")
+
+
+def plot_reproj_over_3d_dist_vs_error(
+    best_reproj_err,
+    best_3d_dist,
+    err,
+    *,
+    err_label: str,
+):
+    """
+    Scatter plot using ONLY the selected cluster per frame:
+
+      x = err (some per-frame "error" scalar series)
+      y = reproj_error / 3d_dist
+    """
+    if best_reproj_err is None or best_3d_dist is None or err is None:
+        print(
+            "Missing best-cluster reproj/3d_dist or error series; skipping ratio plot."
+        )
+        return
+
+    best_reproj_err = np.asarray(best_reproj_err, dtype=float)
+    best_3d_dist = np.asarray(best_3d_dist, dtype=float)
+    err = np.asarray(err, dtype=float)
+
+    n = min(len(best_reproj_err), len(best_3d_dist), len(err))
+    if n == 0:
+        print("Ratio plot arrays are empty; skipping.")
+        return
+
+    reproj = best_reproj_err[:n]
+    d3 = best_3d_dist[:n]
+    x = err[:n]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        y = reproj / d3
+
+    mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(d3) & (d3 > 0)
+    if not np.any(mask):
+        print("No finite (error, reproj/3d_dist) pairs; skipping ratio plot.")
+        return
+
+    x = x[mask]
+    y = y[mask]
+
+    plt.figure(figsize=(7, 5))
+    ax = plt.gca()
+    ax.scatter(x, y, s=10, alpha=0.6, color="tab:purple")
+    ax.set_xlabel(err_label)
+    ax.set_ylabel("reproj_error / 3d_dist")
+    ax.set_title("Selected Cluster: reproj_error/3d_dist vs Error")
+    ax.grid(True, linestyle="--", alpha=0.6)
+    plt.tight_layout()
+
+    try:
+        if x.size > 1:
+            corr = np.corrcoef(x, y)[0, 1]
+            print(
+                f"[Reproj/3D] Corr({err_label}, reproj_error/3d_dist) = {float(corr):.3f}"
+            )
+    except Exception as e:
+        print(f"[Reproj/3D] Correlation computation failed: {e}")
+
+    print(f"[Reproj/3D] Plotting {x.size} points (selected cluster only).")
+    plt.show()
 
 
 def plot_residual_analysis(
@@ -2013,6 +2727,7 @@ def main():
     parser.add_argument(
         "--data_path",
         type=str,
+        default="/home/justin/data/HO3D_V3/evaluation",
         help="Path to dataset root (HO3D root or YCBInEoat root containing video folders)",
     )
     parser.add_argument(
@@ -2021,7 +2736,10 @@ def main():
         help="Video name for GT loading (also used to find meta_data if results_dir is provided)",
     )
     parser.add_argument(
-        "--align_gt", action="store_true", help="Align GT to first frame prediction"
+        "--align_gt",
+        action="store_true",
+        default=True,
+        help="Align GT to first frame prediction",
     )
     parser.add_argument(
         "--save_prefix", type=str, help="Prefix for saving output plots (optional)"
@@ -2095,7 +2813,13 @@ def main():
     # 2. Load GT if provided
     gt_poses = None
     if args.data_path and args.video_name:
-        if not os.path.exists(args.data_path):
+        if Ho3dReader is None or YcbineoatReader is None:
+            print(
+                "Warning: Dataset readers could not be imported (missing optional deps like cv2). "
+                "Skipping GT load."
+            )
+            gt_poses = None
+        elif not os.path.exists(args.data_path):
             print(
                 f"Warning: Data path {args.data_path} does not exist. Skipping GT load."
             )
@@ -2202,6 +2926,120 @@ def main():
         summarize_error_stats("Local", lo_t_err, lo_r_err)
         summarize_error_stats("Global (KF)", gl_t_err, gl_r_err)
 
+        # Optional: reprojection error vs pose error plot (if reprojection logs exist)
+        reproj_err_series = _extract_reproj_error_series(data, name="reproj_error")
+        if reproj_err_series is not None:
+            print("\n========== Reprojection Error vs Pose Error ==========")
+            plot_reprojection_error_vs_pose_error(
+                reproj_err_series,
+                gl_t_err=gl_t_err,
+                gl_r_err=gl_r_err,
+                save_prefix=args.save_prefix,
+            )
+        else:
+            # Help debug when the figure does not appear
+            reproj_like_keys = [k for k in data.keys() if "reproj" in str(k).lower()]
+            if reproj_like_keys:
+                print(
+                    "Reprojection figure skipped: no usable 'reproj_error' series found.\n"
+                    f"Found reprojection-like keys in NPZ instead: {reproj_like_keys}"
+                )
+            else:
+                print(
+                    "Reprojection figure skipped: NPZ does not contain a 'reproj_error' "
+                    "series or any reprojection-like keys."
+                )
+
+        # Selected-cluster: reproj_error/3d_dist vs global error (requires clustered logs)
+        print("\n========== Checking for selected-cluster metrics ==========")
+        if "reg_clusters" in data and "reg_best_cluster_idx" in data:
+            # Debug: inspect first few clusters to see what keys they have
+            clusters_arr = data["reg_clusters"]
+            try:
+                best_idx_raw = data["reg_best_cluster_idx"]
+                # Handle None values in best_idx array
+                best_idx_arr = []
+                for val in best_idx_raw:
+                    if val is None:
+                        best_idx_arr.append(-1)  # Use -1 as sentinel for "no cluster"
+                    else:
+                        try:
+                            best_idx_arr.append(int(val))
+                        except (ValueError, TypeError):
+                            best_idx_arr.append(-1)
+                best_idx_arr = np.asarray(best_idx_arr, dtype=int)
+            except Exception as e:
+                print(f"  Warning: Could not parse reg_best_cluster_idx: {e}")
+                best_idx_arr = None
+
+            if best_idx_arr is not None:
+                sample_keys = set()
+                for i in range(min(5, len(clusters_arr))):
+                    clusters_i = _as_py(clusters_arr[i])
+                    if clusters_i is None:
+                        continue
+                    if isinstance(clusters_i, dict):
+                        clusters_i = [clusters_i]
+                    if isinstance(clusters_i, list) and clusters_i:
+                        idx = (
+                            int(best_idx_arr[i])
+                            if i < len(best_idx_arr) and best_idx_arr[i] >= 0
+                            else 0
+                        )
+                        if 0 <= idx < len(clusters_i):
+                            c = clusters_i[idx]
+                            if isinstance(c, dict):
+                                sample_keys.update(c.keys())
+                if sample_keys:
+                    print(f"  Sample cluster keys found: {sorted(sample_keys)}")
+
+        # Try reproj_error first, fall back to mean_res if not available
+        # Extract 3d_dist (always plot this)
+        best_3d = _extract_best_cluster_metric_series(data, "3d_dist")
+
+        # Try to extract reproj_error for optional reproj mode
+        best_reproj = _extract_best_cluster_metric_series(data, "reproj_error")
+        has_reproj = best_reproj is not None
+
+        # Default: plot 3d_dist, but allow switching to reproj_error if available
+        plot_metric = best_3d
+        metric_label = "3d_dist"
+        use_reproj_mode = False
+
+        # If reproj_error is available, use it instead
+        if has_reproj:
+            print("  reproj_error found in clusters, using reproj_error mode...")
+            plot_metric = best_reproj
+            metric_label = "reproj_error"
+            use_reproj_mode = True
+        elif best_3d is not None:
+            print("  Using 3d_dist mode (reproj_error not available)...")
+
+        if plot_metric is not None:
+            print(
+                f"\n========== Selected Cluster: {metric_label} Over Frames =========="
+            )
+            print(
+                f"  Extracted {metric_label}: {np.sum(np.isfinite(plot_metric))}/{len(plot_metric)} finite values"
+            )
+            plot_selected_cluster_metric_vs_frames(
+                plot_metric,
+                gl_t_err=gl_t_err,
+                gl_r_err=gl_r_err,
+                metric_label=metric_label,
+                save_prefix=args.save_prefix,
+            )
+        else:
+            # Keep this quiet unless cluster keys exist (avoid noise for non-cluster runs)
+            if "reg_clusters" in data:
+                has_best_idx = "reg_best_cluster_idx" in data
+                print(
+                    f"Selected-cluster reproj/3d_dist plot skipped: "
+                    f"best_reproj={'None' if best_reproj is None else 'OK'}, "
+                    f"best_3d={'None' if best_3d is None else 'OK'}, "
+                    f"has reg_best_cluster_idx={has_best_idx}"
+                )
+
     # 4. Residual Analysis (always try; overlays errors if present)
     print("Extracting registration residuals...")
     reg_residuals = unpack_ragged(data, "reg_residuals")
@@ -2221,6 +3059,28 @@ def main():
             kf_indices=kf_indices,
             save_prefix=args.save_prefix,
         )
+
+        # If GT wasn't loaded, we still want the requested plot to appear.
+        # Fallback "error" series = mean registration residual (inliers).
+        if gt_poses is None:
+            best_reproj = _extract_best_cluster_metric_series(data, "reproj_error")
+            best_3d = _extract_best_cluster_metric_series(data, "3d_dist")
+            if best_reproj is not None and best_3d is not None:
+                print(
+                    "\n========== Selected Cluster: (reproj_error/3d_dist) vs Mean Residual (fallback) =========="
+                )
+                plot_reproj_over_3d_dist_vs_error(
+                    best_reproj,
+                    best_3d,
+                    mean_res,
+                    err_label="Mean Residual (inliers)",
+                )
+            else:
+                if "reg_clusters" in data:
+                    print(
+                        "Selected-cluster reproj/3d_dist plot skipped (fallback): need 'reg_best_cluster_idx' "
+                        "and per-cluster 'reproj_error' + '3d_dist' in 'reg_clusters'."
+                    )
 
         # 4b. Slope and Threshold Analysis
         print("\n" + "=" * 60)

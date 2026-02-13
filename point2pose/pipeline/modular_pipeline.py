@@ -40,6 +40,38 @@ class ModularPipeline:
         self.num_obj = self.pipeline_cfg.get("max_num_obj", 1)
         self._initialized = False
 
+        # depth estimate related
+        # TODO: Make this a class
+        self.use_depth_estimate = self.pipeline_cfg.get("use_depth_estimate", False)
+        self.depth_estimator_type = self.pipeline_cfg.get(
+            "depth_estimator_type", "depth_anything"
+        )
+        self.depth_encoder = self.pipeline_cfg.get("depth_encoder", "vits")
+        self._device = self.pipeline_cfg.get("device", "cpu")
+        self.depth_estimator = None
+        self._depth_model_cfg = {
+            "vits": {
+                "encoder": "vits",
+                "features": 64,
+                "out_channels": [48, 96, 192, 384],
+            },
+            "vitb": {
+                "encoder": "vitb",
+                "features": 128,
+                "out_channels": [96, 192, 384, 768],
+            },
+            "vitl": {
+                "encoder": "vitl",
+                "features": 256,
+                "out_channels": [256, 512, 1024, 1024],
+            },
+            "vitg": {
+                "encoder": "vitg",
+                "features": 384,
+                "out_channels": [1536, 1536, 1536, 1536],
+            },
+        }
+
         # module settings
         self._estimate_init_pose = self.pipeline_cfg.get("estimate_init_pose", False)
         self.use_local_graph = self.pipeline_cfg.get("use_local_graph", False)
@@ -86,6 +118,32 @@ class ModularPipeline:
         self.frontend.segmenter.add_input_points(obj_points, labels)
 
     def initialize_first_frame(self, frame):
+
+        # TODO: make this a class
+        if self.depth_estimator_type == "depth_anything":
+            # local import to avoid import-time CUDA/BLAS side-effects
+            from third_party.depth_anything_v2_metric.dpt import DepthAnythingV2
+
+            m = DepthAnythingV2(
+                **self._depth_model_cfg[self.depth_encoder], max_depth=20
+            )
+            state = torch.load(
+                f"checkpoints/depth_anything/depth_anything_v2_metric_hypersim_{self.depth_encoder}.pth",
+                map_location="cpu",
+            )
+            m.load_state_dict(state)
+            self.depth_estimator = m.to(self._device).eval()
+        elif self.depth_estimator_type == "promptda":
+            from promptda.promptda import PromptDA
+
+            self.depth_estimator = (
+                PromptDA.from_pretrained(
+                    f"checkpoints/promptda/{self.depth_encoder}.ckpt"
+                )
+                .to(self._device)
+                .eval()
+            )
+
         # 1. Initialize FrontEnd (Segmentation + Tracker)
         self.frontend.initialize(frame)
 
@@ -165,6 +223,13 @@ class ModularPipeline:
 
         # Log initial state
         if self.save_meta_data:
+            # Get keyframe camera frame keypoints if available
+            kf_kp_3d_camera_init = np.array([])
+            if len(self.kf_manager.keyframes.get(0, [])) > 0:
+                first_kf = self.kf_manager.keyframes[0][0]
+                if first_kf.kp_3d_camera is not None:
+                    kf_kp_3d_camera_init = first_kf.kp_3d_camera
+
             self.data_logger.log(
                 {
                     "timestamp": frame.timestamp,
@@ -181,6 +246,7 @@ class ModularPipeline:
                     "obj_key_points": self.objects[0].key_points,
                     "obj_uncertainties": self.objects[0].uncertainties,
                     "obj_valid": self.objects[0].valid,
+                    "obj_kp_3d_camera": kf_kp_3d_camera_init,  # Newly initialized keypoints in camera frame
                     "is_key_frame": True,
                     "pose_frontend": np.eye(4),
                     "pose_local": np.eye(4),
@@ -210,6 +276,69 @@ class ModularPipeline:
     def step(self, frame):
         if not self._initialized:
             return self.initialize_first_frame(frame)
+
+        # TODO: make this a class
+        if self.use_depth_estimate:
+            if self.depth_estimator_type == "depth_anything":
+
+                def align_scale(pred, gt, mask):
+                    eps = 1e-6
+                    ratio = gt[mask] / np.clip(pred[mask], eps, None)
+                    s = np.median(ratio)
+                    return pred * s
+
+                mask = frame.depth > 0  # or a tighter validity mask
+
+                raw = frame.rgb
+                if raw.dtype != np.uint8:
+                    # if it's float [0,1], convert back
+                    raw = (np.clip(raw, 0, 1) * 255).astype(np.uint8)
+
+                raw_bgr = raw[..., ::-1].copy()  # RGB -> BGR
+                depth_pred = self.depth_estimator.infer_image(raw_bgr)
+
+                depth_pred_aligned = align_scale(
+                    depth_pred, frame.depth / frame.depth_factor, mask
+                )
+
+                frame.depth_factor = 1.0
+            elif self.depth_estimator_type == "promptda":
+                depth_resize = cv.resize(
+                    frame.depth, (630, 476), interpolation=cv.INTER_LINEAR
+                )
+                rgb_resize = cv.resize(
+                    frame.rgb, (630, 476), interpolation=cv.INTER_LINEAR
+                )
+                depth_torch = (
+                    torch.from_numpy(depth_resize / frame.depth_factor)
+                    .unsqueeze(0)
+                    .unsqueeze(0)
+                    .to(self._device)
+                )
+                rgb_torch = (
+                    torch.from_numpy(rgb_resize)
+                    .permute(2, 0, 1)
+                    .unsqueeze(0)
+                    .to(self._device)
+                )
+                depth_troch = self.depth_estimator.predict(rgb_torch, depth_torch)
+                print("depth_troch shape: ", type(depth_troch))
+                from promptda.utils.io_wrapper import load_image, load_depth, save_depth
+
+                save_depth(depth_troch, prompt_depth=depth_torch, image=rgb_torch)
+                depth = depth_troch.squeeze(0).squeeze(0).cpu().numpy()
+                depth = depth.astype(np.float32, copy=False)
+                depth = cv.resize(
+                    depth,
+                    (frame.depth.shape[1], frame.depth.shape[0]),
+                    interpolation=cv.INTER_LINEAR,
+                )
+
+            if isinstance(depth_pred_aligned, torch.Tensor):
+                depth_pred_aligned = depth_pred_aligned.detach().cpu().numpy()
+                depth_pred_aligned = depth_pred_aligned.astype(np.float32, copy=False)
+
+            frame.depth = depth_pred_aligned.astype(np.float32, copy=False)
 
         iter_start_time = time.time()
         module_times = {
@@ -370,7 +499,7 @@ class ModularPipeline:
                 lm_idx = obj.track_idx_2_obj_idx[lm_global_track_ids]
                 lm_pts = updated_landmarks[kf.obj_id][0]
 
-                self.objects[kf.obj_id].key_points[lm_idx] = lm_pts
+                self.objects[kf.obj_id].key_points[lm_idx] = lm_pts.copy()
 
         module_times["global_opt"] = time.time() - t0
 
@@ -432,6 +561,25 @@ class ModularPipeline:
             dense_stats_before = fe_result.dense_recovery_stats_before.get(obj_id, {})
             dense_stats_after = fe_result.dense_recovery_stats_after.get(obj_id, {})
 
+            # Get newly initialized keypoints in camera frame if this is a keyframe
+            kf_kp_3d_camera = np.array([])
+            if self.kf_manager.is_key_frame.get(obj_id, False):
+                # Find the keyframe for this frame
+                current_kf = None
+                # First check if it's in new_keyframes
+                for kf in new_keyframes:
+                    if kf.frame_id == frame.id and kf.obj_id == obj_id:
+                        current_kf = kf
+                        break
+                # If not found, get the last keyframe for this object
+                if current_kf is None and obj_id in self.kf_manager.keyframes:
+                    kf_list = self.kf_manager.keyframes[obj_id]
+                    if len(kf_list) > 0 and kf_list[-1].frame_id == frame.id:
+                        current_kf = kf_list[-1]
+
+                if current_kf is not None and current_kf.kp_3d_camera is not None:
+                    kf_kp_3d_camera = current_kf.kp_3d_camera
+
             log_payload = {
                 "timestamp": frame.timestamp,
                 "frame_id": frame.id,
@@ -447,6 +595,7 @@ class ModularPipeline:
                 "obj_uncertainties": self.objects[obj_id].uncertainties,
                 "obj_valid": self.objects[obj_id].valid,
                 "obj_key_point_frames": self.objects[obj_id].key_point_frames,
+                "obj_kp_3d_camera": kf_kp_3d_camera,  # Newly initialized keypoints in camera frame (only for keyframes)
                 "is_key_frame": self.kf_manager.is_key_frame.get(obj_id, False),
                 # Registration stats
                 "reg_key_points_idx": fe_result.valid_indices.get(obj_id),

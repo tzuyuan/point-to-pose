@@ -126,9 +126,8 @@ class KeyFrameManager:
 
             created_keyframes.append(kf)
 
-            obj.last_keyframe_frame_id = kf.frame_id
             obj.num_keyframes = 1
-            obj.last_keyframe = kf
+            obj.keyframes = self.keyframes[obj_id]
 
         self.crit_ctx.objects = objects
         self.criterion.initialize(self.crit_ctx)
@@ -274,9 +273,8 @@ class KeyFrameManager:
             self.keyframes[obj_id].append(kf)
             created_keyframes.append(kf)
 
-            obj.last_keyframe_frame_id = kf.frame_id
             obj.num_keyframes = len(self.keyframes[obj_id])
-            obj.last_keyframe = kf
+            obj.keyframes = self.keyframes[obj_id]
 
         return created_keyframes
 

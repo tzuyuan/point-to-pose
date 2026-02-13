@@ -11,6 +11,7 @@ OBJECT_RAGGED_FIELDS = {
     "obj_uncertainties",
     "obj_valid",
     "obj_key_point_frames",
+    "obj_kp_3d_camera",  # Newly initialized keypoints in camera frame (keyframes only)
 }
 
 KEYFRAME_RAGGED_FIELDS = set()
