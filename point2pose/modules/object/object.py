@@ -46,6 +46,11 @@ class Object:
             None  # 3D bounding box of the object, represented in the object frame
         )
 
+        # SDF / TSDF reconstruction state
+        self.sdf_volume = None
+        self.sdf_num_integrated = 0
+        self.sdf = None
+
         omega = np.zeros(3)
         v = np.zeros(3)
         mean_residual = 0.0

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Any, Optional
 
 import numpy as np
 
@@ -27,3 +28,9 @@ class ObjectFrameData:
     reg_inliers: np.ndarray
     reg_residuals: np.ndarray
     reg_uncertainties: np.ndarray
+
+    # Optional SDF context for optimization-time SDF constraints.
+    # `sdf` is the dense metadata dict (legacy path), `sdf_volume` is the
+    # live backend object (nvblox / TSDF adapter) for accelerated queries.
+    sdf: Optional[dict] = None
+    sdf_volume: Optional[Any] = None

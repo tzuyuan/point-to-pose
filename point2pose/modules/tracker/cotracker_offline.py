@@ -33,7 +33,9 @@ class CoTrackerOfflineTracker(Tracker):
 
         self._video_frames = []
         self._frame_id_to_local_idx = {}
-        self._query_points = torch.zeros((0, 3), dtype=torch.float32, device=self._device)
+        self._query_points = torch.zeros(
+            (0, 3), dtype=torch.float32, device=self._device
+        )
 
     def initialize(self, frame):
         self._img_height = frame.rgb.shape[0]

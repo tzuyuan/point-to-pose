@@ -22,6 +22,7 @@ from point2pose.pipeline.components.key_frame_manager import KeyFrameManager
 from point2pose.pipeline.components.local_optimizer import LocalOptimizer
 from point2pose.pipeline.components.key_frame_graph import KeyFrameGraph
 from point2pose.pipeline.components.recovery_manager import RecoveryManager
+from point2pose.modules.reconstruction import SDFBuilder
 
 
 class ModularPipeline:
@@ -35,6 +36,7 @@ class ModularPipeline:
         self.local_optimizer = LocalOptimizer(cfg)
         self.kf_graph = KeyFrameGraph(cfg)
         self.recovery_manager = RecoveryManager(cfg)
+        self.sdf_builder = SDFBuilder(self.pipeline_cfg)
 
         # State
         self.track_table = PointTrackTable.new(n0=0)
@@ -97,6 +99,14 @@ class ModularPipeline:
         self.pose_log_files = []
         self.debug_level = self.pipeline_cfg.get("debug_level", 0)
         self.debug_dir = self.pipeline_cfg.get("debug_dir", None)
+        self.sdf_mesh_save_every = int(self.pipeline_cfg.get("sdf_mesh_save_every", 1))
+        self.sdf_mesh_save_dir = None
+
+        if self.debug_dir:
+            self.sdf_mesh_save_dir = os.path.join(self.debug_dir, "sdf_mesh")
+        else:
+            self.sdf_mesh_save_dir = "./results/sdf_mesh"
+        os.makedirs(self.sdf_mesh_save_dir, exist_ok=True)
 
         if self.save_pose:
             os.makedirs(self.pose_save_path, exist_ok=True)
@@ -220,6 +230,8 @@ class ModularPipeline:
                         * np.ones(len(self.objects[obj_id].key_points)),
                         reg_uncertainties=0.01
                         * np.ones(len(self.objects[obj_id].key_points)),
+                        sdf=self.objects[obj_id].sdf,
+                        sdf_volume=self.objects[obj_id].sdf_volume,
                     )
                 )
 
@@ -463,6 +475,8 @@ class ModularPipeline:
                     reg_uncertainties=fe_result.uncertainties[
                         fe_result.valid_indices[obj_id]
                     ],
+                    sdf=self.objects[obj_id].sdf,
+                    sdf_volume=self.objects[obj_id].sdf_volume,
                 )
 
                 opt_result = self.local_optimizer.optimize(object_frame_data)
@@ -518,12 +532,30 @@ class ModularPipeline:
 
                 obj = self.objects[kf.obj_id]
                 obj.pose = global_pose.copy()
+                kf.pose = global_pose.copy()
 
                 lm_global_track_ids = updated_landmarks[kf.obj_id][1]
                 lm_idx = obj.track_idx_2_obj_idx[lm_global_track_ids]
                 lm_pts = updated_landmarks[kf.obj_id][0]
 
                 self.objects[kf.obj_id].key_points[lm_idx] = lm_pts.copy()
+
+                sdf_ok = self.sdf_builder.integrate_keyframe(obj=obj, keyframe=kf)
+                if sdf_ok:
+                    print(
+                        f"Frame {frame.id}: Updated SDF for obj {kf.obj_id} from keyframe {kf.kf_idx} (num_integrated={obj.sdf_num_integrated})."
+                    )
+                    if (
+                        self.sdf_mesh_save_every > 0
+                        and (obj.sdf_num_integrated % self.sdf_mesh_save_every) == 0
+                    ):
+                        mesh_path = os.path.join(
+                            self.sdf_mesh_save_dir,
+                            f"obj_{kf.obj_id}_frame_{frame.id}_kf_{kf.kf_idx}.ply",
+                        )
+                        saved = self.sdf_builder.export_debug_mesh(obj, mesh_path)
+                        if saved and self.debug_level > 1:
+                            print(f"Frame {frame.id}: Saved SDF mesh to {mesh_path}")
 
         module_times["global_opt"] = time.time() - t0
 

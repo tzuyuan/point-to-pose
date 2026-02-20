@@ -35,6 +35,8 @@ class SVDClusterRANSACRegister(Register):
         self._select_w_prev = float(config.get("select_w_prev", 0.55))
         self._select_w_kf = float(config.get("select_w_kf", 0.30))
         self._select_w_motion = float(config.get("select_w_motion", 0.15))
+        self._select_w_sparse_map = float(config.get("select_w_sparse_map", 0.7))
+        self._select_w_sdf = float(config.get("select_w_sdf", 0.3))
         self._select_overlap_dist = float(config.get("select_overlap_dist", 0.02))
         self._select_min_overlap_ratio = float(
             config.get("select_min_overlap_ratio", 0.15)
@@ -182,11 +184,37 @@ class SVDClusterRANSACRegister(Register):
                 dists = self.icp_like_point2point_residuals(
                     map_pts, trg_pcd_full, T_map2cur
                 )
+                sdf_score = self._sdf_residual(
+                    trg_pcd_full, inverse_SE3(T_map2cur), obj
+                )
+                if np.isfinite(sdf_score):
+                    dists = self._select_w_sparse_map * float(
+                        dists
+                    ) + self._select_w_sdf * float(sdf_score)
+                    c["sdf_dist"] = float(sdf_score)
 
                 dist_errors.append(dists)
                 c["3d_dist"] = float(dists)
             best_cluster_idx = int(np.argmin(dist_errors))
-        # elif self._select_method == "3d_dist_dense_map":
+
+        elif self._select_method == "3d_dist_dense_map":
+            dist_errors = []
+            trg_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
+            # map_pts = obj.key_points
+            for c in candidates:
+                T_map2cur = c["T"]
+                sdf_score = self._sdf_residual(
+                    trg_pcd_full, inverse_SE3(T_map2cur), obj
+                )
+                if np.isfinite(sdf_score):
+                    dists = float(sdf_score)
+                    c["3d_dist"] = float(dists)
+                else:
+                    dists = np.finfo(np.float32).max
+                    c["3d_dist"] = float(-1)
+
+                dist_errors.append(float(dists))
+            best_cluster_idx = int(np.argmin(dist_errors))
 
         elif self._select_method == "3d_dist_kf":
             dist_errors = []
@@ -647,6 +675,50 @@ class SVDClusterRANSACRegister(Register):
         dR = scipy_R.from_matrix(dT[:3, :3]).magnitude()
         ddeg = float(np.degrees(dR))
         return dt, ddeg
+
+    def _sdf_residual(self, pts_cur, T_cur2obj, obj, robust_percentile=70.0):
+        if (
+            obj is None
+            or getattr(obj, "sdf", None) is None
+            or pts_cur is None
+            or pts_cur.shape[0] == 0
+        ):
+            return np.inf
+
+        pts_obj = transform_pts(T_cur2obj, pts_cur)
+        sdf_vals = None
+
+        # nvblox-style query path
+        if getattr(obj, "sdf_volume", None) is not None and hasattr(
+            obj.sdf_volume, "query_sdf"
+        ):
+            qvals = obj.sdf_volume.query_sdf(pts_obj)
+            if qvals is not None and qvals.shape[0] == pts_obj.shape[0]:
+                sdf_vals = np.abs(qvals[np.isfinite(qvals)])
+
+        # legacy dense grid path
+        if (sdf_vals is None or sdf_vals.size == 0) and "tsdf" in obj.sdf:
+            tsdf = obj.sdf["tsdf"]
+            origin = obj.sdf["vol_origin"]
+            voxel = float(obj.sdf["voxel_size"])
+            vol_dim = np.array(tsdf.shape, dtype=np.int32)
+            vox = np.floor((pts_obj - origin[None, :]) / voxel).astype(np.int32)
+
+            inb = np.logical_and(
+                np.all(vox >= 0, axis=1), np.all(vox < vol_dim[None, :], axis=1)
+            )
+            if not np.any(inb):
+                return np.inf
+            vox_in = vox[inb]
+            sdf_vals = np.abs(tsdf[vox_in[:, 0], vox_in[:, 1], vox_in[:, 2]])
+
+        if sdf_vals is None or sdf_vals.size == 0:
+            return np.inf
+
+        q = float(np.clip(robust_percentile, 0.0, 100.0))
+        base = float(np.percentile(sdf_vals, q))
+        support = float(np.mean(np.isfinite(sdf_vals)))
+        return base + 0.05 * (1.0 - support)
 
     def _svd_residual_outlier_fit(self, p0, tgt_pcd, N):
         # fit transformation using svd

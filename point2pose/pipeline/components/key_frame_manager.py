@@ -109,6 +109,16 @@ class KeyFrameManager:
             "pending_require_inside_mask", True
         )
 
+        # Optional SDF gate for keyframe/keypoint initialization
+        self.sdf_kf_gate = self.pipeline_cfg.get("sdf_kf_gate", False)
+        self.sdf_kf_gate_thres = float(self.pipeline_cfg.get("sdf_kf_gate_thres", 0.35))
+        self.sdf_kf_gate_percentile = float(
+            self.pipeline_cfg.get("sdf_kf_gate_percentile", 70.0)
+        )
+        self.sdf_kf_gate_min_dense = int(
+            self.pipeline_cfg.get("sdf_kf_gate_min_dense", 200)
+        )
+
     # -------------------------------------------------------------------------
     # First frame initialization
     # -------------------------------------------------------------------------
@@ -268,6 +278,24 @@ class KeyFrameManager:
                 anchor_pose = obj.pose
                 anchor_fe_result = cur_fe_result
                 anchor_is_current = True
+
+            # Optional SDF consistency gate: reject this frame if dense depth points
+            # disagree too much with the current object SDF map.
+            if self.sdf_kf_gate:
+                dense_pts_gate, _ = self._extract_dense_pcd(anchor_frame, obj_id)
+
+                inliers = cur_fe_result.reg_stats[obj_id]["inliers"]
+                reg_curr3d = cur_fe_result.reg_stats[obj_id]["correspond_curr3d"]
+                inlier_curr3d = reg_curr3d[inliers]
+
+                sdf_res = self._sdf_residual_dense(
+                    dense_pts=dense_pts_gate, obj_pose=anchor_pose, obj=obj
+                )
+                if np.isfinite(sdf_res) and sdf_res > self.sdf_kf_gate_thres:
+                    print(
+                        f"[KeyFrameManager] Frame {anchor_frame.id}: SDF residual too large ({sdf_res:.4f}) for obj {obj_id}. Skip adding keypoints/keyframe."
+                    )
+                    continue
 
             # Build a sampler context from the chosen frame
             if anchor_is_current:
@@ -935,3 +963,42 @@ class KeyFrameManager:
             "fe_result": cur_fe_result,
         }
         return cur_frame, obj.pose.copy(), cur_fe_result, True
+
+    def _sdf_residual_dense(self, dense_pts, obj_pose, obj):
+        if (
+            obj is None
+            or getattr(obj, "sdf", None) is None
+            or dense_pts is None
+            or dense_pts.shape[0] < self.sdf_kf_gate_min_dense
+        ):
+            return np.inf
+
+        pts_obj = transform_pts(inverse_SE3(obj_pose), dense_pts)
+        sdf_vals = None
+
+        if getattr(obj, "sdf_volume", None) is not None and hasattr(
+            obj.sdf_volume, "query_sdf"
+        ):
+            qvals = obj.sdf_volume.query_sdf(pts_obj)
+            if qvals is not None and qvals.shape[0] == pts_obj.shape[0]:
+                sdf_vals = np.abs(qvals[np.isfinite(qvals)])
+
+        if (sdf_vals is None or sdf_vals.size == 0) and "tsdf" in obj.sdf:
+            tsdf = obj.sdf["tsdf"]
+            origin = obj.sdf["vol_origin"]
+            voxel = float(obj.sdf["voxel_size"])
+            vol_dim = np.array(tsdf.shape, dtype=np.int32)
+            vox = np.floor((pts_obj - origin[None, :]) / voxel).astype(np.int32)
+            inb = np.logical_and(
+                np.all(vox >= 0, axis=1), np.all(vox < vol_dim[None, :], axis=1)
+            )
+            if not np.any(inb):
+                return np.inf
+            vox_in = vox[inb]
+            sdf_vals = np.abs(tsdf[vox_in[:, 0], vox_in[:, 1], vox_in[:, 2]])
+
+        if sdf_vals is None or sdf_vals.size == 0:
+            return np.inf
+
+        q = float(np.clip(self.sdf_kf_gate_percentile, 0.0, 100.0))
+        return float(np.percentile(sdf_vals, q))

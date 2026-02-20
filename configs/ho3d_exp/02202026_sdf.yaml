@@ -250,7 +250,7 @@ local_optimizer:
     landmark_huber_k: 1.0
 
 global_optimizer:
-  type: lm_graph_sdf
+  type: lm_graph
   params:
     relinearize_threshold: 0.1
     relinearize_skip: 1
