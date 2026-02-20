@@ -45,8 +45,10 @@ class LMGraphOptimizer(Optimizer):
         self._lm_params.setRelativeErrorTol(config.get("relative_error_tol", 1e-5))
         self._lm_params.setAbsoluteErrorTol(config.get("absolute_error_tol", 1e-5))
         self._lm_params.setlambdaInitial(config.get("lambda_initial", 1e-1))
+        # self._lm_params.setlambdaFactor(config.get("lambda_factor", 2.0))
 
         # self._lm_params.setVerbosityLM("TRYLAMBDA")
+        self._lm_params.setVerbosityLM("SUMMARY")
 
         # ------------------------------------------------------------------
         # Optional formulation knobs (all default to preserving old behavior)
@@ -111,6 +113,12 @@ class LMGraphOptimizer(Optimizer):
             self._graph.push_back(
                 gtsam.PriorFactorPose3(Xi, cur_pose_c2w_gtsam, self._prior_noise)
             )
+            # print(
+            #     "initializing with :",
+            #     cur_pose_c2w_gtsam,
+            #     "and noise",
+            #     self._prior_noise,
+            # )
             # self._prev_rel_T = gtsam.Pose3(np.eye(4))
         elif data.rel_pose is not None:
             prev_id = self._prev_frame_id
@@ -131,13 +139,29 @@ class LMGraphOptimizer(Optimizer):
                 else:
                     # Safe fallback (very loose) if user enabled between factors
                     # but didn't provide between_noise_param.
-                    between_noise = gtsam.noiseModel.Diagonal.Sigmas(
-                        np.array([0.5, 0.5, 0.5, 5.0, 5.0, 5.0], dtype=float)
+                    res = (
+                        np.mean(data.reg_residuals)
+                        if data.reg_residuals.size > 0
+                        else 1.0
                     )
 
-                self._graph.push_back(
-                    gtsam.BetweenFactorPose3(X_prev, Xi, rel_T_cim12ci, between_noise)
-                )
+                    between_scale = max(1.0, res / 0.005)
+                    between_noise = gtsam.noiseModel.Diagonal.Sigmas(
+                        between_scale
+                        * np.array([0.2, 0.2, 0.2, 0.05, 0.05, 0.05], dtype=float)
+                    )
+
+                    between_noise = gtsam.noiseModel.Robust(
+                        gtsam.noiseModel.mEstimator.Huber(1.0),
+                        between_noise,
+                    )
+
+                if res < 0.01:
+                    self._graph.push_back(
+                        gtsam.BetweenFactorPose3(
+                            X_prev, Xi, rel_T_cim12ci, between_noise
+                        )
+                    )
 
             # between_noise = gtsam.noiseModel.Diagonal.Sigmas(
             #     np.array(
@@ -204,29 +228,98 @@ class LMGraphOptimizer(Optimizer):
                     else np.array([0.04, 0.04, 0.07], dtype=float)
                 )
 
-                sigma_scale = 1
+                sigma_scale = 1.0
                 if self._landmark_sigma_scale_by == "residual":
                     if (
                         getattr(data, "reg_residuals", None) is not None
                         and data.reg_residuals.size > m
                     ):
-                        sigma_scale = float(
-                            max(
-                                self._landmark_sigma_min,
-                                float(data.reg_residuals[m]),
-                            )
-                        )
+                        res = float(data.reg_residuals[m])
+                        # reference residual in meters (tune this)
+                        res_ref = getattr(
+                            self, "_landmark_residual_ref", 0.01
+                        )  # 1 cm default
+                        sigma_scale = max(0.3, res / max(res_ref, 1e-6))
+
                 elif self._landmark_sigma_scale_by == "uncertainty":
                     if (
                         getattr(data, "reg_uncertainties", None) is not None
                         and data.reg_uncertainties.size > m
                     ):
-                        sigma_scale = float(
-                            max(
-                                self._landmark_sigma_min,
-                                float(data.reg_uncertainties[m] * 0.1),
-                            )
-                        )
+                        u = float(data.reg_uncertainties[m])
+                        u_ref = getattr(self, "_landmark_uncert_ref", 0.1)
+                        sigma_scale = max(1.5, u / max(u_ref, 1e-6))
+
+                elif self._landmark_sigma_scale_by == "residual_and_uncertainty":
+                    res_scale = 1.0
+                    unc_scale = 1.0
+                    if (
+                        getattr(data, "reg_residuals", None) is not None
+                        and data.reg_residuals.size > m
+                    ):
+                        res = float(data.reg_residuals[m])
+                        res_ref = getattr(
+                            self, "_landmark_residual_ref", 0.01
+                        )  # 1 cm default
+                        res_scale = max(0.3, res / max(res_ref, 1e-6))
+
+                    if (
+                        getattr(data, "reg_uncertainties", None) is not None
+                        and data.reg_uncertainties.size > m
+                    ):
+                        u = float(data.reg_uncertainties[m])
+                        u_ref = getattr(self, "_landmark_uncert_ref", 0.1)
+                        unc_scale = max(1.5, u / max(u_ref, 1e-6))
+
+                    sigma_scale = res_scale * unc_scale
+
+                # sigma_scale = 1
+                # if self._landmark_sigma_scale_by == "residual":
+                #     if (
+                #         getattr(data, "reg_residuals", None) is not None
+                #         and data.reg_residuals.size > m
+                #     ):
+                #         sigma_scale = float(
+                #             max(
+                #                 self._landmark_sigma_min,
+                #                 float(data.reg_residuals[m]),
+                #             )
+                #         )
+                # elif self._landmark_sigma_scale_by == "uncertainty":
+                #     if (
+                #         getattr(data, "reg_uncertainties", None) is not None
+                #         and data.reg_uncertainties.size > m
+                #     ):
+                #         sigma_scale = float(
+                #             max(
+                #                 self._landmark_sigma_min,
+                #                 float(data.reg_uncertainties[m]),
+                #             )
+                #         )
+                # elif self._landmark_sigma_scale_by == "residual_and_uncertainty":
+                #     res_scale = 1
+                #     unc_scale = 1
+                #     if (
+                #         getattr(data, "reg_residuals", None) is not None
+                #         and data.reg_residuals.size > m
+                #     ):
+                #         res_scale = float(
+                #             max(
+                #                 self._landmark_sigma_min,
+                #                 float(data.reg_residuals[m]),
+                #             )
+                #         )
+                #     if (
+                #         getattr(data, "reg_uncertainties", None) is not None
+                #         and data.reg_uncertainties.size > m
+                #     ):
+                #         unc_scale = float(
+                #             max(
+                #                 self._landmark_sigma_min,
+                #                 float(data.reg_uncertainties[m]),
+                #             )
+                #         )
+                #     sigma_scale = res_scale * unc_scale
 
                 base_noise = gtsam.noiseModel.Diagonal.Sigmas(diag * sigma_scale)
                 if self._landmark_use_robust:
@@ -318,10 +411,32 @@ class LMGraphOptimizer(Optimizer):
             f"{len(self._inserted_poses)} frames and {landmark_xyz.shape[0]} landmarks"
         )
 
+        # Export all optimized poses so downstream can update every keyframe state.
+        pose_frame_ids = []
+        poses = []
+        for Xj in sorted(
+            self._inserted_poses, key=lambda k: int(gtsam.Symbol(k).index())
+        ):
+            if not result.exists(Xj):
+                continue
+            fid = int(gtsam.Symbol(Xj).index())
+            pose_j = inverse_SE3(result.atPose3(Xj).matrix())
+            pose_frame_ids.append(fid)
+            poses.append(pose_j)
+
+        if poses:
+            poses_optimized = np.asarray(poses, dtype=float)
+            pose_frame_ids_optimized = np.asarray(pose_frame_ids, dtype=np.int64)
+        else:
+            poses_optimized = np.zeros((0, 4, 4), dtype=float)
+            pose_frame_ids_optimized = np.zeros((0,), dtype=np.int64)
+
         return OptimizerResult(
             obj_id=data.obj_id,
             frame_id=frame_id,
             pose_optimized=pose_opt,
             key_points_optimized=landmark_xyz,
             key_points_idx_optimized=ids,
+            poses_optimized=poses_optimized,
+            pose_frame_ids_optimized=pose_frame_ids_optimized,
         )

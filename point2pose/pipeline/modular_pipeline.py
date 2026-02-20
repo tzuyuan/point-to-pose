@@ -2,6 +2,7 @@ import os
 import time
 import numpy as np
 import torch
+from collections import deque
 import open3d as o3d
 from scipy.spatial.transform import Rotation as scipy_R
 
@@ -12,6 +13,7 @@ from point2pose.data_types.object_frame_data import ObjectFrameData
 from point2pose.modules.object.object import Object
 from point2pose.io.outputs.logger import DataLogger
 from point2pose.utils.camera import convert_pixel_to_world
+from point2pose.utils.transform import inverse_SE3
 from point2pose.utils.logger_fields import RAGGED_FIELDS
 
 # Components
@@ -77,11 +79,17 @@ class ModularPipeline:
         self.use_local_graph = self.pipeline_cfg.get("use_local_graph", False)
         self.min_depth = self.pipeline_cfg.get("min_depth", 0.05)
         self.max_depth = self.pipeline_cfg.get("max_depth", 1.0)
+        self.max_rel_rotation_deg = self.pipeline_cfg.get("max_rel_rotation_deg", 20)
+        self.max_rel_translation = self.pipeline_cfg.get("max_rel_translation", 0.05)
         self.local_opt_type = self.cfg.local_optimizer.get("type", "isam2")
         self.local_graph_max_num_frames = self.cfg.local_optimizer.params.get(
             "local_graph_max_num_frames", -1
         )
         self.reg_residual_thres = self.cfg.register.params.get("residual_thres", 0.07)
+
+        self.num_hist = self.cfg.register.params.get("num_hist", 5)
+        self.hist_frames = deque(maxlen=self.num_hist)
+        self.hist_fe_results = deque(maxlen=self.num_hist)
 
         # Logging
         self.save_pose = self.pipeline_cfg.get("save_pose", False)
@@ -195,7 +203,7 @@ class ModularPipeline:
                 self.local_optimizer.optimize(
                     ObjectFrameData(
                         obj_id=obj_id,
-                        frame_id=0,
+                        frame_id=frame.id,
                         intrinsics=frame.intrinsics,
                         pose=np.eye(4),
                         rel_pose=np.eye(4),
@@ -208,7 +216,8 @@ class ModularPipeline:
                         reg_inliers=np.ones(
                             len(self.objects[obj_id].key_points), dtype=bool
                         ),
-                        reg_residuals=np.zeros(len(self.objects[obj_id].key_points)),
+                        reg_residuals=0.001
+                        * np.ones(len(self.objects[obj_id].key_points)),
                         reg_uncertainties=0.01
                         * np.ones(len(self.objects[obj_id].key_points)),
                     )
@@ -368,6 +377,9 @@ class ModularPipeline:
             else:
                 pose_frontend[obj_id] = np.eye(4)
 
+        # update history
+        self._update_history_frames(frame, fe_result)
+
         #################################################################
         ##                     Track Table Update                      ##
         #################################################################
@@ -468,7 +480,12 @@ class ModularPipeline:
         # check, initialize new keyframes, and sample new keypoints
         t0 = time.time()
         new_keyframes = self.kf_manager.update(
-            frame, fe_result, self.track_table, self.objects, self.frontend.tracker
+            hist_frames=self.hist_frames,
+            hist_fe_results=self.hist_fe_results,
+            track_table=self.track_table,
+            objects=self.objects,
+            tracker=self.frontend.tracker,
+            conservative=False,
         )
         module_times["keyframe"] = time.time() - t0
 
@@ -491,6 +508,13 @@ class ModularPipeline:
             key = (kf.obj_id, kf.kf_idx)
             if key in updated_global_poses:
                 global_pose = updated_global_poses[key]
+
+                dt, ddeg = self._se3_delta(global_pose, self.objects[kf.obj_id].pose)
+                if dt > self.max_rel_translation or ddeg > self.max_rel_rotation_deg:
+                    print(
+                        f"Frame {frame.id}: Warning: Large pose change after global optimization for obj {kf.obj_id} kf {kf.kf_idx}. Δt={dt:.3f}m, ΔR={ddeg:.2f}deg"
+                    )
+                    continue
 
                 obj = self.objects[kf.obj_id]
                 obj.pose = global_pose.copy()
@@ -829,6 +853,17 @@ class ModularPipeline:
 
         # 6. Lost condition
         # obj.lost = obj.mean_residual > self.reg_residual_thres
+
+    def _update_history_frames(self, frame, fe_result):
+        self.hist_frames.append(frame)
+        self.hist_fe_results.append(fe_result)
+
+    def _se3_delta(self, T_new, T_old):
+        dT = T_new @ inverse_SE3(T_old)
+        dt = float(np.linalg.norm(dT[:3, 3]))
+        dR = scipy_R.from_matrix(dT[:3, :3]).magnitude()
+        ddeg = float(np.degrees(dR))
+        return dt, ddeg
 
     def __del__(self):
         for f in self.pose_log_files:

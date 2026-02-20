@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import open3d as o3d
 from typing import Tuple, Optional, Dict, Any
+from scipy.spatial.transform import Rotation as scipy_R
 
 from point2pose.core.build import build_from_cfg
 from point2pose.core.module_registry import REGISTER, TRACKER, SEGMENTER
@@ -99,6 +100,14 @@ class FrontEnd:
         self.prev_frame = None
         self.prev_residuals = {}  # obj_id -> previous mean residual
         self.prev_inlier_counts = {}  # obj_id -> previous inlier count
+        self.pose_histories = {}  # obj_id -> list of frontend poses
+        self.vel_hist_len = int(self.pipeline_cfg.get("vel_hist_len", 5))
+        self.vel_rot_change_thres_deg = float(
+            self.pipeline_cfg.get("vel_rot_change_thres_deg", 15.0)
+        )
+        self.vel_trans_change_thres = float(
+            self.pipeline_cfg.get("vel_trans_change_thres", 0.03)
+        )
 
     def initialize(self, frame):
         """Initialize segmentation and tracker with the first frame."""
@@ -320,7 +329,7 @@ class FrontEnd:
                     )
                     T_c2w_est = prev_pose
                     mean_res = -1.0
-                    stats_reg = {}
+                    stats_reg = {"inliers": np.array([]), "residuals": np.array([])}
 
                 stats_reg["correspond_curr3d"] = correspond_curr3d
                 stats_reg["valid_idx"] = idx
@@ -345,7 +354,8 @@ class FrontEnd:
                 should_recover, reason = self._check_registration_quality(
                     obj_id, mean_res, stats_reg
                 )
-
+                # should_recover = True
+                # reason = "test"
                 # if frame.id > 940 and frame.id < 1000:
                 #     should_recover = True
                 #     self.dense_register.debug_level = 2
@@ -401,8 +411,30 @@ class FrontEnd:
                     T_odom = T_prev
                     obj.lost = True
             elif self.frame_reg_mode == "f2m":
+                # self._seed_pose_history(obj_id, T_prev)
                 T_odom = T_c2w_est
 
+                if self.use_dense_registration and self.dense_register is not None:
+                    # icp refinement
+                    T_icp, stats_dense = self.dense_register.register(
+                        source_pcd=key_points,
+                        target_pcd=correspond_curr3d,
+                        init_pose=T_c2w_est,
+                    )
+
+                    T_odom = T_icp
+                # T_odom, used_vel_fallback = self._apply_velocity_fallback(
+                #     obj_id=obj_id,
+                #     T_prev=T_prev,
+                #     T_candidate=T_odom,
+                # )
+                # if used_vel_fallback:
+                #     print(
+                #         f"[FrontEnd] Frame {frame.id} - Object {obj_id} - "
+                #         "Velocity fallback used"
+                #     )
+
+                ## test output T_c2w_est by comparing relative pose to previous frame
                 # T_rel = T_c2w_est @ inverse_SE3(T_prev)
 
                 # R_rel = T_rel[:3, :3]
@@ -410,20 +442,49 @@ class FrontEnd:
                 # theta = np.linalg.norm(log_SO3(R_rel))  # radians
                 # d = np.linalg.norm(t_rel)  # meters
 
-                # if theta > 0.15 or d > 0.05:
-                #     T_odom = T_prev
-                # else:
-                #     T_odom = T_c2w_est
+            #     dt, ddeg = self._se3_delta(T_c2w_est, T_prev)
 
-                # Frame-to-map: use absolute pose directly
-                # if T_c2w_est is not None and 0 < mean_res < self.reg_residual_thres:
-                #     T_odom = T_c2w_est
-                # else:
-                #     T_odom = T_prev
-                #     obj.lost = True
-            else:
-                T_odom = T_prev
-                obj.lost = True
+            #     if ddeg > 15 or dt > 0.03:
+            #         #     # idx, prev3d, correspond_curr3d, _ = (
+            #         #     #     self._extract_valid_idx_points_for_obj(
+            #         #     #         obj_id, track_table, track_3d, track_valid, current_visibles
+            #         #     #     )
+            #         #     # )
+
+            #         #     # prev_pose = obj.pose.copy()
+            #         #     # # solve frame to frame registration
+            #         #     # if prev3d.shape[0] >= 3 and correspond_curr3d.shape[0] >= 3:
+            #         #     #     t_start = time.time()
+            #         #     #     T_rel, _ = self.register.register(
+            #         #     #         prev3d,
+            #         #     #         correspond_curr3d,
+            #         #     #         sigma_tgt=uncertainties[idx],
+            #         #     #         prev_T=prev_pose,
+            #         #     #         prev_frame=self.prev_frame,
+            #         #     #         cur_frame=frame,
+            #         #     #         obj_id=obj_id,
+            #         #     #         obj=obj,
+            #         #     #         mode="f2f",
+            #         #     #     )
+
+            #         #     # stats_reg["correspond_curr3d"] = correspond_curr3d
+            #         #     # stats_reg["valid_idx"] = idx
+
+            #         #     # T_odom = T_rel @ T_prev
+            #         T_odom = T_prev
+            #     else:
+            #         T_odom = T_c2w_est
+
+            #     # Frame-to-map: use absolute pose directly
+            #     # if T_c2w_est is not None and 0 < mean_res < self.reg_residual_thres:
+            #     #     T_odom = T_c2w_est
+            #     # else:
+            #     #     T_odom = T_prev
+            #     #     obj.lost = True
+
+            # else:
+            #     T_odom = T_prev
+            #     obj.lost = True
 
             # Store after pose if dense recovery was triggered
             if result.dense_recovery_triggered.get(obj_id, False):
@@ -449,6 +510,7 @@ class FrontEnd:
                 stats_reg,
                 valid_stats,
             )
+            self._update_pose_history(obj_id, T_odom)
 
             # debug save
             if self.debug_level > 1:
@@ -537,6 +599,62 @@ class FrontEnd:
             else:
                 return float(np.mean(residuals))
         return -1.0
+
+    def _seed_pose_history(self, obj_id: int, pose: np.ndarray):
+        if pose is None:
+            return
+        if obj_id not in self.pose_histories or len(self.pose_histories[obj_id]) == 0:
+            self.pose_histories[obj_id] = [pose.copy()]
+
+    def _update_pose_history(self, obj_id: int, pose: np.ndarray):
+        if pose is None:
+            return
+        hist = self.pose_histories.setdefault(obj_id, [])
+        hist.append(pose.copy())
+        max_len = max(2, self.vel_hist_len + 1)
+        if len(hist) > max_len:
+            del hist[: len(hist) - max_len]
+
+    def _pose_velocity(self, T_new: np.ndarray, T_old: np.ndarray) -> np.ndarray:
+        dT = T_new @ inverse_SE3(T_old)
+        return se3_to_vec(log_SE3(dT))
+
+    def _estimate_history_velocity(self, obj_id: int) -> Optional[np.ndarray]:
+        hist = self.pose_histories.get(obj_id, [])
+        if len(hist) < 2:
+            return None
+
+        start_idx = max(1, len(hist) - self.vel_hist_len)
+        velocities = [
+            self._pose_velocity(hist[i], hist[i - 1])
+            for i in range(start_idx, len(hist))
+        ]
+        if len(velocities) == 0:
+            return None
+        return np.mean(np.stack(velocities, axis=0), axis=0)
+
+    def _apply_velocity_fallback(
+        self, obj_id: int, T_prev: np.ndarray, T_candidate: Optional[np.ndarray]
+    ) -> Tuple[np.ndarray, bool]:
+        if T_candidate is None:
+            return T_prev, False
+
+        hist_vel = self._estimate_history_velocity(obj_id)
+        if hist_vel is None:
+            return T_candidate, False
+
+        cur_vel = self._pose_velocity(T_candidate, T_prev)
+        rot_change_deg = float(np.degrees(np.linalg.norm(cur_vel[:3] - hist_vel[:3])))
+        trans_change = float(np.linalg.norm(cur_vel[3:] - hist_vel[3:]))
+
+        if (
+            rot_change_deg > self.vel_rot_change_thres_deg
+            or trans_change > self.vel_trans_change_thres
+        ):
+            T_pred = exp_se3(vec_to_se3(hist_vel)) @ T_prev
+            return T_pred, True
+
+        return T_candidate, False
 
     def _save_cropped_pcd(self, frame):
         num_objs = self.num_obj
@@ -999,3 +1117,10 @@ class FrontEnd:
         except Exception as e:
             print(f"[FrontEnd] Dense recovery failed: {e}")
             return None, {}
+
+    def _se3_delta(self, T_new, T_old):
+        dT = T_new @ inverse_SE3(T_old)
+        dt = float(np.linalg.norm(dT[:3, 3]))
+        dR = scipy_R.from_matrix(dT[:3, :3]).magnitude()
+        ddeg = float(np.degrees(dR))
+        return dt, ddeg

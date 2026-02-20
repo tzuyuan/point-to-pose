@@ -119,18 +119,20 @@ class CoTrackerRealtimeTracker(Tracker):
                 )
                 self._need_commit = False
         if predictions is not None and visibles is not None:
-            # print("predictions: ", predictions)
-            # print("uncertainties: ", uncertainties.shape)
-            # print("uncertainties: ", uncertainties)
-            # print("visibles: ", visibles.shape)
+            preds = predictions.squeeze(0).cpu().numpy()[-1, :, :]
+            preds[:, 0] = preds[:, 0] * (self._img_width / self._resize_width)
+            preds[:, 1] = preds[:, 1] * (self._img_height / self._resize_height)
             return (
-                predictions.squeeze(0).cpu().numpy()[-1, :, :],
+                preds,
                 uncertainties.squeeze(0).cpu().numpy()[-1, :],
                 visibles.squeeze(0).cpu().numpy()[-1, :],
             )
         else:
+            preds = self._query_points[:, 1:].cpu().numpy()
+            preds[:, 0] = preds[:, 0] * (self._img_width / self._resize_width)
+            preds[:, 1] = preds[:, 1] * (self._img_height / self._resize_height)
             return (
-                self._query_points[:, 1:].cpu().numpy(),
+                preds,
                 0.1 * np.ones((self._query_points.shape[0])),
                 np.ones((self._query_points.shape[0])),
             )

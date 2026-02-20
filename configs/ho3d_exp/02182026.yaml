@@ -80,8 +80,8 @@ register:
     use_uncertainty: true
     min_variance: 1e-2
 
-    # reproj_error, dist_to_prev, inlier_count, mean_residual, reproj_error_iou, 3d_dist, 3d_dist_prev_kf, 3d_dist_sparse_map
-    select_method: 3d_dist_sparse_map
+    # reproj_error, dist_to_prev, inlier_count, mean_residual, reproj_error_iou, 3d_dist, 3d_dist_prev_kf
+    select_method: 3d_dist
 
     # front end
     remove_outside_mask: true

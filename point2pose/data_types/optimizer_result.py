@@ -9,3 +9,5 @@ class OptimizerResult:
     pose_optimized: np.ndarray
     key_points_optimized: np.ndarray
     key_points_idx_optimized: np.ndarray
+    poses_optimized: np.ndarray | None = None
+    pose_frame_ids_optimized: np.ndarray | None = None

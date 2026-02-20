@@ -222,7 +222,7 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, default="/home/justin/data/HO3D_V3/")
-    parser.add_argument("--video_name", "-v", type=str, default="MPM12")
+    parser.add_argument("--video_name", "-v", type=str, default="MPM10")
     parser.add_argument(
         "--out_dir",
         type=str,

@@ -331,7 +331,7 @@ class CoTrackerOnlinePredictor(torch.nn.Module):
         else:
             visibility_score = visibilities * confidence
 
-        thr = 0.6
+        thr = 0.96
         visible_mask = visibility_score > thr
         uncertainty = 1.0 - visibility_score  # lower = more confident
 

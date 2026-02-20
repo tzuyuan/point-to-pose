@@ -35,6 +35,10 @@ class KeyFrameGraph:
         self._last_kf_pose: Dict[int, np.ndarray] = {}
         self._last_kf_idx: Dict[int, int] = {}
 
+        # Keep references to all keyframes seen by object and frame_id so we can
+        # update every keyframe pose after graph optimization.
+        self._keyframes_by_obj_frame: Dict[int, Dict[int, KeyFrame]] = {}
+
     # -------------------------------------------------------------------------
     # Internal helpers
     # -------------------------------------------------------------------------
@@ -62,12 +66,14 @@ class KeyFrameGraph:
             self._optimizers = {}
             self._last_kf_pose = {}
             self._last_kf_idx = {}
+            self._keyframes_by_obj_frame = {}
         else:
             self._optimizers[obj_id] = build_from_cfg(
                 self.cfg.global_optimizer, OPTIMIZER
             )
             self._last_kf_pose.pop(obj_id, None)
             self._last_kf_idx.pop(obj_id, None)
+            self._keyframes_by_obj_frame.pop(obj_id, None)
 
     def get_num_keyframes(self, obj_id: int) -> int:
         """
@@ -104,7 +110,13 @@ class KeyFrameGraph:
             kf_idx = kf.kf_idx
             cur_pose = np.asarray(kf.pose, dtype=float)
 
+            if obj_id not in self._keyframes_by_obj_frame:
+                self._keyframes_by_obj_frame[obj_id] = {}
+            self._keyframes_by_obj_frame[obj_id][int(kf.frame_id)] = kf
+
             opt = self._get_optimizer(obj_id)
+
+            print(opt._prior_noise)
 
             # -------------------------------------------------------------
             # 1) Relative pose between this KF and previous KF for this obj
@@ -162,6 +174,16 @@ class KeyFrameGraph:
             valid_idx = kf.reg_valid_idx
             reg_cur_3d = kf.reg_correspond_curr3d
 
+            if kf.obs_track_indices is not None and kf.obs_uncertainties is not None:
+                obs_ids = np.asarray(kf.obs_track_indices, dtype=np.int64).reshape(-1)
+                obs_unc = np.asarray(kf.obs_uncertainties, dtype=float).reshape(-1)
+                id2unc = {int(t): float(u) for t, u in zip(obs_ids, obs_unc)}
+                reg_uncertainties = np.array(
+                    [id2unc.get(int(t), 0.5) for t in valid_idx], dtype=float
+                )
+            else:
+                reg_uncertainties = 0.5 * np.ones((len(valid_idx),), dtype=float)
+
             visible_pts_2d = kf.obs_2d[kf.obs_visible]
             visible_pts_2d_idx = kf.obs_track_indices[kf.obs_visible]
             visible_uncertainties = kf.obs_uncertainties[kf.obs_visible]
@@ -171,7 +193,7 @@ class KeyFrameGraph:
             # -------------------------------------------------------------
             object_frame_data = ObjectFrameData(
                 obj_id=obj_id,
-                frame_id=kf_idx,  # use keyframe index as "frame id"
+                frame_id=kf.frame_id,  # use keyframe index as "frame id"
                 intrinsics=kf.frame.intrinsics,
                 pose=cur_pose,  # object/world pose at this keyframe
                 rel_pose=rel_pose,  # relative pose to previous keyframe
@@ -183,15 +205,31 @@ class KeyFrameGraph:
                 reg_valid_idx=valid_idx,
                 reg_inliers=inliers,
                 reg_residuals=residuals,
-                reg_uncertainties=uncertainties,
+                reg_uncertainties=reg_uncertainties,
             )
 
             opt_result = opt.optimize(object_frame_data)
 
-            # If optimization succeeded, update the keyframe pose in-place
+            # If optimization succeeded, update all keyframe poses for this object.
             if opt_result is not None and opt_result.pose_optimized is not None:
-                kf.pose = opt_result.pose_optimized
-                updated_poses[(obj_id, kf_idx)] = opt_result.pose_optimized
+                poses_all = getattr(opt_result, "poses_optimized", None)
+                frame_ids_all = getattr(opt_result, "pose_frame_ids_optimized", None)
+
+                if poses_all is not None and frame_ids_all is not None:
+                    for frame_id_opt, pose_opt in zip(frame_ids_all, poses_all):
+                        kf_ref = self._keyframes_by_obj_frame.get(obj_id, {}).get(
+                            int(frame_id_opt)
+                        )
+                        if kf_ref is None:
+                            continue
+
+                        kf_ref.pose = np.asarray(pose_opt, dtype=float)
+                        kf_ref.update_kps()
+                        updated_poses[(obj_id, int(kf_ref.kf_idx))] = kf_ref.pose
+                else:
+                    kf.pose = np.asarray(opt_result.pose_optimized, dtype=float)
+                    kf.update_kps()
+                    updated_poses[(obj_id, kf_idx)] = kf.pose
 
                 if (
                     opt_result.key_points_optimized is not None

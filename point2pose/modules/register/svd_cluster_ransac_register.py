@@ -3,6 +3,7 @@ import cupoch as cph
 import copy
 
 from scipy.spatial import cKDTree
+from scipy.spatial.transform import Rotation as scipy_R
 
 from point2pose.core.base_register import Register
 from point2pose.core.module_registry import REGISTER
@@ -28,12 +29,25 @@ class SVDClusterRANSACRegister(Register):
         self._inlier_thres = config.get("inlier_thres", 0.01)
         self._min_inliers = config.get("min_inliers", 6)
         self._max_clusters = config.get("max_clusters", 10)
+        self._max_iter = config.get("max_iter", 15)
         self._use_uncertainty = config.get("use_uncertainty", False)
         self._select_method = config.get("select_method", "reproj_error")
+        self._select_w_prev = float(config.get("select_w_prev", 0.55))
+        self._select_w_kf = float(config.get("select_w_kf", 0.30))
+        self._select_w_motion = float(config.get("select_w_motion", 0.15))
+        self._select_overlap_dist = float(config.get("select_overlap_dist", 0.02))
+        self._select_min_overlap_ratio = float(
+            config.get("select_min_overlap_ratio", 0.15)
+        )
+        self._select_robust_percentile = float(
+            config.get("select_robust_percentile", 70.0)
+        )
+        self._select_bad_penalty = float(config.get("select_bad_penalty", 0.02))
 
         self._min_var = float(config.get("min_variance", 1e-2))
 
         np.random.seed(0)
+        self._last_selected_T = None
 
     def register(
         self,
@@ -137,7 +151,43 @@ class SVDClusterRANSACRegister(Register):
                 dist_errors.append(dists)
                 c["3d_dist"] = float(dists)
             best_cluster_idx = int(np.argmin(dist_errors))
-        # elif self._selected_method == "3d_dist"
+            # xi = log_SE3(candidates[best_cluster_idx]["T"] @ inverse_SE3(prev_T))
+
+            # dt, ddeg = self._se3_delta(candidates[best_cluster_idx]["T"], prev_T)
+
+            # if dist_errors[best_cluster_idx] > 0.01:
+            #     T, inliers, residuals = self._svd_residual_outlier_fit(p0, tgt_pcd, N)
+            #     stats["clusters"] = candidates
+            #     stats["best_cluster_idx"] = -1
+            #     stats["remaining_mask"] = np.array(
+            #         [False] * N
+            #     )  # all points are inliers for this fallback
+            #     stats["inliers"] = inliers
+            #     stats["residuals"] = residuals
+            #     return prev_T, stats  # fallback to prev_T if all candidates are bad
+            # if dist_errors[best_cluster_idx] > 0.01 or dt > 0.05 or ddeg > 15:
+            #     stats["clusters"] = candidates
+            #     stats["best_cluster_idx"] = best_cluster_idx
+            #     stats["remaining_mask"] = remaining
+            #     stats["inliers"] = np.array([])
+            #     stats["residuals"] = np.array([])
+            #     return prev_T, stats  # fallback to prev_T if all candidates are bad
+        elif self._select_method == "3d_dist_sparse_map":
+            dist_errors = []
+            trg_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
+            # map_pts = obj.key_points
+            for c in candidates:
+                map_pts = obj.key_points.copy()
+                T_map2cur = c["T"]
+                dists = self.icp_like_point2point_residuals(
+                    map_pts, trg_pcd_full, T_map2cur
+                )
+
+                dist_errors.append(dists)
+                c["3d_dist"] = float(dists)
+            best_cluster_idx = int(np.argmin(dist_errors))
+        # elif self._select_method == "3d_dist_dense_map":
+
         elif self._select_method == "3d_dist_kf":
             dist_errors = []
             pcd_kf = []
@@ -166,6 +216,8 @@ class SVDClusterRANSACRegister(Register):
 
         elif self._select_method == "3d_dist_prev_kf":
             scores = []
+            scores_prev = []
+            scores_kf = []
             src_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
             tgt_prev = extract_cropped_point_cloud(prev_frame, obj_id)
             tgt_kf = extract_cropped_point_cloud(obj.keyframes[-1].frame, obj_id)
@@ -182,46 +234,103 @@ class SVDClusterRANSACRegister(Register):
                 T_cur2prev = prev_T @ inverse_SE3(c["T"])
                 T_cur2kf = obj.keyframes[-1].pose @ inverse_SE3(c["T"])
 
-                # s_prev, r_prev, _ = self.icp_like_point2point_score(
-                #     src_pcd_full,
-                #     tgt_prev,
-                #     T_cur2prev,
-                #     max_corr_dist=max_corr,
-                #     min_inlier_ratio=min_ratio,
-                #     min_inliers=min_inl,
-                # )
-                # s_kf, r_kf, _ = self.icp_like_point2point_score(
-                #     src_pcd_full,
-                #     tgt_kf,
-                #     T_cur2kf,
-                #     max_corr_dist=max_corr,
-                #     min_inlier_ratio=min_ratio,
-                #     min_inliers=min_inl,
-                # )
-
                 s_prev = self.icp_like_point2point_residuals(
-                    src_pcd_full, tgt_prev, T_cur2prev
+                    src_pcd_full.copy(), tgt_prev, T_cur2prev
                 )
 
                 s_kf = self.icp_like_point2point_residuals(
-                    src_pcd_full, tgt_kf, T_cur2kf
+                    src_pcd_full.copy(), tgt_kf, T_cur2kf
                 )
 
-                # if np.isinf(s_prev) and np.isinf(s_kf):
-                #     # fallback that doesn't depend on prev_T
-                #     s = c["mean_res"] - 0.001 * c["ninliers"]
-                # else:
-                #     w_prev = r_prev / (r_prev + r_kf + eps)
-                #     s = w_prev * s_prev + (1.0 - w_prev) * s_kf
-
-                # # hysteresis: discourage switching when scores are close
-                # if getattr(self, "_last_selected_T", None) is not None:
-                #     s += lam_smooth * self._pose_dist(c["T"], self._last_selected_T)
-
-                # scores.append(float(s))
                 s = np.min([s_prev, s_kf])
                 scores.append(s)
+                scores_prev.append(s_prev)
+                scores_kf.append(s_kf)
                 c["3d_score_prev_kf"] = float(s)
+
+            best_cluster_idx = int(np.argmin(scores))
+        elif self._select_method == "3d_dist_prev_kf_motion":
+            scores = []
+            src_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
+            tgt_prev = (
+                extract_cropped_point_cloud(prev_frame, obj_id)
+                if prev_frame is not None
+                else None
+            )
+            kf = (
+                obj.keyframes[-1]
+                if (obj is not None and len(obj.keyframes) > 0)
+                else None
+            )
+            tgt_kf = (
+                extract_cropped_point_cloud(kf.frame, obj_id)
+                if (kf is not None and kf.frame is not None)
+                else None
+            )
+
+            ref_T = (
+                self._last_selected_T
+                if self._last_selected_T is not None
+                else (prev_T if prev_T is not None else init_pose)
+            )
+
+            for c in candidates:
+                score = 0.0
+                used_geom_term = False
+                T_inv = inverse_SE3(c["T"])
+
+                if (
+                    prev_T is not None
+                    and tgt_prev is not None
+                    and tgt_prev.shape[0] > 0
+                ):
+                    T_cur2prev = prev_T @ T_inv
+                    d_prev, overlap_prev = self._robust_symmetric_nn_residual(
+                        src_pcd_full,
+                        tgt_prev,
+                        T_cur2prev,
+                        robust_percentile=self._select_robust_percentile,
+                        overlap_dist=self._select_overlap_dist,
+                    )
+                    if overlap_prev < self._select_min_overlap_ratio:
+                        d_prev += self._select_bad_penalty
+                    score += self._select_w_prev * d_prev
+                    used_geom_term = True
+                    c["3d_dist_prev_motion"] = float(d_prev)
+                    c["overlap_prev_motion"] = float(overlap_prev)
+
+                if (
+                    kf is not None
+                    and getattr(kf, "pose", None) is not None
+                    and tgt_kf is not None
+                    and tgt_kf.shape[0] > 0
+                ):
+                    T_cur2kf = kf.pose @ T_inv
+                    d_kf, overlap_kf = self._robust_symmetric_nn_residual(
+                        src_pcd_full,
+                        tgt_kf,
+                        T_cur2kf,
+                        robust_percentile=self._select_robust_percentile,
+                        overlap_dist=self._select_overlap_dist,
+                    )
+                    if overlap_kf < self._select_min_overlap_ratio:
+                        d_kf += self._select_bad_penalty
+                    score += self._select_w_kf * d_kf
+                    used_geom_term = True
+                    c["3d_dist_kf_motion"] = float(d_kf)
+                    c["overlap_kf_motion"] = float(overlap_kf)
+
+                if ref_T is not None:
+                    d_motion = self._pose_dist(c["T"], ref_T)
+                    score += self._select_w_motion * d_motion
+                    c["pose_motion_prior"] = float(d_motion)
+
+                # fallback if geometric terms are unavailable
+                if not used_geom_term:
+                    score += float(c["mean_res"])
+
+                scores.append(float(score))
+                c["3d_score_prev_kf_motion"] = float(score)
 
             best_cluster_idx = int(np.argmin(scores))
 
@@ -296,6 +405,7 @@ class SVDClusterRANSACRegister(Register):
 
             # compute the inliers
             inl = r <= self._inlier_thres
+
             # count the number of inliers
             ninl = int(inl.sum())
 
@@ -303,7 +413,9 @@ class SVDClusterRANSACRegister(Register):
                 continue
 
             mean_r = float(r[inl].mean())
-            score = ninl - 0.5 * mean_r
+            score = ninl
+            # rob_r = float(np.percentile(r[inl], 80))  # or np.median(r[inl])
+            # score = ninl - 100 * rob_r
 
             if score > best_score:
                 best_score = score
@@ -328,7 +440,6 @@ class SVDClusterRANSACRegister(Register):
 
         r_all = np.linalg.norm(transform_pts(Tr, p0[idx]) - tgt_pcd[idx], axis=1)
 
-        # optional: adaptive threshold from MAD (see next section)
         inl_all = r_all <= self._inlier_thres
 
         inlier_idx = idx[inl_all]
@@ -496,3 +607,72 @@ class SVDClusterRANSACRegister(Register):
         # robust score: median or p80 works great
         score = float(np.median(dists[inl]))  # or np.percentile(dists[inl], 80)
         return score, ratio, ninl
+
+    def _robust_symmetric_nn_residual(
+        self,
+        source_pcd,
+        target_pcd,
+        T_src2tgt,
+        robust_percentile=70.0,
+        overlap_dist=0.02,
+    ):
+        if (
+            source_pcd is None
+            or target_pcd is None
+            or source_pcd.shape[0] == 0
+            or target_pcd.shape[0] == 0
+        ):
+            return np.inf, 0.0
+
+        q = float(np.clip(robust_percentile, 0.0, 100.0))
+
+        src_t = (T_src2tgt @ to_homo(source_pcd).T).T[:, :3]
+
+        tree_tgt = cKDTree(target_pcd)
+        d_src_tgt, _ = tree_tgt.query(src_t, k=1, workers=-1)
+
+        tree_src = cKDTree(src_t)
+        d_tgt_src, _ = tree_src.query(target_pcd, k=1, workers=-1)
+
+        robust_res = 0.5 * (np.percentile(d_src_tgt, q) + np.percentile(d_tgt_src, q))
+        overlap_ratio = 0.5 * (
+            float(np.mean(d_src_tgt <= overlap_dist))
+            + float(np.mean(d_tgt_src <= overlap_dist))
+        )
+        return float(robust_res), float(overlap_ratio)
+
+    def _se3_delta(self, T_new, T_old):
+        dT = T_new @ inverse_SE3(T_old)
+        dt = float(np.linalg.norm(dT[:3, 3]))
+        dR = scipy_R.from_matrix(dT[:3, :3]).magnitude()
+        ddeg = float(np.degrees(dR))
+        return dt, ddeg
+
+    def _svd_residual_outlier_fit(self, p0, tgt_pcd, N):
+        # fit transformation using svd
+        T = self._svd_fit(p0, tgt_pcd)
+
+        inliers = np.ones(N, dtype=bool)
+
+        for it in range(self._max_iter):
+            p_T = transform_pts(T, p0)
+            residuals = np.linalg.norm(p_T - tgt_pcd, axis=1)
+
+            thr = float(self._inlier_thres)
+
+            new_inliers = residuals <= thr
+
+            # stop if no change or too few inliers
+            if (
+                np.array_equal(new_inliers, inliers)
+                or new_inliers.sum() < self._min_inliers
+                or it == self._max_iter - 1
+            ):
+
+                break
+
+            inliers = new_inliers
+
+            # refit on inliers
+            T = self._svd_fit(p0[inliers], tgt_pcd[inliers])
+        return T, inliers, residuals

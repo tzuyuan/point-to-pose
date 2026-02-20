@@ -1,19 +1,19 @@
 import sys
 from pathlib import Path
 import time
-
-sys.path.append(str(Path(__file__).resolve().parents[2]))
-
-
 import os
 import argparse
+import shutil
+
+sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 import cv2
 from omegaconf import OmegaConf
 import torch
 import numpy as np
+import trimesh
 
-from point2pose.io.sources.dataset.datareader import Ho3dReader
+from point2pose.io.sources.dataset.datareader import YcbineoatReader
 from point2pose.pipeline.pipeline_single_process import PipelineSingleProcess
 from point2pose.pipeline.modular_pipeline import ModularPipeline
 from point2pose.data_types.frame import Frame
@@ -34,52 +34,93 @@ from point2pose.utils.evaluation import (
 )
 
 
-# Build a GT bbox (min/max in object frame) once per sequence
-def gt_bbox_minmax_from_mesh(reader):
-    # reader.get_gt_mesh() should return the HO3D object mesh in meters, object frame
-    mesh = reader.get_gt_mesh()
-    bmin, bmax = mesh.bounds  # shape (3,), (3,)
-    return np.vstack([bmin.astype(float), bmax.astype(float)])  # (2,3)
+def load_ycb_mesh(reader, model_root):
+    """
+    Load the YCB object mesh using the video->object mapping from YcbineoatReader.
+    """
+    video_name = reader.get_video_name()
+    ob_name = reader.videoname_to_object.get(video_name)
+
+    if not ob_name:
+        raise ValueError(f"No object mapping found for video: {video_name}")
+
+    candidates = [
+        os.path.join(model_root, ob_name, "textured_simple.obj"),
+        os.path.join(model_root, "models", ob_name, "textured_simple.obj"),
+        os.path.join(model_root, ob_name, "google_16k", "textured.obj"),
+    ]
+
+    mesh_path = None
+    for path in candidates:
+        if os.path.exists(path):
+            mesh_path = path
+            break
+
+    if mesh_path is None:
+        raise FileNotFoundError(
+            f"Could not find mesh for {ob_name} in {model_root}. Checked: {candidates}"
+        )
+
+    print(f"Loading mesh from {mesh_path}")
+    return trimesh.load(mesh_path)
+
+
+def gt_bbox_minmax_from_mesh(mesh):
+    bmin, bmax = mesh.bounds
+    return np.vstack([bmin.astype(float), bmax.astype(float)])
 
 
 def get_all_video_names(data_path):
-    """Get all video names from the HO3D evaluation directory."""
-    evaluation_dir = os.path.join(data_path, "evaluation")
-    if not os.path.exists(evaluation_dir):
-        raise ValueError(f"Evaluation directory not found: {evaluation_dir}")
+    """Get all valid YCBInEOAT sequence folder names from data_path."""
+    if not os.path.exists(data_path):
+        raise ValueError(f"Dataset root directory not found: {data_path}")
 
     video_names = []
-    for item in os.listdir(evaluation_dir):
-        item_path = os.path.join(evaluation_dir, item)
-        if os.path.isdir(item_path):
-            # Check if it has a rgb subdirectory (to confirm it's a valid video)
-            rgb_path = os.path.join(item_path, "rgb")
-            if os.path.exists(rgb_path) and len(os.listdir(rgb_path)) > 0:
-                video_names.append(item)
+    for item in sorted(os.listdir(data_path)):
+        item_path = os.path.join(data_path, item)
+        if not os.path.isdir(item_path):
+            continue
 
-    return sorted(video_names)
+        rgb_path = os.path.join(item_path, "rgb")
+        if not os.path.isdir(rgb_path):
+            continue
+
+        if len(os.listdir(rgb_path)) == 0:
+            continue
+
+        cam_k_path = os.path.join(item_path, "cam_K.txt")
+        if not os.path.isfile(cam_k_path):
+            continue
+
+        video_names.append(item)
+
+    return video_names
 
 
-def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: str):
-    """Process a single HO3D video and return evaluation metrics."""
-    video_path = os.path.join(data_path, os.path.join("evaluation/", video_name))
+def run_ycbineoat_single(
+    data_path: str, video_name: str, out_dir: str, config_path: str, model_path: str
+):
+    """Process a single YCBInEOAT sequence and return evaluation metrics."""
+    video_path = os.path.join(data_path, video_name)
 
-    reader = Ho3dReader(video_path, data_path)
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video path not found: {video_path}")
 
+    reader = YcbineoatReader(video_path)
     video_name = reader.get_video_name()
 
     out_folder = os.path.join(out_dir, video_name, "")
     vis_folder = os.path.join(out_folder, "output_images")
     with_gt_folder = os.path.join(out_folder, "with_gt")
 
-    os.system(f"rm -rf {out_folder} && mkdir -p {out_folder}")
-    os.system(f"rm -rf {vis_folder} && mkdir -p {vis_folder}")
-    os.system(f"rm -rf {with_gt_folder} && mkdir -p {with_gt_folder}")
+    if os.path.exists(out_folder):
+        shutil.rmtree(out_folder)
+    os.makedirs(vis_folder, exist_ok=True)
+    os.makedirs(with_gt_folder, exist_ok=True)
 
     cfg = OmegaConf.load(config_path)
     vis_cfg = cfg.visualization.params
 
-    # Set meta_data_save_path to save in the results folder for this dataset
     if cfg.pipeline.params.get("save_meta_data", True):
         meta_data_folder = os.path.join(out_folder, "meta_data")
         cfg.pipeline.params.meta_data_save_path = meta_data_folder
@@ -91,22 +132,21 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
     else:
         raise ValueError(f"Invalid pipeline type: {cfg.pipeline.type}")
 
-    gt_bbox_minmax = gt_bbox_minmax_from_mesh(reader)
+    mesh = load_ycb_mesh(reader, model_path)
+    gt_bbox_minmax = gt_bbox_minmax_from_mesh(mesh)
+
     out_poses = []
     gt_poses = []
     gt_ids = []
 
-    for i, color_file in enumerate(reader.color_files):
-        color = cv2.imread(color_file)
-        H, W = color.shape[:2]
-        rgb = cv2.cvtColor(color, cv2.COLOR_BGR2RGB)
+    for i, _ in enumerate(reader.color_files):
+        rgb = reader.get_color(i)
         depth = reader.get_depth(i)
-
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         mask = reader.get_mask(i)
-        mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_NEAREST)
         mask = torch.from_numpy(mask).unsqueeze(0).unsqueeze(0).to(device)
-        # Create Frame object
+
         frame = Frame(
             id=i,
             rgb=rgb,
@@ -117,17 +157,15 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
             timestamp=time.time(),
         )
 
-        # get out pose from the pipeline
         out_pose = pipeline.step(frame)
         out_poses.append(out_pose.reshape(4, 4))
 
-        # get gt pose from the reader
         gt_pose = reader.get_gt_pose(i)
         if gt_pose is not None:
             gt_ids.append(i)
             gt_poses.append(gt_pose)
 
-        if i == 0:
+        if i == 0 and gt_pose is not None:
             pipeline.objects[0].init_pose = gt_pose
 
         display_frame = visualize_and_save_tracking_results(
@@ -161,20 +199,16 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
         )
 
     if len(gt_poses) == 0:
-        print(
-            f"Warning: No GT poses found for video {video_name}, skipping evaluation."
-        )
+        print(f"Warning: No GT poses found for video {video_name}, skipping evaluation.")
         return None
 
     gt_poses = np.array(gt_poses)
     pred_poses = np.array(out_poses)[gt_ids]
 
-    ######### Align first frame
     pred_poses = pred_poses @ inverse_SE3(pred_poses[0]) @ gt_poses[0]
 
     adi_errs = []
     add_errs = []
-    mesh = reader.get_gt_mesh()
 
     for i in range(len(pred_poses)):
         adi = adi_err(pred_poses[i], gt_poses[i], mesh.vertices.copy())
@@ -188,13 +222,11 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
     add_auc = compute_auc(add_errs) * 100
 
     print(
-        f"video {video_name}, ADD-S_err: {adi_errs.mean()*100:.2f}[cm], ADD_errs: {add_errs.mean()*100:.2f}[cm], ADD-S_AUC: {adds_auc:.2f}, ADD_AUC: {add_auc:.2f}"
+        f"video {video_name}, ADD-S_err: {adi_errs.mean()*100:.2f}[cm], "
+        f"ADD_errs: {add_errs.mean()*100:.2f}[cm], "
+        f"ADD-S_AUC: {adds_auc:.2f}, ADD_AUC: {add_auc:.2f}"
     )
 
-    if getattr(pipeline, "save_meta_data", False):
-        pipeline.data_logger.save_now()
-
-    # Generate evaluation plots
     plot_evaluation_results(
         add_s_errs=adi_errs,
         add_errs=add_errs,
@@ -213,7 +245,6 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
         show_plots=False,
     )
 
-    # Generate pose error plots
     plot_pose_errors(
         pred_poses=pred_poses,
         gt_poses=gt_poses,
@@ -232,7 +263,6 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
         show_plots=False,
     )
 
-    # Generate recall vs threshold plot
     plot_recall_vs_threshold(
         add_s_errs=adi_errs,
         add_errs=add_errs,
@@ -243,7 +273,6 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
         max_threshold=10.0,
     )
 
-    # Return metrics for summary
     return {
         "video_name": video_name,
         "add_s_err_mean": adi_errs.mean() * 100,
@@ -253,29 +282,32 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
     }
 
 
-def run_ho3d_all(data_path: str, out_dir: str, config_path: str):
-    """Process all HO3D videos and generate a summary."""
-    # Get all video names
+def run_ycbineoat_all(data_path: str, out_dir: str, config_path: str, model_path: str):
+    """Process all YCBInEOAT sequences and print a summary."""
     video_names = get_all_video_names(data_path)
     print(f"Found {len(video_names)} videos to process: {video_names}")
     print("-" * 80)
 
-    # Process each video
     results = []
     for idx, video_name in enumerate(video_names, 1):
         print(f"\n[{idx}/{len(video_names)}] Processing video: {video_name}")
         try:
-            result = run_ho3d_single(data_path, video_name, out_dir, config_path)
+            result = run_ycbineoat_single(
+                data_path=data_path,
+                video_name=video_name,
+                out_dir=out_dir,
+                config_path=config_path,
+                model_path=model_path,
+            )
             if result is not None:
                 results.append(result)
-        except Exception as e:
-            print(f"Error processing video {video_name}: {e}")
+        except Exception as exc:
+            print(f"Error processing video {video_name}: {exc}")
             import traceback
 
             traceback.print_exc()
             continue
 
-    # Print summary
     print("\n" + "=" * 80)
     print("SUMMARY OF RESULTS")
     print("=" * 80)
@@ -284,7 +316,6 @@ def run_ho3d_all(data_path: str, out_dir: str, config_path: str):
         print("No results to display.")
         return
 
-    # Sort results by video name for consistent output
     results.sort(key=lambda x: x["video_name"])
 
     for result in results:
@@ -294,37 +325,46 @@ def run_ho3d_all(data_path: str, out_dir: str, config_path: str):
             f"ADD-S_AUC: {result['add_s_auc']:.2f}, ADD_AUC: {result['add_auc']:.2f}"
         )
 
-    # Compute averages
-    if len(results) > 0:
-        avg_add_s_err = np.mean([r["add_s_err_mean"] for r in results])
-        avg_add_err = np.mean([r["add_err_mean"] for r in results])
-        avg_add_s_auc = np.mean([r["add_s_auc"] for r in results])
-        avg_add_auc = np.mean([r["add_auc"] for r in results])
+    avg_add_s_err = np.mean([r["add_s_err_mean"] for r in results])
+    avg_add_err = np.mean([r["add_err_mean"] for r in results])
+    avg_add_s_auc = np.mean([r["add_s_auc"] for r in results])
+    avg_add_auc = np.mean([r["add_auc"] for r in results])
 
-        print("-" * 80)
-        print(
-            f"Average, ADD-S_err: {avg_add_s_err:.2f}[cm], "
-            f"ADD_errs: {avg_add_err:.2f}[cm], "
-            f"ADD-S_AUC: {avg_add_s_auc:.2f}, ADD_AUC: {avg_add_auc:.2f}"
-        )
-        print("=" * 80)
+    print("-" * 80)
+    print(
+        f"Average, ADD-S_err: {avg_add_s_err:.2f}[cm], "
+        f"ADD_errs: {avg_add_err:.2f}[cm], "
+        f"ADD-S_AUC: {avg_add_s_auc:.2f}, ADD_AUC: {avg_add_auc:.2f}"
+    )
+    print("=" * 80)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", type=str, default="/home/justin/data/HO3D_V3/")
+    parser.add_argument("--data_path", type=str, default="/home/justin/data/YCBInEOAT")
     parser.add_argument(
         "--out_dir",
         type=str,
-        default="/home/justin/code/point-to-pose/results/ho3d_all",
+        default="/home/justin/code/point-to-pose/results/ycbineoat_all",
     )
     parser.add_argument(
         "--config_path",
         "-c",
         type=str,
-        default="/home/justin/code/point-to-pose/configs/ho3d/ho3d_single.yaml",
+        default="/home/justin/code/point-to-pose/configs/ycbineoat/ycbineoat_all.yaml",
     )
-
+    parser.add_argument(
+        "--model_path",
+        "-m",
+        type=str,
+        default="/home/justin/data/YCBInEOAT/YCB_models_with_ply",
+        help="Root directory of YCB models.",
+    )
     args = parser.parse_args()
 
-    run_ho3d_all(args.data_path, args.out_dir, args.config_path)
+    run_ycbineoat_all(
+        data_path=args.data_path,
+        out_dir=args.out_dir,
+        config_path=args.config_path,
+        model_path=args.model_path,
+    )

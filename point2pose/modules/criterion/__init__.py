@@ -6,3 +6,6 @@ from .rotation_grid_criterion import RotationGridCriterion
 from .rotation_thres_criterion import RotationThresholdCriterion
 from .mask_area_criterion import MaskAreaCriterion
 from .rotation_thres_and_min_num_criterion import RotationThresholdAndMinNumCriterion
+from .rotation_thres_min_num_spread_criterion import (
+    RotationThresholdAndMinNumSpreadCriterion,
+)
