@@ -4,7 +4,7 @@ pipeline:
   type: modular
   params:
     max_num_obj: 1
-    estimate_init_pose: false
+    estimate_init_pose: true
 
     use_segmenter: true
 
@@ -13,7 +13,7 @@ pipeline:
     fill_missing_depth_window_size: 5
     fill_missing_depth_min_neighbors: 1
     min_depth: 0.1
-    max_depth: 1.5
+    max_depth: 2
 
     use_depth_estimate: false
     depth_estimator_type: depth_anything
@@ -23,24 +23,20 @@ pipeline:
     max_rel_rotation_deg: 15
     max_rel_translation: 0.03
 
-    kf_gating: true
-    anchor_rot_deg: 15.0
+    kf_gating: True
+    anchor_rot_deg: 10.0
     anchor_trans: 0.05
-    anchor_min_inliers: 10
-    anchor_min_inlier_ratio: 0.001
-    anchor_max_median_res: 1.0
+    anchor_min_inliers: 5
+    anchor_min_inlier_ratio: 0.3
+    anchor_max_median_res: 0.01
     anchor_vel_hist_len: 5
-    anchor_vel_rot_deg: 300.0
-    anchor_vel_trans: 100.0
+    anchor_vel_rot_deg: 10.0
+    anchor_vel_trans: 0.05
 
-    sdf_kf_gate : false
-    sdf_kf_gate_thres: 0.05
-    sdf_kf_gate_percentile: 70.0
-    sdf_kf_gate_min_dense: 200
 
     frame_reg_mode: f2m
     use_dense_registration: false
-    use_local_graph: true
+    use_local_graph: false
 
     debug_level: 0
     debug_dir: /home/justin/code/point-to-pose/debug/
@@ -53,38 +49,25 @@ pipeline:
     save_cropped_pcd: false
     cropped_pcd_dir: /home/justin/code/point-to-pose/debug/cropped_pcd
 
-reconstructor:
-  type: sdf_builder
-  params:
-    build_sdf_after_global_opt: true
-    sdf_use_gpu: true
-    # nvblox, tsdf_python
-    sdf_backend: nvblox
-    sdf_voxel_size: 0.005
-    sdf_bounds_padding: 0.02
-    sdf_min_points: 300
-    sdf_filter_max_radius: 0.25
-    sdf_filter_keep_percentile: 98.0
-
 
 
 # register:
-  # svd_ransac, svd_residual_outlier, svd_uncertainty_outlier, svd_cluster_ransac
-  # type: svd_residual_outlier
-  # params:
-  #   remove_outside_mask: true
-  #   debug_level: 0
-  #   max_iter: 15
-  #   uncer_thres: 0.3
-  #   threshold_method: mad
-  #   inlier_thres: 0.01
-  #   thres_reduce_factor: 0.005
-  #   mad_scale: 5
-  #   min_inliers: 3
-  #   min_variance: 1e-2
+#   # svd_ransac, svd_residual_outlier, svd_uncertainty_outlier, svd_cluster_ransac
+#   type: svd_residual_outlier
+#   params:
+#     remove_outside_mask: true
+#     debug_level: 0
+#     max_iter: 15
+#     uncer_thres: 0.3
+#     threshold_method: mad
+#     inlier_thres: 0.01
+#     thres_reduce_factor: 0.005
+#     mad_scale: 5
+#     min_inliers: 3
+#     min_variance: 1e-2
 
-  #   # outlier pose
-  #   residual_thres: 0.007
+#     # outlier pose
+#     residual_thres: 0.007
     
 register:
   type: svd_cluster_ransac
@@ -92,18 +75,13 @@ register:
     ransac_iters: 100
     sample_size: 4
     inlier_thres: 0.005
-    min_inliers: 5
+    min_inliers: 4
     max_clusters: 10
     use_uncertainty: true
     min_variance: 1e-2
 
-    # reproj_error, dist_to_prev, inlier_count, mean_residual, reproj_error_iou, 3d_dist, 3d_dist_prev_kf, 3d_dist_sparse_map, 3d_dist_dense_map
-    select_method: 3d_dist_dense_map
-    select_3d_dist_min_depth: 0.08
-    select_3d_dist_max_depth: 1.5
-    select_3d_dist_fill_missing_depth: true
-    select_3d_dist_window_size: 5
-    select_3d_dist_min_neighbors: 1
+    # reproj_error, dist_to_prev, inlier_count, mean_residual, reproj_error_iou, 3d_dist, 3d_dist_prev_kf
+    select_method: 3d_dist
 
     # front end
     remove_outside_mask: true
@@ -193,15 +171,15 @@ tracker:
 #     debug: false
 
 sampler: 
-  type: uniform_fps
+  type: super_point
   params:
-    num_points: 30
+    num_points: 25
     density_per_kpx: -1
     fps_oversample_factor: 3
 
     min_points: 5
     max_points: 50
-    edge_margin_px: 5
+    edge_margin_px: 3
     remove_convex_hull: false
     inflate_points: false
     inflate_radius_px: 20
@@ -213,7 +191,7 @@ sampler:
 
     super_point_max_num_keypoints: 512
 
-    debug_level: 0
+    debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/sampler
     debug_save_superpoint: false
 
@@ -258,10 +236,10 @@ local_optimizer:
     max_iterations: 20
     relative_error_tol: 1e-5
     absolute_error_tol: 1e-5
-    prior_noise_param: [1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6]
+    prior_noise_param: [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000]
     uncertainty_thres: 0.3
     uncertainty_min: 1e-2
-    use_between_factor: true
+    use_between_factor: false
     landmark_sigma_scale_by: residual
     landmark_sigma_min: 1e-3
     landmark_huber_k: 1.0
@@ -273,7 +251,7 @@ global_optimizer:
     relinearize_skip: 1
     relative_error_tol: 1e-5
     absolute_error_tol: 1e-5
-    prior_noise_param: [1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6]
+    prior_noise_param: [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000]
     uncertainty_thres: 0.3
     uncertainty_min: 1e-2
     use_between_factor: true

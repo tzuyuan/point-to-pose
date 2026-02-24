@@ -45,6 +45,21 @@ class SVDClusterRANSACRegister(Register):
             config.get("select_robust_percentile", 70.0)
         )
         self._select_bad_penalty = float(config.get("select_bad_penalty", 0.02))
+        self._select_3d_dist_min_depth = float(
+            config.get("select_3d_dist_min_depth", 0.08)
+        )
+        self._select_3d_dist_max_depth = float(
+            config.get("select_3d_dist_max_depth", 0.5)
+        )
+        self._select_3d_dist_fill_missing_depth = bool(
+            config.get("select_3d_dist_fill_missing_depth", False)
+        )
+        self._select_3d_dist_window_size = int(
+            config.get("select_3d_dist_window_size", 3)
+        )
+        self._select_3d_dist_min_neighbors = int(
+            config.get("select_3d_dist_min_neighbors", 1)
+        )
 
         self._min_var = float(config.get("min_variance", 1e-2))
 
@@ -137,8 +152,24 @@ class SVDClusterRANSACRegister(Register):
             best_cluster_idx = int(np.argmax(reproj_errors))
         elif self._select_method == "3d_dist":
             dist_errors = []
-            src_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
-            tgt_pcd_full = extract_cropped_point_cloud(prev_frame, obj_id)
+            src_pcd_full = extract_cropped_point_cloud(
+                cur_frame,
+                obj_id,
+                min_depth=self._select_3d_dist_min_depth,
+                max_depth=self._select_3d_dist_max_depth,
+                fill_missing_depth=self._select_3d_dist_fill_missing_depth,
+                window_size=self._select_3d_dist_window_size,
+                min_neighbors=self._select_3d_dist_min_neighbors,
+            )
+            tgt_pcd_full = extract_cropped_point_cloud(
+                prev_frame,
+                obj_id,
+                min_depth=self._select_3d_dist_min_depth,
+                max_depth=self._select_3d_dist_max_depth,
+                fill_missing_depth=self._select_3d_dist_fill_missing_depth,
+                window_size=self._select_3d_dist_window_size,
+                min_neighbors=self._select_3d_dist_min_neighbors,
+            )
             for c in candidates:
                 src_pcd_full_cur = src_pcd_full.copy()
                 T_cur2prev = prev_T @ inverse_SE3(c["T"])
@@ -176,7 +207,15 @@ class SVDClusterRANSACRegister(Register):
             #     return prev_T, stats  # fallback to prev_T if all candidates are bad
         elif self._select_method == "3d_dist_sparse_map":
             dist_errors = []
-            trg_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
+            trg_pcd_full = extract_cropped_point_cloud(
+                cur_frame,
+                obj_id,
+                min_depth=self._select_3d_dist_min_depth,
+                max_depth=self._select_3d_dist_max_depth,
+                fill_missing_depth=self._select_3d_dist_fill_missing_depth,
+                window_size=self._select_3d_dist_window_size,
+                min_neighbors=self._select_3d_dist_min_neighbors,
+            )
             # map_pts = obj.key_points
             for c in candidates:
                 map_pts = obj.key_points.copy()
@@ -199,7 +238,15 @@ class SVDClusterRANSACRegister(Register):
 
         elif self._select_method == "3d_dist_dense_map":
             dist_errors = []
-            trg_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
+            trg_pcd_full = extract_cropped_point_cloud(
+                cur_frame,
+                obj_id,
+                min_depth=self._select_3d_dist_min_depth,
+                max_depth=self._select_3d_dist_max_depth,
+                fill_missing_depth=self._select_3d_dist_fill_missing_depth,
+                window_size=self._select_3d_dist_window_size,
+                min_neighbors=self._select_3d_dist_min_neighbors,
+            )
             # map_pts = obj.key_points
             for c in candidates:
                 T_map2cur = c["T"]

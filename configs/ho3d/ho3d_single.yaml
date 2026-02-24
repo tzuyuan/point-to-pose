@@ -4,9 +4,9 @@ pipeline:
   type: modular
   params:
     max_num_obj: 1
-    estimate_init_pose: true
+    estimate_init_pose: false
 
-    use_segmenter: true
+    use_segmenter: false
 
     # depth related
     fill_missing_depth: true
@@ -37,7 +37,6 @@ pipeline:
     sdf_kf_gate_thres: 0.05
     sdf_kf_gate_percentile: 70.0
     sdf_kf_gate_min_dense: 200
-    sdf_backend: nvblox
 
     frame_reg_mode: f2m
     use_dense_registration: false
@@ -53,6 +52,18 @@ pipeline:
     meta_data_save_path: /home/justin/code/point-to-pose/debug/pipeline/meta_data
     save_cropped_pcd: false
     cropped_pcd_dir: /home/justin/code/point-to-pose/debug/cropped_pcd
+
+reconstructor:
+  type: sdf_builder
+  params:
+    build_sdf_after_global_opt: true
+    sdf_use_gpu: true
+    sdf_backend: python_tsdf
+    sdf_voxel_size: 0.005
+    sdf_bounds_padding: 0.02
+    sdf_min_points: 300
+    sdf_filter_max_radius: 0.25
+    sdf_filter_keep_percentile: 98.0
 
 
 
@@ -250,7 +261,7 @@ local_optimizer:
     landmark_huber_k: 1.0
 
 global_optimizer:
-  type: lm_graph_sdf
+  type: lm_graph
   params:
     relinearize_threshold: 0.1
     relinearize_skip: 1

@@ -330,6 +330,7 @@ class FrontEnd:
                     T_c2w_est = prev_pose
                     mean_res = -1.0
                     stats_reg = {"inliers": np.array([]), "residuals": np.array([])}
+                    obj.lost = True
 
                 stats_reg["correspond_curr3d"] = correspond_curr3d
                 stats_reg["valid_idx"] = idx

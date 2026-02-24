@@ -75,7 +75,7 @@ class LMGraphSDFOptimizer(Optimizer):
 
         # 3) Optional SDF factors on newly created landmarks.
         self._use_sdf_factors = bool(config.get("use_sdf_factors", True))
-        self._sdf_noise_sigma = float(config.get("sdf_noise_sigma", 0.02))
+        self._sdf_noise_sigma = float(config.get("sdf_noise_sigma", 0.0001))
         self._sdf_use_robust = bool(config.get("sdf_use_robust", True))
         self._sdf_huber_k = float(config.get("sdf_huber_k", 1.345))
         self._sdf_fd_step = float(config.get("sdf_fd_step", 0.5))
@@ -268,7 +268,14 @@ class LMGraphSDFOptimizer(Optimizer):
 
         h = max(h, 1e-5)
         offsets = np.array(
-            [[h, 0.0, 0.0], [-h, 0.0, 0.0], [0.0, h, 0.0], [0.0, -h, 0.0], [0.0, 0.0, h], [0.0, 0.0, -h]],
+            [
+                [h, 0.0, 0.0],
+                [-h, 0.0, 0.0],
+                [0.0, h, 0.0],
+                [0.0, -h, 0.0],
+                [0.0, 0.0, h],
+                [0.0, 0.0, -h],
+            ],
             dtype=float,
         )
         pts6 = (pts[:, None, :] + offsets[None, :, :]).reshape(-1, 3)
@@ -571,7 +578,8 @@ class LMGraphSDFOptimizer(Optimizer):
 
                     # Add SDF unary constraint only when landmark is first added.
                     if self._use_sdf_factors and (
-                        self._active_sdf_volume is not None or self._active_sdf is not None
+                        self._active_sdf_volume is not None
+                        or self._active_sdf is not None
                     ):
                         self._graph.push_back(self._make_sdf_factor(Lj))
 

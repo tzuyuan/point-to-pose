@@ -360,7 +360,7 @@ class LMGraphOptimizer(Optimizer):
         # Skip LM on first call
         if not self._initialized:
             self._initialized = True
-            return None
+            # return None
 
         # Run LM optimization
         try:

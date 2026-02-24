@@ -7,6 +7,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 import os
 import argparse
+import shutil
 
 import cv2
 from omegaconf import OmegaConf
@@ -31,6 +32,11 @@ from point2pose.utils.evaluation import (
     plot_pose_errors,
     plot_pose_error_comparison,
     plot_recall_vs_threshold,
+)
+from point2pose.utils.mesh_eval import (
+    export_final_meshes_from_pipeline,
+    evaluate_reconstructed_mesh,
+    find_gt_visible_mesh_path,
 )
 
 
@@ -71,13 +77,18 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
     out_folder = os.path.join(out_dir, video_name, "")
     vis_folder = os.path.join(out_folder, "output_images")
     with_gt_folder = os.path.join(out_folder, "with_gt")
+    mesh_folder = os.path.join(out_folder, "mesh")
 
-    os.system(f"rm -rf {out_folder} && mkdir -p {out_folder}")
-    os.system(f"rm -rf {vis_folder} && mkdir -p {vis_folder}")
-    os.system(f"rm -rf {with_gt_folder} && mkdir -p {with_gt_folder}")
+    if os.path.exists(out_folder):
+        shutil.rmtree(out_folder)
+    os.makedirs(vis_folder, exist_ok=True)
+    os.makedirs(with_gt_folder, exist_ok=True)
+    os.makedirs(mesh_folder, exist_ok=True)
 
     cfg = OmegaConf.load(config_path)
     vis_cfg = cfg.visualization.params
+    cfg.pipeline.params.sdf_mesh_save_dir = mesh_folder
+    cfg.pipeline.params.sdf_mesh_save_every = 1
 
     # Set meta_data_save_path to save in the results folder for this dataset
     if cfg.pipeline.params.get("save_meta_data", True):
@@ -160,6 +171,8 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
             pred_pose_color=(0, 255, 0),
         )
 
+    mesh_paths = export_final_meshes_from_pipeline(pipeline, mesh_folder)
+
     if len(gt_poses) == 0:
         print(
             f"Warning: No GT poses found for video {video_name}, skipping evaluation."
@@ -168,6 +181,7 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
 
     gt_poses = np.array(gt_poses)
     pred_poses = np.array(out_poses)[gt_ids]
+    pred_poses_raw = pred_poses.copy()
 
     ######### Align first frame
     pred_poses = pred_poses @ inverse_SE3(pred_poses[0]) @ gt_poses[0]
@@ -243,6 +257,20 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
         max_threshold=10.0,
     )
 
+    gt_visible_mesh_path = find_gt_visible_mesh_path(reader.video_dir)
+    mesh_cd_cm = evaluate_reconstructed_mesh(
+        pred_mesh_path=mesh_paths.get(0, None),
+        gt_visible_mesh_path=gt_visible_mesh_path,
+        output_dir=mesh_folder,
+        mesh_prefix=video_name,
+        pred_pose_first=pred_poses_raw[0],
+        gt_pose_first=gt_poses[0],
+    )
+    if np.isfinite(mesh_cd_cm):
+        print(f"video {video_name}, mesh_CD: {mesh_cd_cm:.3f}[cm]")
+    else:
+        print(f"video {video_name}, mesh_CD: skipped")
+
     # Return metrics for summary
     return {
         "video_name": video_name,
@@ -250,6 +278,7 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
         "add_err_mean": add_errs.mean() * 100,
         "add_s_auc": adds_auc,
         "add_auc": add_auc,
+        "mesh_cd_cm": mesh_cd_cm,
     }
 
 
@@ -291,7 +320,8 @@ def run_ho3d_all(data_path: str, out_dir: str, config_path: str):
         print(
             f"{result['video_name']}, ADD-S_err: {result['add_s_err_mean']:.2f}[cm], "
             f"ADD_errs: {result['add_err_mean']:.2f}[cm], "
-            f"ADD-S_AUC: {result['add_s_auc']:.2f}, ADD_AUC: {result['add_auc']:.2f}"
+            f"ADD-S_AUC: {result['add_s_auc']:.2f}, ADD_AUC: {result['add_auc']:.2f}, "
+            f"mesh_CD: {result['mesh_cd_cm']:.3f}[cm]"
         )
 
     # Compute averages
@@ -300,12 +330,15 @@ def run_ho3d_all(data_path: str, out_dir: str, config_path: str):
         avg_add_err = np.mean([r["add_err_mean"] for r in results])
         avg_add_s_auc = np.mean([r["add_s_auc"] for r in results])
         avg_add_auc = np.mean([r["add_auc"] for r in results])
+        valid_mesh = [r["mesh_cd_cm"] for r in results if np.isfinite(r["mesh_cd_cm"])]
+        avg_mesh_cd = float(np.mean(valid_mesh)) if len(valid_mesh) > 0 else np.inf
 
         print("-" * 80)
         print(
             f"Average, ADD-S_err: {avg_add_s_err:.2f}[cm], "
             f"ADD_errs: {avg_add_err:.2f}[cm], "
-            f"ADD-S_AUC: {avg_add_s_auc:.2f}, ADD_AUC: {avg_add_auc:.2f}"
+            f"ADD-S_AUC: {avg_add_s_auc:.2f}, ADD_AUC: {avg_add_auc:.2f}, "
+            f"mesh_CD: {avg_mesh_cd:.3f}[cm]"
         )
         print("=" * 80)
 

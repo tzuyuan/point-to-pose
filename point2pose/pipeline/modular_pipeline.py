@@ -36,7 +36,7 @@ class ModularPipeline:
         self.local_optimizer = LocalOptimizer(cfg)
         self.kf_graph = KeyFrameGraph(cfg)
         self.recovery_manager = RecoveryManager(cfg)
-        self.sdf_builder = SDFBuilder(self.pipeline_cfg)
+        self.sdf_builder = SDFBuilder(cfg.reconstructor.params)
 
         # State
         self.track_table = PointTrackTable.new(n0=0)
@@ -177,7 +177,7 @@ class ModularPipeline:
                 self.num_obj = np.sum(
                     np.asarray(self.frontend.segmenter.input_labels) == 1
                 )
-
+        print(f"Initialized with {self.num_obj} objects based on segmenter output.")
         for obj_id in range(self.num_obj):
             self.objects.append(Object(obj_id))
             self.objects[obj_id].pose = np.eye(4)
@@ -222,16 +222,14 @@ class ModularPipeline:
                         visible_uncertainties=visible_uncertainties,
                         reg_cur_3d=self.objects[obj_id].key_points,
                         reg_cur_3d_idx=self.objects[obj_id].kp_track_indices,
-                        reg_valid_idx=valid_idx,
+                        reg_valid_idx=self.objects[obj_id].kp_track_indices,
                         reg_inliers=np.ones(
                             len(self.objects[obj_id].key_points), dtype=bool
                         ),
-                        reg_residuals=0.001
+                        reg_residuals=0.00001
                         * np.ones(len(self.objects[obj_id].key_points)),
-                        reg_uncertainties=0.01
+                        reg_uncertainties=0.000001
                         * np.ones(len(self.objects[obj_id].key_points)),
-                        sdf=self.objects[obj_id].sdf,
-                        sdf_volume=self.objects[obj_id].sdf_volume,
                     )
                 )
 
@@ -475,8 +473,6 @@ class ModularPipeline:
                     reg_uncertainties=fe_result.uncertainties[
                         fe_result.valid_indices[obj_id]
                     ],
-                    sdf=self.objects[obj_id].sdf,
-                    sdf_volume=self.objects[obj_id].sdf_volume,
                 )
 
                 opt_result = self.local_optimizer.optimize(object_frame_data)

@@ -3,7 +3,7 @@ from pathlib import Path
 import time
 import os
 import argparse
-import glob
+import shutil
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
@@ -31,6 +31,11 @@ from point2pose.utils.evaluation import (
     plot_pose_errors,
     plot_pose_error_comparison,
     plot_recall_vs_threshold,
+)
+from point2pose.utils.mesh_eval import (
+    export_final_meshes_from_pipeline,
+    evaluate_reconstructed_mesh,
+    find_gt_visible_mesh_path,
 )
 
 
@@ -94,13 +99,18 @@ def run_ycbineoat_single(
     out_folder = os.path.join(out_dir, video_name, "")
     vis_folder = os.path.join(out_folder, "output_images")
     with_gt_folder = os.path.join(out_folder, "with_gt")
+    mesh_folder = os.path.join(out_folder, "mesh")
 
-    os.system(f"rm -rf {out_folder} && mkdir -p {out_folder}")
-    os.system(f"rm -rf {vis_folder} && mkdir -p {vis_folder}")
-    os.system(f"rm -rf {with_gt_folder} && mkdir -p {with_gt_folder}")
+    if os.path.exists(out_folder):
+        shutil.rmtree(out_folder)
+    os.makedirs(vis_folder, exist_ok=True)
+    os.makedirs(with_gt_folder, exist_ok=True)
+    os.makedirs(mesh_folder, exist_ok=True)
 
     cfg = OmegaConf.load(config_path)
     vis_cfg = cfg.visualization.params
+    cfg.pipeline.params.sdf_mesh_save_dir = mesh_folder
+    cfg.pipeline.params.sdf_mesh_save_every = 1
 
     # Set meta_data_save_path to save in the results folder for this dataset
     if cfg.pipeline.params.get("save_meta_data", True):
@@ -205,6 +215,7 @@ def run_ycbineoat_single(
             pred_pose_color=(0, 255, 0),
         )
 
+    mesh_paths = export_final_meshes_from_pipeline(pipeline, mesh_folder)
     gt_poses = np.array(gt_poses)
     # Filter pred_poses to those that have GT
     if len(gt_ids) > 0:
@@ -215,6 +226,7 @@ def run_ycbineoat_single(
 
     ######### Align first frame
     if len(pred_poses) > 0 and len(gt_poses) > 0:
+        pred_poses_raw = pred_poses.copy()
         pred_poses = pred_poses @ inverse_SE3(pred_poses[0]) @ gt_poses[0]
 
         adi_errs = []
@@ -285,6 +297,20 @@ def run_ycbineoat_single(
             show_plots=False,
             max_threshold=10.0,
         )
+
+        gt_visible_mesh_path = find_gt_visible_mesh_path(reader.video_dir)
+        mesh_cd_cm = evaluate_reconstructed_mesh(
+            pred_mesh_path=mesh_paths.get(0, None),
+            gt_visible_mesh_path=gt_visible_mesh_path,
+            output_dir=mesh_folder,
+            mesh_prefix=video_name,
+            pred_pose_first=pred_poses_raw[0],
+            gt_pose_first=gt_poses[0],
+        )
+        if np.isfinite(mesh_cd_cm):
+            print(f"video {video_name}, mesh_CD: {mesh_cd_cm:.3f}[cm]")
+        else:
+            print(f"video {video_name}, mesh_CD: skipped")
     else:
         print("Not enough poses for evaluation.")
 
@@ -303,7 +329,7 @@ if __name__ == "__main__":
         "--video_name",
         "-v",
         type=str,
-        default="tomato_soup_can_yalehand0",
+        default="bleach0",
         help="Name of the video folder (e.g. 0048 or bleach0)",
     )
     parser.add_argument(
@@ -315,7 +341,7 @@ if __name__ == "__main__":
         "--config_path",
         "-c",
         type=str,
-        default="./configs/ycbineoat/ycbineoat_single.yaml",  # Default to HO3D config as base, user might want to change
+        default="./configs/ycbineoat/ycbineoat_all.yaml",  # Default to HO3D config as base, user might want to change
         help="Path to configuration file",
     )
     parser.add_argument(

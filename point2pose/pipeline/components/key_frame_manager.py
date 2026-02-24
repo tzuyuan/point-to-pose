@@ -245,17 +245,17 @@ class KeyFrameManager:
             # )
 
             # Large rotation jump
-            rel_pose = cur_fe_result.rel_poses.get(obj_id)
-            if rel_pose is not None:
-                rot_magnitude = scipy_R.from_matrix(rel_pose[:3, :3]).magnitude()
-                angle_deg = np.degrees(rot_magnitude)
+            # rel_pose = cur_fe_result.rel_poses.get(obj_id)
+            # if rel_pose is not None:
+            #     rot_magnitude = scipy_R.from_matrix(rel_pose[:3, :3]).magnitude()
+            #     angle_deg = np.degrees(rot_magnitude)
 
-                if angle_deg > self.max_rel_rotation_deg:
-                    print(
-                        f"[KeyFrameManager] Frame {cur_frame.id}: Large rotation {angle_deg:.2f} deg "
-                        f"detected for obj {obj_id}. Skipping sampling."
-                    )
-                    continue
+            #     if angle_deg > self.max_rel_rotation_deg:
+            #         print(
+            #             f"[KeyFrameManager] Frame {cur_frame.id}: Large rotation {angle_deg:.2f} deg "
+            #             f"detected for obj {obj_id}. Skipping sampling."
+            #         )
+            #         continue
 
             # Decide whether this frame is a keyframe for this object
             if not self.criterion.check_sample_criterion(self.crit_ctx, obj_id):
@@ -272,6 +272,7 @@ class KeyFrameManager:
                     )
                 )
                 if not anchor_is_current:
+                    print("[KeyFrameManager] Skipping sampling")
                     continue
             else:
                 anchor_frame = cur_frame

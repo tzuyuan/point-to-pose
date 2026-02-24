@@ -3,7 +3,7 @@ from pathlib import Path
 import time
 import os
 import argparse
-import glob
+import shutil
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
@@ -32,18 +32,23 @@ from point2pose.utils.evaluation import (
     plot_pose_error_comparison,
     plot_recall_vs_threshold,
 )
+from point2pose.utils.mesh_eval import (
+    export_final_meshes_from_pipeline,
+    evaluate_reconstructed_mesh,
+    find_gt_visible_mesh_path,
+)
 
 
-def load_ycb_mesh(reader, model_root):
+def _canonical_object_name(reader, obj_name):
+    # Try explicit map first, then use the provided directory name.
+    return reader.videoname_to_object.get(obj_name, obj_name)
+
+
+def load_ycb_mesh(reader, model_root, obj_name):
     """
-    Load the YCB object mesh.
-    Overrides the hardcoded path in YcbineoatReader.get_gt_mesh
+    Load a YCB object mesh for one object name.
     """
-    video_name = reader.get_video_name()
-    ob_name = reader.videoname_to_object.get(video_name)
-
-    if not ob_name:
-        raise ValueError(f"No object mapping found for video: {video_name}")
+    ob_name = _canonical_object_name(reader, obj_name)
 
     # Common YCB model structure: {model_root}/{ob_name}/textured_simple.obj
     # or {model_root}/models/{ob_name}/textured_simple.obj
@@ -67,7 +72,7 @@ def load_ycb_mesh(reader, model_root):
             f"Could not find mesh for {ob_name} in {model_root}. Checked: {candidates}"
         )
 
-    print(f"Loading mesh from {mesh_path}")
+    print(f"Loading mesh for {obj_name} from {mesh_path}")
     return trimesh.load(mesh_path)
 
 
@@ -94,13 +99,28 @@ def run_ycbineoat_single(
     out_folder = os.path.join(out_dir, video_name, "")
     vis_folder = os.path.join(out_folder, "output_images")
     with_gt_folder = os.path.join(out_folder, "with_gt")
+    mesh_folder = os.path.join(out_folder, "mesh")
 
-    os.system(f"rm -rf {out_folder} && mkdir -p {out_folder}")
-    os.system(f"rm -rf {vis_folder} && mkdir -p {vis_folder}")
-    os.system(f"rm -rf {with_gt_folder} && mkdir -p {with_gt_folder}")
+    if os.path.exists(out_folder):
+        shutil.rmtree(out_folder)
+    os.makedirs(vis_folder, exist_ok=True)
+    os.makedirs(with_gt_folder, exist_ok=True)
+    os.makedirs(mesh_folder, exist_ok=True)
 
     cfg = OmegaConf.load(config_path)
     vis_cfg = cfg.visualization.params
+    cfg.pipeline.params.sdf_mesh_save_dir = mesh_folder
+    cfg.pipeline.params.sdf_mesh_save_every = 1
+    object_names = reader.get_object_names()
+    print(f"Found objects in video {video_name}: {object_names}")
+    if len(object_names) == 0:
+        raise RuntimeError(
+            f"No objects found under {os.path.join(video_path, 'masks')}"
+        )
+
+    cfg.pipeline.params.max_num_obj = len(object_names)
+    # We provide dataset masks directly.
+    cfg.pipeline.params.use_segmenter = False
 
     # Set meta_data_save_path to save in the results folder for this dataset
     if cfg.pipeline.params.get("save_meta_data", True):
@@ -114,42 +134,28 @@ def run_ycbineoat_single(
     else:
         raise ValueError(f"Invalid pipeline type: {cfg.pipeline.type}")
 
-    # Load mesh using helper instead of reader.get_gt_mesh()
-    mesh = load_ycb_mesh(reader, model_path)
-    gt_bbox_minmax = gt_bbox_minmax_from_mesh(mesh)
+    # Load mesh and bbox for each object.
+    meshes = {}
+    gt_bbox_minmax_by_object = {}
+    for obj_name in object_names:
+        mesh = load_ycb_mesh(reader, model_path, obj_name)
+        meshes[obj_name] = mesh
+        gt_bbox_minmax_by_object[obj_name] = gt_bbox_minmax_from_mesh(mesh)
 
-    out_poses = []
-    gt_poses = []
-    gt_ids = []
+    out_poses_by_object = {obj_name: [] for obj_name in object_names}
+    gt_poses_by_object = {obj_name: [] for obj_name in object_names}
+    gt_ids_by_object = {obj_name: [] for obj_name in object_names}
 
-    for i, color_file in enumerate(reader.color_files):
-        # YcbineoatReader.get_color returns RGB resized, but we can also just read the file directly
-        # consistent with run_ho3d_single.py which reads the file and converts.
-        # However, Reader might handle resizing if downscale != 1.
-        # Let's rely on the reader to get dimensions right if downscale is used,
-        # but Ho3dReader in run_ho3d_single reads directly.
-        # YcbineoatReader stores W, H scaled.
-
-        # Let's use cv2.imread and resize manually to match reader.W/H if needed,
-        # or use reader.get_color(i) which returns RGB.
-        # pipeline expects RGB usually.
-
-        # reader.get_color(i) returns RGB image resized to self.W, self.H
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    for i in range(len(reader)):
         rgb = reader.get_color(i)
-
-        # reader.get_depth(i) returns depth in meters, resized
         depth = reader.get_depth(i)
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Use first mask in each object folder for initialization frame.
+        masks = reader.get_masks(i, use_init_mask=(i == 0))
+        mask = np.stack(masks, axis=0)  # [N,H,W]
+        mask = torch.from_numpy(mask).unsqueeze(1).to(device)  # [N,1,H,W]
 
-        mask = reader.get_mask(
-            i
-        )  # returns uint8 mask 0 or 1 (or 255?) - verify datareader
-        # YcbineoatReader.get_mask: returns (H,W) 0 or 1 (boolean cast to uint8)
-
-        mask = torch.from_numpy(mask).unsqueeze(0).unsqueeze(0).to(device)
-
-        # Create Frame object
         frame = Frame(
             id=i,
             rgb=rgb,
@@ -160,20 +166,33 @@ def run_ycbineoat_single(
             timestamp=time.time(),
         )
 
-        # get out pose from the pipeline
         out_pose = pipeline.step(frame)
-        out_poses.append(out_pose.reshape(4, 4))
+        if out_pose.ndim == 2:
+            out_pose = out_pose.reshape(1, 4, 4)
+        n_from_pipeline = min(len(object_names), out_pose.shape[0])
 
-        # get gt pose from the reader
-        gt_pose = reader.get_gt_pose(i)
-        if gt_pose is not None:
-            gt_ids.append(i)
+        gt_pose_map = reader.get_gt_poses(i)
+
+        for obj_idx, obj_name in enumerate(object_names[:n_from_pipeline]):
+            pred_pose = out_pose[obj_idx].reshape(4, 4)
+            out_poses_by_object[obj_name].append(pred_pose)
+            gt_pose = gt_pose_map.get(obj_name, None)
+            if gt_pose is not None:
+                gt_ids_by_object[obj_name].append(i)
+                gt_poses_by_object[obj_name].append(gt_pose)
+            if i == 0 and gt_pose is not None and obj_idx < len(pipeline.objects):
+                pipeline.objects[obj_idx].init_pose = gt_pose
+
+        gt_poses = []
+        gt_indices = []
+        gt_bbox_by_index = {}
+        for obj_idx, obj_name in enumerate(object_names[:n_from_pipeline]):
+            gt_pose = gt_pose_map.get(obj_name, None)
+            if gt_pose is None:
+                continue
+            gt_indices.append(obj_idx)
             gt_poses.append(gt_pose)
-
-        if i == 0 and gt_pose is not None:
-            pipeline.objects[0].init_pose = gt_pose
-        elif i == 0:
-            print("Warning: No GT pose for first frame!")
+            gt_bbox_by_index[obj_idx] = gt_bbox_minmax_by_object[obj_name]
 
         display_frame = visualize_and_save_tracking_results(
             frame=frame,
@@ -185,46 +204,55 @@ def run_ycbineoat_single(
             save_images=vis_cfg.save_images,
             output_image_dir=vis_folder,
             camera_intrinsics=reader.K,
-            bbox_min_max=gt_bbox_minmax,
+            bbox_min_max=gt_bbox_by_index,
         )
 
-        visualize_and_save_tracking_results_with_gt(
+        gt_overlay_frame = visualize_and_save_tracking_results_with_gt(
             frame=frame,
             objects=pipeline.objects,
             track_table=pipeline.track_table,
             est_result_frame=display_frame,
-            gt_pose=gt_pose,
+            gt_poses=gt_poses,
+            gt_object_indices=gt_indices,
             frame_id=i,
             visualize_points=vis_cfg.visualize_points,
             points_vis_method=vis_cfg.points_vis_method,
             save_images=vis_cfg.save_images,
             output_image_dir=with_gt_folder,
             camera_intrinsics=reader.K,
-            bbox_min_max=gt_bbox_minmax,
-            gt_bbox_min_max=gt_bbox_minmax,
+            bbox_min_max=gt_bbox_by_index,
+            gt_bbox_min_max_by_object=gt_bbox_by_index,
             pred_pose_color=(0, 255, 0),
         )
 
-    gt_poses = np.array(gt_poses)
-    # Filter pred_poses to those that have GT
-    if len(gt_ids) > 0:
-        pred_poses = np.array(out_poses)[gt_ids]
-    else:
-        print("No GT poses found, skipping evaluation.")
-        return
+        if vis_cfg.save_images:
+            out_path = os.path.join(with_gt_folder, f"frame_{i:06d}.png")
+            cv2.imwrite(out_path, gt_overlay_frame)
 
-    ######### Align first frame
-    if len(pred_poses) > 0 and len(gt_poses) > 0:
+    per_object_results = {}
+    all_adi_errs = []
+    all_add_errs = []
+    for obj_name in object_names:
+        gt_ids = gt_ids_by_object[obj_name]
+        if len(gt_ids) == 0:
+            print(f"[{obj_name}] No GT poses found, skipping object evaluation.")
+            continue
+
+        pred_poses = np.array(out_poses_by_object[obj_name])[gt_ids]
+        gt_poses = np.array(gt_poses_by_object[obj_name])
+        if len(pred_poses) == 0 or len(gt_poses) == 0:
+            print(f"[{obj_name}] Not enough poses for evaluation.")
+            continue
+
+        # Align first valid frame for this object.
+        pred_poses_raw = pred_poses.copy()
         pred_poses = pred_poses @ inverse_SE3(pred_poses[0]) @ gt_poses[0]
-
         adi_errs = []
         add_errs = []
-
-        # mesh already loaded
-
         for i in range(len(pred_poses)):
-            adi = adi_err(pred_poses[i], gt_poses[i], mesh.vertices.copy())
-            add = add_err(pred_poses[i], gt_poses[i], mesh.vertices.copy())
+            verts = meshes[obj_name].vertices.copy()
+            adi = adi_err(pred_poses[i], gt_poses[i], verts)
+            add = add_err(pred_poses[i], gt_poses[i], verts)
             adi_errs.append(adi)
             add_errs.append(add)
 
@@ -233,16 +261,32 @@ def run_ycbineoat_single(
         adds_auc = compute_auc(adi_errs) * 100
         add_auc = compute_auc(add_errs) * 100
 
+        per_object_results[obj_name] = {
+            "pred_poses": pred_poses,
+            "pred_poses_raw": pred_poses_raw,
+            "gt_poses": gt_poses,
+            "adi_errs": adi_errs,
+            "add_errs": add_errs,
+            "adds_auc": adds_auc,
+            "add_auc": add_auc,
+        }
+        all_adi_errs.append(adi_errs)
+        all_add_errs.append(add_errs)
+
         print(
-            f"video {video_name}, ADD-S_err: {adi_errs.mean()*100:.2f}[cm], ADD_errs: {add_errs.mean()*100:.2f}[cm], ADD-S_AUC: {adds_auc:.2f}, ADD_AUC: {add_auc:.2f}"
+            f"video {video_name}, obj {obj_name}, "
+            f"ADD-S_err: {adi_errs.mean()*100:.2f}[cm], "
+            f"ADD_errs: {add_errs.mean()*100:.2f}[cm], "
+            f"ADD-S_AUC: {adds_auc:.2f}, ADD_AUC: {add_auc:.2f}"
         )
 
-        # Generate evaluation plots
+        obj_eval_dir = os.path.join(out_folder, "evaluation", obj_name)
+        os.makedirs(obj_eval_dir, exist_ok=True)
         plot_evaluation_results(
             add_s_errs=adi_errs,
             add_errs=add_errs,
-            video_name=video_name,
-            output_dir=out_folder,
+            video_name=f"{video_name}_{obj_name}",
+            output_dir=obj_eval_dir,
             save_plots=True,
             show_plots=False,
         )
@@ -250,18 +294,17 @@ def run_ycbineoat_single(
         plot_error_over_time(
             add_s_errs=adi_errs,
             add_errs=add_errs,
-            video_name=video_name,
-            output_dir=out_folder,
+            video_name=f"{video_name}_{obj_name}",
+            output_dir=obj_eval_dir,
             save_plots=True,
             show_plots=False,
         )
 
-        # Generate pose error plots
         plot_pose_errors(
             pred_poses=pred_poses,
             gt_poses=gt_poses,
-            video_name=video_name,
-            output_dir=out_folder,
+            video_name=f"{video_name}_{obj_name}",
+            output_dir=obj_eval_dir,
             save_plots=True,
             show_plots=False,
         )
@@ -269,24 +312,58 @@ def run_ycbineoat_single(
         plot_pose_error_comparison(
             pred_poses=pred_poses,
             gt_poses=gt_poses,
-            video_name=video_name,
-            output_dir=out_folder,
+            video_name=f"{video_name}_{obj_name}",
+            output_dir=obj_eval_dir,
             save_plots=True,
             show_plots=False,
         )
 
-        # Generate recall vs threshold plot
         plot_recall_vs_threshold(
             add_s_errs=adi_errs,
             add_errs=add_errs,
-            video_name=video_name,
-            output_dir=out_folder,
+            video_name=f"{video_name}_{obj_name}",
+            output_dir=obj_eval_dir,
             save_plots=True,
             show_plots=False,
             max_threshold=10.0,
         )
-    else:
-        print("Not enough poses for evaluation.")
+
+    mesh_paths = export_final_meshes_from_pipeline(pipeline, mesh_folder)
+
+    if len(per_object_results) == 0:
+        print("No GT poses found for any object, skipping evaluation.")
+        return
+
+    if len(all_adi_errs) > 0:
+        agg_adi = np.concatenate(all_adi_errs)
+        agg_add = np.concatenate(all_add_errs)
+        print(
+            f"video {video_name}, aggregate over {len(per_object_results)} objects, "
+            f"ADD-S_err: {agg_adi.mean()*100:.2f}[cm], "
+            f"ADD_errs: {agg_add.mean()*100:.2f}[cm], "
+            f"ADD-S_AUC: {compute_auc(agg_adi)*100:.2f}, "
+            f"ADD_AUC: {compute_auc(agg_add)*100:.2f}"
+        )
+
+    for obj_idx, obj_name in enumerate(object_names):
+        if obj_name not in per_object_results:
+            continue
+        pred_mesh_path = mesh_paths.get(obj_idx, None)
+        gt_visible_mesh_path = find_gt_visible_mesh_path(
+            reader.video_dir, obj_name=obj_name
+        )
+        mesh_cd_cm = evaluate_reconstructed_mesh(
+            pred_mesh_path=pred_mesh_path,
+            gt_visible_mesh_path=gt_visible_mesh_path,
+            output_dir=mesh_folder,
+            mesh_prefix=f"{video_name}_{obj_name}",
+            pred_pose_first=per_object_results[obj_name]["pred_poses_raw"][0],
+            gt_pose_first=per_object_results[obj_name]["gt_poses"][0],
+        )
+        if np.isfinite(mesh_cd_cm):
+            print(f"video {video_name}, obj {obj_name}, mesh_CD: {mesh_cd_cm:.3f}[cm]")
+        else:
+            print(f"video {video_name}, obj {obj_name}, mesh_CD: skipped")
 
 
 if __name__ == "__main__":
@@ -295,7 +372,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data_path",
         "-d",
-        default="/home/justin/data/YCBInEOAT",
+        default="/home/justin/data/test",
         type=str,
         help="Root directory containing video folders (e.g. /path/to/YCB_Video/data)",
     )
@@ -309,13 +386,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--out_dir",
         type=str,
-        default="./results/ycbineoat_single",
+        default="./results/ycbinisaac_single",
     )
     parser.add_argument(
         "--config_path",
         "-c",
         type=str,
-        default="./configs/ycbineoat/ycbineoat_single.yaml",  # Default to HO3D config as base, user might want to change
+        default="./configs/ho3d/ho3d_single.yaml",
         help="Path to configuration file",
     )
     parser.add_argument(

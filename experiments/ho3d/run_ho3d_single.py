@@ -7,6 +7,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 import os
 import argparse
+import shutil
 
 import cv2
 from omegaconf import OmegaConf
@@ -32,6 +33,11 @@ from point2pose.utils.evaluation import (
     plot_pose_error_comparison,
     plot_recall_vs_threshold,
 )
+from point2pose.utils.mesh_eval import (
+    export_final_meshes_from_pipeline,
+    evaluate_reconstructed_mesh,
+    find_gt_visible_mesh_path,
+)
 
 
 # Build a GT bbox (min/max in object frame) once per sequence
@@ -52,13 +58,18 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
     out_folder = os.path.join(out_dir, video_name, "")
     vis_folder = os.path.join(out_folder, "output_images")
     with_gt_folder = os.path.join(out_folder, "with_gt")
+    mesh_folder = os.path.join(out_folder, "mesh")
 
-    os.system(f"rm -rf {out_folder} && mkdir -p {out_folder}")
-    os.system(f"rm -rf {vis_folder} && mkdir -p {vis_folder}")
-    os.system(f"rm -rf {with_gt_folder} && mkdir -p {with_gt_folder}")
+    if os.path.exists(out_folder):
+        shutil.rmtree(out_folder)
+    os.makedirs(vis_folder, exist_ok=True)
+    os.makedirs(with_gt_folder, exist_ok=True)
+    os.makedirs(mesh_folder, exist_ok=True)
 
     cfg = OmegaConf.load(config_path)
     vis_cfg = cfg.visualization.params
+    cfg.pipeline.params.sdf_mesh_save_dir = mesh_folder
+    cfg.pipeline.params.sdf_mesh_save_every = 1
 
     # Set meta_data_save_path to save in the results folder for this dataset
     if cfg.pipeline.params.get("save_meta_data", True):
@@ -144,8 +155,14 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
         # if i == 100:
         #     break
 
+    mesh_paths = export_final_meshes_from_pipeline(pipeline, mesh_folder)
+    if len(gt_poses) == 0:
+        print(f"Warning: No GT poses found for video {video_name}, skipping evaluation.")
+        return
+
     gt_poses = np.array(gt_poses)
     pred_poses = np.array(out_poses)[gt_ids]
+    pred_poses_raw = pred_poses.copy()
 
     ######### Align first frame
     pred_poses = pred_poses @ inverse_SE3(pred_poses[0]) @ gt_poses[0]
@@ -217,6 +234,20 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
         show_plots=False,
         max_threshold=10.0,
     )
+
+    gt_visible_mesh_path = find_gt_visible_mesh_path(reader.video_dir)
+    mesh_cd_cm = evaluate_reconstructed_mesh(
+        pred_mesh_path=mesh_paths.get(0, None),
+        gt_visible_mesh_path=gt_visible_mesh_path,
+        output_dir=mesh_folder,
+        mesh_prefix=video_name,
+        pred_pose_first=pred_poses_raw[0],
+        gt_pose_first=gt_poses[0],
+    )
+    if np.isfinite(mesh_cd_cm):
+        print(f"video {video_name}, mesh_CD: {mesh_cd_cm:.3f}[cm]")
+    else:
+        print(f"video {video_name}, mesh_CD: skipped")
 
 
 if __name__ == "__main__":

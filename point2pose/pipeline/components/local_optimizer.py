@@ -46,7 +46,10 @@ class LocalOptimizer:
         """
         Run optimization for the corresponding object.
         """
+        print("-----------local optimizer------------")
         opt = self._get_optimizer(object_frame_data.obj_id)
+
+        print("------------------------------------")
         return opt.optimize(object_frame_data)
 
     def update_object_state(self, obj, opt_result: OptimizerResult, track_table):

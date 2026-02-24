@@ -439,17 +439,15 @@ class SDFBuilder:
     Uses keyframe dense observations and stores the latest TSDF arrays on object.sdf.
     """
 
-    def __init__(self, pipeline_cfg):
-        self.enabled = bool(pipeline_cfg.get("build_sdf_after_global_opt", True))
-        self.use_gpu = bool(pipeline_cfg.get("sdf_use_gpu", True))
-        self.backend = str(pipeline_cfg.get("sdf_backend", "nvblox")).lower()
-        self.voxel_size = float(pipeline_cfg.get("sdf_voxel_size", 0.005))
-        self.padding = float(pipeline_cfg.get("sdf_bounds_padding", 0.02))
-        self.min_points = int(pipeline_cfg.get("sdf_min_points", 300))
-        self.max_radius = float(pipeline_cfg.get("sdf_filter_max_radius", 0.25))
-        self.keep_percentile = float(
-            pipeline_cfg.get("sdf_filter_keep_percentile", 98.0)
-        )
+    def __init__(self, cfg):
+        self.enabled = bool(cfg.get("build_sdf_after_global_opt", True))
+        self.use_gpu = bool(cfg.get("sdf_use_gpu", True))
+        self.backend = str(cfg.get("sdf_backend", "nvblox")).lower()
+        self.voxel_size = float(cfg.get("sdf_voxel_size", 0.005))
+        self.padding = float(cfg.get("sdf_bounds_padding", 0.02))
+        self.min_points = int(cfg.get("sdf_min_points", 300))
+        self.max_radius = float(cfg.get("sdf_filter_max_radius", 0.25))
+        self.keep_percentile = float(cfg.get("sdf_filter_keep_percentile", 98.0))
 
     def _filter_points(self, pts_obj):
         if pts_obj.shape[0] == 0:

@@ -7,6 +7,53 @@ import torch
 from point2pose.utils.transform import to_homo
 
 
+def _normalize_object_masks(mask_data):
+    """
+    Normalize different mask formats into a list of 2D boolean object masks.
+    Supports list/tuple, torch.Tensor, and np.ndarray with shapes:
+      [N,1,H,W], [N,H,W], [1,H,W], [H,W], [H,W,1]
+    """
+    if mask_data is None:
+        return []
+
+    if isinstance(mask_data, (list, tuple)):
+        object_masks = []
+        for m in mask_data:
+            arr = (
+                m.detach().cpu().numpy()
+                if isinstance(m, torch.Tensor)
+                else np.asarray(m)
+            )
+            if arr.ndim == 3 and arr.shape[0] == 1:
+                arr = arr[0]
+            elif arr.ndim == 3 and arr.shape[-1] == 1:
+                arr = arr[..., 0]
+            if arr.ndim == 2:
+                object_masks.append(arr.astype(bool))
+        return object_masks
+
+    arr = (
+        mask_data.detach().cpu().numpy()
+        if isinstance(mask_data, torch.Tensor)
+        else np.asarray(mask_data)
+    )
+
+    if arr.ndim == 4:
+        if arr.shape[1] == 1:
+            return [arr[i, 0].astype(bool) for i in range(arr.shape[0])]
+        collapsed = np.any(arr > 0, axis=1)
+        return [collapsed[i].astype(bool) for i in range(collapsed.shape[0])]
+    if arr.ndim == 3:
+        if arr.shape[0] == 1:
+            return [arr[0].astype(bool)]
+        if arr.shape[-1] == 1:
+            return [arr[..., 0].astype(bool)]
+        return [arr[i].astype(bool) for i in range(arr.shape[0])]
+    if arr.ndim == 2:
+        return [arr.astype(bool)]
+    return []
+
+
 def draw_points_on_image(image, points, colors):
     # if points are tensor
     # print(points.shape)
@@ -194,6 +241,7 @@ def visualize_and_save_tracking_results(
     output_image_dir=None,
     camera_intrinsics=np.eye(3),
     bbox_min_max=None,
+    vis_mask=False,
 ):
     """
     Visualize tracking results on the frame
@@ -205,17 +253,15 @@ def visualize_and_save_tracking_results(
     height, width = display_frame.shape[:2]
 
     # Draw segmentation masks if available
-    if hasattr(frame, "mask") and frame.mask is not None:
+    if vis_mask and hasattr(frame, "mask") and frame.mask is not None:
+        object_masks = _normalize_object_masks(frame.mask)
         mask_overlay = np.zeros((height, width, 3), dtype=np.uint8)
         mask_overlay[..., 1] = 255  # Green base
 
-        for i in range(len(frame.mask)):
-            obj_mask = frame.mask[i, 0] > 0.0
-            ## TODO: optimize this by removing the cpu().numpy()
-            obj_mask = obj_mask.cpu().numpy()
+        for i, obj_mask in enumerate(object_masks):
             if np.any(obj_mask):
                 # Color each object differently
-                hue = (i + 3) / (len(frame.mask) + 3) * 255
+                hue = (i + 3) / (len(object_masks) + 3) * 255
                 mask_overlay[obj_mask, 0] = hue
                 mask_overlay[obj_mask, 2] = 255
 
@@ -339,18 +385,32 @@ def visualize_and_save_tracking_results(
     for i, obj in enumerate(objects):
         if obj.pose is not None:
             pose = obj.pose @ obj.init_pose
+            bbox_min_max_local = None
             if bbox_min_max is not None:
-                bbox_min_max_local = bbox_min_max
-            else:
-                half = 0.5 * np.asarray(obj.bbox.extent, dtype=float)
-                bbox_min_max_local = np.vstack([-half, +half])  # (2,3)
+                if isinstance(bbox_min_max, dict):
+                    bbox_min_max_local = bbox_min_max.get(i, None)
+                else:
+                    bbox_arr = np.asarray(bbox_min_max)
+                    if bbox_arr.ndim == 3 and i < len(bbox_min_max):
+                        bbox_min_max_local = bbox_min_max[i]
+                    elif bbox_arr.ndim == 2:
+                        bbox_min_max_local = bbox_min_max
 
-            display_frame = draw_posed_3d_box(
-                camera_intrinsics,
-                display_frame,
-                pose,
-                bbox_min_max_local,
-            )
+            if bbox_min_max_local is None:
+                obj_bbox = getattr(obj, "bbox", None)
+                if obj_bbox is not None and hasattr(obj_bbox, "extent"):
+                    half = 0.5 * np.asarray(obj_bbox.extent, dtype=float)
+                    bbox_min_max_local = np.vstack([-half, +half])  # (2,3)
+
+            if bbox_min_max_local is not None:
+                display_frame = draw_posed_3d_box(
+                    camera_intrinsics,
+                    display_frame,
+                    pose,
+                    bbox_min_max_local,
+                )
+
+            # Draw axis even when bbox is unavailable.
             display_frame = draw_xyz_axis(
                 image=display_frame, ob_in_cam=pose, K=camera_intrinsics
             )
@@ -369,6 +429,8 @@ def visualize_and_save_tracking_results_with_gt(
     track_table,
     est_result_frame=None,
     gt_pose=None,
+    gt_poses=None,
+    gt_object_indices=None,
     frame_id=None,
     visualize_points=True,
     points_vis_method="visible_uncertainty",
@@ -377,6 +439,7 @@ def visualize_and_save_tracking_results_with_gt(
     camera_intrinsics=np.eye(3),
     bbox_min_max=None,
     gt_bbox_min_max=None,
+    gt_bbox_min_max_by_object=None,
     pred_pose_color=(0, 255, 0),  # Green for predicted pose
     gt_pose_color=(0, 0, 255),  # Red for GT pose
 ):
@@ -422,38 +485,70 @@ def visualize_and_save_tracking_results_with_gt(
             bbox_min_max=bbox_min_max,
         )
 
-    # Now overlay GT pose and bounding box if provided
-    if gt_pose is not None:
-        # Use GT bbox if provided, otherwise use the same bbox as prediction
-        if gt_bbox_min_max is not None:
-            gt_bbox_min_max_local = gt_bbox_min_max
-        elif bbox_min_max is not None:
-            gt_bbox_min_max_local = bbox_min_max
+    # Build a unified list of GT overlays: (obj_idx, pose)
+    gt_items = []
+    if gt_poses is not None:
+        if isinstance(gt_poses, dict):
+            for obj_idx, pose in gt_poses.items():
+                if pose is not None:
+                    gt_items.append((int(obj_idx), pose))
         else:
-            # Fallback: try to get bbox from first object
-            if len(objects) > 0 and hasattr(objects[0], "bbox"):
-                half = 0.5 * np.asarray(objects[0].bbox.extent, dtype=float)
-                gt_bbox_min_max_local = np.vstack([-half, +half])  # (2,3)
+            if gt_object_indices is None:
+                gt_object_indices = range(len(gt_poses))
+            for obj_idx, pose in zip(gt_object_indices, gt_poses):
+                if pose is not None:
+                    gt_items.append((int(obj_idx), pose))
+    elif gt_pose is not None:
+        gt_items.append((0, gt_pose))
+
+    # Overlay GT pose and bounding box for each available object
+    for obj_idx, obj_gt_pose in gt_items:
+        # Select bbox for current GT object.
+        gt_bbox_min_max_local = None
+
+        if gt_bbox_min_max_by_object is not None:
+            if isinstance(gt_bbox_min_max_by_object, dict):
+                gt_bbox_min_max_local = gt_bbox_min_max_by_object.get(obj_idx, None)
             else:
-                gt_bbox_min_max_local = None
+                if 0 <= obj_idx < len(gt_bbox_min_max_by_object):
+                    gt_bbox_min_max_local = gt_bbox_min_max_by_object[obj_idx]
+
+        if gt_bbox_min_max_local is None and gt_bbox_min_max is not None:
+            gt_bbox_min_max_local = gt_bbox_min_max
+
+        if gt_bbox_min_max_local is None and bbox_min_max is not None:
+            if (
+                isinstance(bbox_min_max, (list, tuple, np.ndarray))
+                and np.asarray(bbox_min_max).ndim == 3
+            ):
+                if 0 <= obj_idx < len(bbox_min_max):
+                    gt_bbox_min_max_local = bbox_min_max[obj_idx]
+            else:
+                gt_bbox_min_max_local = bbox_min_max
+
+        if gt_bbox_min_max_local is None and 0 <= obj_idx < len(objects):
+            obj_bbox = getattr(objects[obj_idx], "bbox", None)
+            if obj_bbox is not None and hasattr(obj_bbox, "extent"):
+                half = 0.5 * np.asarray(obj_bbox.extent, dtype=float)
+                gt_bbox_min_max_local = np.vstack([-half, +half])  # (2,3)
 
         if gt_bbox_min_max_local is not None:
-            # Draw GT bounding box in red
+            # Draw GT bounding box
             display_frame = draw_posed_3d_box(
                 camera_intrinsics,
                 display_frame,
-                gt_pose,
+                obj_gt_pose,
                 gt_bbox_min_max_local,
                 line_color=gt_pose_color,
                 linewidth=2,
             )
-            # Draw GT coordinate axes in red
-            display_frame = draw_xyz_axis(
-                image=display_frame,
-                ob_in_cam=gt_pose,
-                K=camera_intrinsics,
-                thickness=3,
-            )
+        # Draw GT coordinate axes
+        display_frame = draw_xyz_axis(
+            image=display_frame,
+            ob_in_cam=obj_gt_pose,
+            K=camera_intrinsics,
+            thickness=3,
+        )
 
     # # Re-draw predicted pose with specified color to ensure it's visible
     # # (in case GT was drawn on top)

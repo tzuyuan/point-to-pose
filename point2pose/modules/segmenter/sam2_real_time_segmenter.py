@@ -54,25 +54,22 @@ class Sam2RealTimeSegmenter(Segmenter):
         Initialize the segmenter with the provided points or mask.
         """
         self.predictor.load_first_frame(image)
+        self.num_obj = 0
 
         # Initialize from mask if provided
         if mask is not None:
-            # Handle torch tensor
+            object_masks = self._extract_object_masks(mask)
+            added_obj = 0
 
-            if hasattr(mask, "cpu"):
-                mask = mask.cpu().numpy()
+            for mask_idx, object_mask in enumerate(object_masks):
+                # sample a few points within each object mask as prompt points
+                y_indices, x_indices = np.where(object_mask > 0)
+                if len(y_indices) == 0:
+                    print(
+                        f"[SAM2] Mask {mask_idx} is empty. Skipping object initialization."
+                    )
+                    continue
 
-            # Handle dimensions (1, 1, H, W) or (1, H, W) -> (H, W)
-            if mask.ndim == 4:
-                mask = mask[0, 0]
-            elif mask.ndim == 3:
-                mask = mask[0]
-
-            mask = mask.astype(bool)
-
-            # sample a few points within the mask as the prompt points
-            y_indices, x_indices = np.where(mask > 0)
-            if len(y_indices) > 0:
                 num_points = 5
                 if len(y_indices) > num_points:
                     indices = np.linspace(0, len(y_indices) - 1, num_points, dtype=int)
@@ -84,19 +81,21 @@ class Sam2RealTimeSegmenter(Segmenter):
                 ).astype(np.float32)
                 labels = np.ones(len(points), dtype=np.int32)
 
+                obj_id = self.num_obj + added_obj
                 self.predictor.add_new_prompt(
                     frame_idx=0,
-                    obj_id=0,
+                    obj_id=obj_id,
                     points=points,
                     labels=labels,
                 )
                 print(
-                    f"[SAM2] Added object 0 from {len(points)} points sampled from mask."
+                    f"[SAM2] Added object {obj_id} from mask {mask_idx} with {len(points)} sampled points."
                 )
-            else:
-                print("[SAM2] Mask provided but empty. No points sampled.")
+                added_obj += 1
 
-            self.num_obj = 1
+            self.num_obj += added_obj
+            if added_obj == 0:
+                print("[SAM2] Mask provided but no valid object masks were found.")
 
         # Add points to predictor if any exist
         # Return True if at least one object is added.
@@ -109,6 +108,56 @@ class Sam2RealTimeSegmenter(Segmenter):
             print(
                 "[SAM2] No objects added. Please call add_input_points() or provide a mask."
             )
+
+    def _extract_object_masks(self, mask):
+        """
+        Convert different mask formats into a list of 2D boolean masks (one per object).
+        Supports:
+            - torch.Tensor / np.ndarray
+            - list/tuple of per-object masks
+            - [N, 1, H, W], [N, H, W], [1, H, W], [H, W]
+            - labeled [H, W] maps (0 = background, each non-zero value = one object)
+        """
+        if isinstance(mask, (list, tuple)):
+            object_masks = []
+            for m in mask:
+                arr = m.cpu().numpy() if hasattr(m, "cpu") else np.asarray(m)
+                if arr.ndim == 3 and arr.shape[0] == 1:
+                    arr = arr[0]
+                elif arr.ndim == 3 and arr.shape[-1] == 1:
+                    arr = arr[..., 0]
+                object_masks.append(arr.astype(bool))
+            return object_masks
+
+        arr = mask.cpu().numpy() if hasattr(mask, "cpu") else np.asarray(mask)
+
+        if arr.ndim == 4:
+            # Typical SAM/seg tensors: [N, 1, H, W]
+            if arr.shape[1] == 1:
+                return [arr[i, 0].astype(bool) for i in range(arr.shape[0])]
+            # Fallback: collapse channel dimension if not singleton.
+            collapsed = np.any(arr > 0, axis=1)
+            return [collapsed[i].astype(bool) for i in range(collapsed.shape[0])]
+
+        if arr.ndim == 3:
+            if arr.shape[0] == 1:
+                return [arr[0].astype(bool)]
+            if arr.shape[-1] == 1:
+                return [arr[..., 0].astype(bool)]
+            # Assume stacked object masks [N, H, W].
+            return [arr[i].astype(bool) for i in range(arr.shape[0])]
+
+        if arr.ndim == 2:
+            # Labeled mask: each non-zero label denotes one object.
+            unique_vals = np.unique(arr)
+            non_zero_vals = unique_vals[unique_vals != 0]
+            if non_zero_vals.size > 1 and arr.dtype != bool:
+                return [(arr == v) for v in non_zero_vals]
+            return [arr.astype(bool)]
+
+        raise ValueError(
+            f"Unsupported mask shape: {arr.shape}. Expected 2D, 3D, 4D, or list/tuple."
+        )
 
     def segment(self, image):
         """
@@ -131,7 +180,8 @@ class Sam2RealTimeSegmenter(Segmenter):
         Return True if at least one object is added.
         """
         # Add points for each object (grouping points by consecutive positive labels)
-        obj_id = 0
+        obj_id = self.num_obj
+        start_obj_id = obj_id
         current_points = []
         current_labels = []
 
@@ -162,11 +212,13 @@ class Sam2RealTimeSegmenter(Segmenter):
                 points=np.array(current_points, dtype=np.float32),
                 labels=np.array(current_labels, dtype=np.int32),
             )
+            obj_id += 1
 
-        self.num_obj = obj_id + 1
+        added_obj = obj_id - start_obj_id
+        self.num_obj += added_obj
         if self.num_obj > 0:
             print(
-                f"[SAM2] Added {self.num_obj} object(s) with {len(self.input_points)} points"
+                f"[SAM2] Added {added_obj} object(s) with {len(self.input_points)} points; total objects: {self.num_obj}"
             )
             return True
         else:

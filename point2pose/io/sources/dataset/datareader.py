@@ -51,7 +51,41 @@ class YCBInIsaacReader:
         self.W = int(self.W * self.downscale)
         self.K[:2] *= self.downscale
 
-        self.gt_pose_files = sorted(glob.glob(f"{self.video_dir}/annotated_poses/*"))
+        self.masks_root = os.path.join(self.video_dir, "masks")
+        self.poses_root = os.path.join(self.video_dir, "annotated_poses")
+
+        self.object_names = self._discover_object_names()
+        self.mask_files_by_object = {}
+        self.gt_pose_files_by_object = {}
+
+        if len(self.object_names) > 0:
+            for obj_name in self.object_names:
+                self.mask_files_by_object[obj_name] = sorted(
+                    glob.glob(os.path.join(self.masks_root, obj_name, "*"))
+                )
+                self.gt_pose_files_by_object[obj_name] = sorted(
+                    glob.glob(os.path.join(self.poses_root, obj_name, "*"))
+                )
+        else:
+            # Backward compatibility: flat single-object layout.
+            self.object_names = ["object_0"]
+            self.mask_files_by_object["object_0"] = sorted(
+                glob.glob(os.path.join(self.masks_root, "*"))
+            )
+            self.gt_pose_files_by_object["object_0"] = sorted(
+                glob.glob(os.path.join(self.poses_root, "*"))
+            )
+
+        # Keep legacy member for callers expecting single-object pose files.
+        self.gt_pose_files = self.gt_pose_files_by_object[self.object_names[0]]
+
+        # First-frame masks for initialization per object.
+        self.init_mask_files_by_object = {}
+        for obj_name in self.object_names:
+            obj_masks = self.mask_files_by_object.get(obj_name, [])
+            self.init_mask_files_by_object[obj_name] = (
+                obj_masks[0] if obj_masks else None
+            )
 
         self.videoname_to_object = {
             "cracker_box": "003_cracker_box",
@@ -59,19 +93,53 @@ class YCBInIsaacReader:
             "extra_large_clamp": "052_extra_large_clamp",
         }
 
+    def _discover_object_names(self):
+        if not os.path.isdir(self.masks_root):
+            return []
+        object_names = [
+            d
+            for d in sorted(os.listdir(self.masks_root))
+            if os.path.isdir(os.path.join(self.masks_root, d))
+        ]
+        return object_names
+
+    @property
+    def num_objects(self):
+        return len(self.object_names)
+
     def get_video_name(self):
         return self.video_dir.split("/")[-1]
+
+    def get_object_names(self):
+        return list(self.object_names)
 
     def __len__(self):
         return len(self.color_files)
 
-    def get_gt_pose(self, i):
-        try:
-            pose = np.loadtxt(self.gt_pose_files[i]).reshape(4, 4)
-            return pose
-        except:
-            logging.info("GT pose not found, return None")
+    def get_gt_pose(self, i, obj_name=None):
+        if obj_name is None:
+            obj_name = self.object_names[0]
+
+        pose_files = self.gt_pose_files_by_object.get(obj_name, [])
+        if len(pose_files) == 0:
+            logging.info(f"GT pose files not found for object {obj_name}, return None")
             return None
+
+        idx = min(i, len(pose_files) - 1)
+        try:
+            pose = np.loadtxt(pose_files[idx]).reshape(4, 4)
+            return pose
+        except Exception:
+            logging.info(
+                f"GT pose not found/readable for object {obj_name}, frame {i}, return None"
+            )
+            return None
+
+    def get_gt_poses(self, i):
+        poses = {}
+        for obj_name in self.object_names:
+            poses[obj_name] = self.get_gt_pose(i, obj_name=obj_name)
+        return poses
 
     def get_color(self, i):
         color = imageio.imread(self.color_files[i])
@@ -81,12 +149,47 @@ class YCBInIsaacReader:
         color = cv2.resize(color, (self.W, self.H), interpolation=cv2.INTER_NEAREST)
         return color
 
-    def get_mask(self, i):
-        mask = cv2.imread(self.color_files[i].replace("rgb", "masks"), -1)
+    def _read_and_resize_mask(self, mask_file):
+        if mask_file is None or not os.path.exists(mask_file):
+            return np.zeros((self.H, self.W), dtype=np.uint8)
+
+        mask = cv2.imread(mask_file, -1)
+        if mask is None:
+            return np.zeros((self.H, self.W), dtype=np.uint8)
         if len(mask.shape) == 3:
             mask = (mask.sum(axis=-1) > 0).astype(np.uint8)
         mask = cv2.resize(mask, (self.W, self.H), interpolation=cv2.INTER_NEAREST)
+        if mask.dtype != np.uint8:
+            mask = mask.astype(np.uint8)
+        mask = (mask > 0).astype(np.uint8)
         return mask
+
+    def get_mask(self, i, obj_name=None, use_init_mask=False):
+        if obj_name is None:
+            obj_name = self.object_names[0]
+
+        if use_init_mask:
+            return self._read_and_resize_mask(
+                self.init_mask_files_by_object.get(obj_name, None)
+            )
+
+        obj_mask_files = self.mask_files_by_object.get(obj_name, [])
+        if len(obj_mask_files) == 0:
+            return np.zeros((self.H, self.W), dtype=np.uint8)
+        idx = min(i, len(obj_mask_files) - 1)
+        mask = self._read_and_resize_mask(obj_mask_files[idx])
+        return mask
+
+    def get_masks(self, i, use_init_mask=False):
+        masks = []
+        for obj_name in self.object_names:
+            masks.append(
+                self.get_mask(i, obj_name=obj_name, use_init_mask=use_init_mask)
+            )
+        return masks
+
+    def get_init_masks(self):
+        return self.get_masks(i=0, use_init_mask=True)
 
     def get_depth(self, i):
         depth = (
@@ -121,7 +224,11 @@ class YCBInIsaacReader:
         return occ_mask.astype(np.uint8)
 
     def get_gt_mesh(self):
-        ob_name = self.videoname_to_object[self.get_video_name()]
+        if len(self.object_names) > 0:
+            obj_name = self.object_names[0]
+            ob_name = self.videoname_to_object.get(obj_name, obj_name)
+        else:
+            ob_name = self.videoname_to_object[self.get_video_name()]
         mesh = trimesh.load(
             f"/mnt/9a72c439-d0a7-45e8-8d20-d7a235d02763/DATASET/YCB_Video/YCB_Video_Models/models/{ob_name}/textured_simple.obj"
         )
