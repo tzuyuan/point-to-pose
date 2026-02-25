@@ -230,6 +230,118 @@ def draw_xyz_axis(
     return tmp
 
 
+def _make_translation(t_xyz):
+    """Create a 4x4 translation matrix."""
+    T = np.eye(4, dtype=float)
+    T[:3, 3] = np.asarray(t_xyz, dtype=float).reshape(3)
+    return T
+
+
+def _extract_bbox_info(bbox_like):
+    """
+    Extract (min_bound, max_bound, center, extent) from a bbox-like object or a (2,3) array.
+    Returns a dict with keys: mn, mx, center, extent. Any entry may be None if unavailable.
+    """
+    if bbox_like is None:
+        return {"mn": None, "mx": None, "center": None, "extent": None}
+
+    # Case 1: numeric (2,3) min/max
+    arr = np.asarray(bbox_like)
+    if arr.ndim == 2 and arr.shape == (2, 3):
+        mn = arr.min(axis=0).astype(float)
+        mx = arr.max(axis=0).astype(float)
+        center = 0.5 * (mn + mx)
+        extent = mx - mn
+        return {"mn": mn, "mx": mx, "center": center, "extent": extent}
+
+    # Case 2: Open3D-like bbox object
+    mn = mx = center = extent = None
+
+    if hasattr(bbox_like, "get_min_bound") and hasattr(bbox_like, "get_max_bound"):
+        try:
+            mn = np.asarray(bbox_like.get_min_bound(), dtype=float).reshape(3)
+            mx = np.asarray(bbox_like.get_max_bound(), dtype=float).reshape(3)
+        except Exception:
+            mn = mx = None
+
+    if mn is None and hasattr(bbox_like, "min_bound"):
+        try:
+            mn = np.asarray(bbox_like.min_bound, dtype=float).reshape(3)
+        except Exception:
+            mn = None
+    if mx is None and hasattr(bbox_like, "max_bound"):
+        try:
+            mx = np.asarray(bbox_like.max_bound, dtype=float).reshape(3)
+        except Exception:
+            mx = None
+
+    # Center
+    if hasattr(bbox_like, "get_center"):
+        try:
+            center = np.asarray(bbox_like.get_center(), dtype=float).reshape(3)
+        except Exception:
+            center = None
+    if center is None and hasattr(bbox_like, "center"):
+        try:
+            center = np.asarray(bbox_like.center, dtype=float).reshape(3)
+        except Exception:
+            center = None
+
+    # Extent
+    if hasattr(bbox_like, "get_extent"):
+        try:
+            extent = np.asarray(bbox_like.get_extent(), dtype=float).reshape(3)
+        except Exception:
+            extent = None
+    if extent is None and hasattr(bbox_like, "extent"):
+        try:
+            extent = np.asarray(bbox_like.extent, dtype=float).reshape(3)
+        except Exception:
+            extent = None
+
+    # Fill missing pieces from others when possible
+    if extent is None and (mn is not None) and (mx is not None):
+        extent = mx - mn
+    if center is None and (mn is not None) and (mx is not None):
+        center = 0.5 * (mn + mx)
+
+    # If bounds missing but have center+extent, synthesize bounds
+    if (mn is None or mx is None) and (center is not None) and (extent is not None):
+        half = 0.5 * extent
+        mn = center - half
+        mx = center + half
+
+    return {"mn": mn, "mx": mx, "center": center, "extent": extent}
+
+
+def _resolve_pose_and_bbox(pose_in_cam, bbox_source, bbox_frame="center"):
+    """
+    Interprets pose_in_cam as either:
+      - 'mesh'  : T_cam_mesh, bbox corners in mesh coords [mn,mx]
+      - 'center': T_cam_center, bbox corners in centered coords [-half,+half]
+    This makes the toggle visibly different (useful for debugging frame mismatch).
+    """
+    info = _extract_bbox_info(bbox_source)
+    mn, mx, center, extent = info["mn"], info["mx"], info["center"], info["extent"]
+
+    if bbox_frame not in ("mesh", "center"):
+        raise ValueError(f"bbox_frame must be 'mesh' or 'center', got {bbox_frame}")
+
+    if extent is None:
+        return pose_in_cam, None
+
+    if bbox_frame == "mesh":
+        if mn is None or mx is None:
+            # fallback to centered if bounds unavailable
+            half = 0.5 * extent
+            return pose_in_cam, np.vstack([-half, +half])
+        return pose_in_cam, np.vstack([mn, mx])
+
+    # bbox_frame == "center"
+    half = 0.5 * extent
+    return pose_in_cam, np.vstack([-half, +half])
+
+
 def visualize_and_save_tracking_results(
     frame,
     objects,
@@ -242,6 +354,7 @@ def visualize_and_save_tracking_results(
     camera_intrinsics=np.eye(3),
     bbox_min_max=None,
     vis_mask=False,
+    bbox_frame="mesh",
 ):
     """
     Visualize tracking results on the frame
@@ -253,20 +366,20 @@ def visualize_and_save_tracking_results(
     height, width = display_frame.shape[:2]
 
     # Draw segmentation masks if available
-    if vis_mask and hasattr(frame, "mask") and frame.mask is not None:
-        object_masks = _normalize_object_masks(frame.mask)
-        mask_overlay = np.zeros((height, width, 3), dtype=np.uint8)
-        mask_overlay[..., 1] = 255  # Green base
+    # if vis_mask and hasattr(frame, "mask") and frame.mask is not None:
+    #     object_masks = _normalize_object_masks(frame.mask)
+    #     mask_overlay = np.zeros((height, width, 3), dtype=np.uint8)
+    #     mask_overlay[..., 1] = 255  # Green base
 
-        for i, obj_mask in enumerate(object_masks):
-            if np.any(obj_mask):
-                # Color each object differently
-                hue = (i + 3) / (len(object_masks) + 3) * 255
-                mask_overlay[obj_mask, 0] = hue
-                mask_overlay[obj_mask, 2] = 255
+    #     for i, obj_mask in enumerate(object_masks):
+    #         if np.any(obj_mask):
+    #             # Color each object differently
+    #             hue = (i + 3) / (len(object_masks) + 3) * 255
+    #             mask_overlay[obj_mask, 0] = hue
+    #             mask_overlay[obj_mask, 2] = 255
 
-        mask_overlay = cv2.cvtColor(mask_overlay, cv2.COLOR_HSV2BGR)
-        display_frame = cv2.addWeighted(display_frame, 1, mask_overlay, 0.5, 0)
+    #     mask_overlay = cv2.cvtColor(mask_overlay, cv2.COLOR_HSV2BGR)
+    #     display_frame = cv2.addWeighted(display_frame, 1, mask_overlay, 0.5, 0)
 
     if visualize_points:
         if points_vis_method == "uncertainty":
@@ -384,35 +497,41 @@ def visualize_and_save_tracking_results(
     # Draw pose information
     for i, obj in enumerate(objects):
         if obj.pose is not None:
-            pose = obj.pose @ obj.init_pose
-            bbox_min_max_local = None
+            pose_mesh_in_cam = obj.pose @ obj.init_pose
+
+            # Resolve per-object bbox override (if provided).
+            bbox_src = None
             if bbox_min_max is not None:
                 if isinstance(bbox_min_max, dict):
-                    bbox_min_max_local = bbox_min_max.get(i, None)
+                    bbox_src = bbox_min_max.get(i, None)
                 else:
                     bbox_arr = np.asarray(bbox_min_max)
                     if bbox_arr.ndim == 3 and i < len(bbox_min_max):
-                        bbox_min_max_local = bbox_min_max[i]
+                        bbox_src = bbox_min_max[i]
                     elif bbox_arr.ndim == 2:
-                        bbox_min_max_local = bbox_min_max
+                        bbox_src = bbox_min_max
 
-            if bbox_min_max_local is None:
-                obj_bbox = getattr(obj, "bbox", None)
-                if obj_bbox is not None and hasattr(obj_bbox, "extent"):
-                    half = 0.5 * np.asarray(obj_bbox.extent, dtype=float)
-                    bbox_min_max_local = np.vstack([-half, +half])  # (2,3)
+            # Otherwise, fall back to obj.bbox (Open3D-like AABB/OBB) if available.
+            if bbox_src is None:
+                bbox_src = getattr(obj, "bbox", None)
 
-            if bbox_min_max_local is not None:
+            pose_use, bbox_min_max_use = _resolve_pose_and_bbox(
+                pose_in_cam=pose_mesh_in_cam,
+                bbox_source=bbox_src,
+                bbox_frame=bbox_frame,
+            )
+
+            if bbox_min_max_use is not None:
                 display_frame = draw_posed_3d_box(
                     camera_intrinsics,
                     display_frame,
-                    pose,
-                    bbox_min_max_local,
+                    pose_use,
+                    bbox_min_max_use,
                 )
 
-            # Draw axis even when bbox is unavailable.
+            # Draw axis (in the same frame as the bbox choice).
             display_frame = draw_xyz_axis(
-                image=display_frame, ob_in_cam=pose, K=camera_intrinsics
+                image=display_frame, ob_in_cam=pose_use, K=camera_intrinsics
             )
 
     # Save image if flag is enabled and frame_id is provided
@@ -440,6 +559,7 @@ def visualize_and_save_tracking_results_with_gt(
     bbox_min_max=None,
     gt_bbox_min_max=None,
     gt_bbox_min_max_by_object=None,
+    bbox_frame="mesh",
     pred_pose_color=(0, 255, 0),  # Green for predicted pose
     gt_pose_color=(0, 0, 255),  # Red for GT pose
 ):
@@ -483,6 +603,7 @@ def visualize_and_save_tracking_results_with_gt(
             output_image_dir=None,
             camera_intrinsics=camera_intrinsics,
             bbox_min_max=bbox_min_max,
+            bbox_frame=bbox_frame,
         )
 
     # Build a unified list of GT overlays: (obj_idx, pose)
@@ -527,25 +648,28 @@ def visualize_and_save_tracking_results_with_gt(
                 gt_bbox_min_max_local = bbox_min_max
 
         if gt_bbox_min_max_local is None and 0 <= obj_idx < len(objects):
-            obj_bbox = getattr(objects[obj_idx], "bbox", None)
-            if obj_bbox is not None and hasattr(obj_bbox, "extent"):
-                half = 0.5 * np.asarray(obj_bbox.extent, dtype=float)
-                gt_bbox_min_max_local = np.vstack([-half, +half])  # (2,3)
+            gt_bbox_min_max_local = getattr(objects[obj_idx], "bbox", None)
 
-        if gt_bbox_min_max_local is not None:
+        pose_use, bbox_min_max_use = _resolve_pose_and_bbox(
+            pose_in_cam=obj_gt_pose,
+            bbox_source=gt_bbox_min_max_local,
+            bbox_frame=bbox_frame,
+        )
+
+        if bbox_min_max_use is not None:
             # Draw GT bounding box
             display_frame = draw_posed_3d_box(
                 camera_intrinsics,
                 display_frame,
-                obj_gt_pose,
-                gt_bbox_min_max_local,
+                pose_use,
+                bbox_min_max_use,
                 line_color=gt_pose_color,
                 linewidth=2,
             )
-        # Draw GT coordinate axes
+        # Draw GT coordinate axes (in the same frame as the bbox choice).
         display_frame = draw_xyz_axis(
             image=display_frame,
-            ob_in_cam=obj_gt_pose,
+            ob_in_cam=pose_use,
             K=camera_intrinsics,
             thickness=3,
         )

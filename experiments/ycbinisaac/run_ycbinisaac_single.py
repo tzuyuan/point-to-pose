@@ -205,6 +205,7 @@ def run_ycbineoat_single(
             output_image_dir=vis_folder,
             camera_intrinsics=reader.K,
             bbox_min_max=gt_bbox_by_index,
+            bbox_frame="mesh",
         )
 
         gt_overlay_frame = visualize_and_save_tracking_results_with_gt(
@@ -223,6 +224,7 @@ def run_ycbineoat_single(
             bbox_min_max=gt_bbox_by_index,
             gt_bbox_min_max_by_object=gt_bbox_by_index,
             pred_pose_color=(0, 255, 0),
+            bbox_frame="mesh",
         )
 
         if vis_cfg.save_images:
@@ -380,7 +382,7 @@ if __name__ == "__main__":
         "--video_name",
         "-v",
         type=str,
-        default="tomato_soup_can_yalehand0",
+        default="two_objects",
         help="Name of the video folder (e.g. 0048 or bleach0)",
     )
     parser.add_argument(
@@ -392,7 +394,7 @@ if __name__ == "__main__":
         "--config_path",
         "-c",
         type=str,
-        default="./configs/ho3d/ho3d_single.yaml",
+        default="./configs/ycbinisaac/ycbinisaac_single.yaml",
         help="Path to configuration file",
     )
     parser.add_argument(

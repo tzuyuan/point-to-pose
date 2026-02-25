@@ -326,7 +326,7 @@ class KeyFrameManager:
                 depth_image=anchor_frame.depth,
                 cam_intrinsics=anchor_frame.intrinsics,
                 depth_factor=anchor_frame.depth_factor,
-                fill_missing_depth=False,
+                fill_missing_depth=self.fill_missing_depth,
                 window_size=self.fill_depth_win_size,
                 min_neighbors=self.fill_depth_min_neighbors,
                 max_depth=self.max_depth,
@@ -557,6 +557,11 @@ class KeyFrameManager:
             depth_image=frame.depth,
             cam_intrinsics=frame.intrinsics,
             depth_factor=frame.depth_factor,
+            min_depth=self.min_depth,
+            max_depth=self.max_depth,
+            fill_missing_depth=self.fill_missing_depth,
+            window_size=self.fill_depth_win_size,
+            min_neighbors=self.fill_depth_min_neighbors,
         )
 
         track_table.update_track_table(

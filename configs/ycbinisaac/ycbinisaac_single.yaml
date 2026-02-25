@@ -13,7 +13,7 @@ pipeline:
     fill_missing_depth_window_size: 5
     fill_missing_depth_min_neighbors: 1
     min_depth: 0.1
-    max_depth: 2
+    max_depth: 1.5
 
     use_depth_estimate: false
     depth_estimator_type: depth_anything
@@ -58,8 +58,8 @@ reconstructor:
   params:
     build_sdf_after_global_opt: true
     sdf_use_gpu: true
-    sdf_backend: nvblox
-    sdf_voxel_size: 0.005
+    sdf_backend: python_tsdf
+    sdf_voxel_size: 0.003
     sdf_bounds_padding: 0.02
     sdf_min_points: 300
     sdf_filter_max_radius: 0.25
@@ -90,10 +90,10 @@ register:
   params:
     ransac_iters: 100
     sample_size: 4
-    inlier_thres: 0.005
+    inlier_thres: 0.004
     min_inliers: 5
     max_clusters: 10
-    use_uncertainty: true
+    use_uncertainty: false
     min_variance: 1e-2
     select_3d_dist_min_depth: 0.08
     select_3d_dist_max_depth: 2
@@ -107,7 +107,7 @@ register:
 
     # front end
     remove_outside_mask: true
-    uncer_thres: 0.1
+    uncer_thres: 0.3
     residual_thres: 0.007
 
 # register:
@@ -195,9 +195,9 @@ tracker:
 sampler: 
   type: super_point_fps
   params:
-    num_points: 35
+    num_points: 25
     density_per_kpx: -1
-    fps_oversample_factor: 5
+    fps_oversample_factor: 7
 
     min_points: 5
     max_points: 50
@@ -258,11 +258,11 @@ local_optimizer:
     max_iterations: 20
     relative_error_tol: 1e-5
     absolute_error_tol: 1e-5
-    prior_noise_param: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
+    prior_noise_param: [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000]
     uncertainty_thres: 0.3
     uncertainty_min: 1e-2
-    use_between_factor: true
-    landmark_sigma_scale_by: residual
+    use_between_factor: false
+    landmark_sigma_scale_by: none
     landmark_sigma_min: 1e-3
     landmark_huber_k: 1.0
 

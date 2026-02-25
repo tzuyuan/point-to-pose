@@ -19,11 +19,16 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 try:
-    from point2pose.io.sources.dataset.datareader import Ho3dReader, YcbineoatReader
+    from point2pose.io.sources.dataset.datareader import (
+        Ho3dReader,
+        YcbineoatReader,
+        YCBInIsaacReader,
+    )
     from point2pose.utils.transform import inverse_SE3
 except ImportError:
     Ho3dReader = None
     YcbineoatReader = None
+    YCBInIsaacReader = None
     inverse_SE3 = None
 
 
@@ -575,6 +580,7 @@ def plot_registration_stats(
     results_dir: Optional[str] = None,
     video_name: Optional[str] = None,
     ho3d_root: Optional[str] = None,
+    dataset: str = "auto",
 ):
     """Create plots showing registration statistics.
 
@@ -592,7 +598,8 @@ def plot_registration_stats(
         register_folder: Optional register folder path for GT pose loading
         results_dir: Optional results directory for GT pose loading
         video_name: Optional video name for GT pose loading
-        ho3d_root: Optional HO3D root directory for GT pose loading
+        ho3d_root: Optional dataset root directory for GT pose loading
+        dataset: Dataset type ('auto', 'ho3d', 'ycbineoat', 'ycbinisaac')
     """
     num_points = len(residuals)
     num_inliers = np.sum(inliers)
@@ -945,6 +952,7 @@ def plot_registration_stats(
             results_dir=actual_results_dir,
             video_name=actual_video_name,
             ho3d_root=ho3d_root,
+            dataset=dataset,
         )
 
         if gt_pose is not None:
@@ -978,6 +986,7 @@ def plot_registration_stats(
                     results_dir=actual_results_dir,
                     video_name=actual_video_name,
                     ho3d_root=ho3d_root,
+                    dataset=dataset,
                 )
                 if prev_frame_gt_pose is not None and frame_number > 0:
                     # Both poses are already transformed relative to first frame
@@ -1249,6 +1258,130 @@ def load_all_key_points_with_frame_ids(
         return None
 
 
+def _infer_dataset_from_video_dir(
+    video_dir: Optional[str], dataset: str = "auto"
+) -> str:
+    """Infer dataset type from a video directory when dataset='auto'."""
+    if dataset != "auto":
+        return dataset
+    if not video_dir:
+        return "ho3d"
+
+    annotated_poses = os.path.join(video_dir, "annotated_poses")
+    if os.path.isdir(annotated_poses):
+        has_pose_subdirs = any(
+            os.path.isdir(os.path.join(annotated_poses, d))
+            for d in os.listdir(annotated_poses)
+        )
+        if has_pose_subdirs:
+            return "ycbinisaac"
+        return "ycbineoat"
+    return "ho3d"
+
+
+def _find_video_dir_for_gt(
+    *,
+    video_name: Optional[str],
+    dataset_root: Optional[str],
+    results_dir: Optional[str],
+    register_folder: str,
+    dataset: str = "auto",
+) -> Optional[str]:
+    """Find dataset video directory for GT loading."""
+    if not video_name:
+        return None
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(os.path.dirname(script_dir))
+    wanted = dataset.lower() if dataset else "auto"
+
+    candidates = []
+    if dataset_root:
+        candidates.append(os.path.join(dataset_root, video_name))
+    if results_dir:
+        candidates.append(os.path.join(results_dir, video_name))
+    candidates.extend(
+        [
+            os.path.join(project_root, "data", video_name),
+            os.path.join(project_root, "data", "ho3d", video_name),
+            os.path.join(project_root, "data", "ycbineoat", video_name),
+            os.path.join(project_root, "data", "ycbinisaac", video_name),
+            os.path.join(
+                "/mnt",
+                "9a72c439-d0a7-45e8-8d20-d7a235d02763",
+                "DATASET",
+                "HO3D",
+                video_name,
+            ),
+            os.path.join(
+                "/mnt",
+                "9a72c439-d0a7-45e8-8d20-d7a235d02763",
+                "DATASET",
+                "YCBInEOAT",
+                video_name,
+            ),
+            os.path.join(
+                "/mnt",
+                "9a72c439-d0a7-45e8-8d20-d7a235d02763",
+                "DATASET",
+                "YCBInIsaac",
+                video_name,
+            ),
+        ]
+    )
+
+    for path in candidates:
+        if not path or not os.path.isdir(path):
+            continue
+        if not os.path.isdir(os.path.join(path, "rgb")):
+            continue
+
+        inferred = _infer_dataset_from_video_dir(path, "auto")
+        if wanted == "auto" or inferred == wanted:
+            return path
+
+    return None
+
+
+def _build_gt_reader(
+    video_dir: str, dataset: str = "auto", dataset_root: Optional[str] = None
+):
+    """Build dataset reader for GT pose loading."""
+    resolved_dataset = _infer_dataset_from_video_dir(video_dir, dataset)
+
+    if resolved_dataset == "ho3d":
+        if Ho3dReader is None:
+            return None
+        # Try to find a root that contains HO3D models if possible.
+        ho3d_root = dataset_root
+        if ho3d_root is None or not os.path.exists(os.path.join(ho3d_root, "models")):
+            for root in [
+                os.path.dirname(video_dir),
+                os.path.normpath(os.path.join(video_dir, "..")),
+                os.path.normpath(os.path.join(video_dir, "../..")),
+            ]:
+                if os.path.exists(os.path.join(root, "models")):
+                    ho3d_root = root
+                    break
+        if ho3d_root is None:
+            ho3d_root = dataset_root
+        if ho3d_root is None:
+            return None
+        return Ho3dReader(video_dir, ho3d_root)
+
+    if resolved_dataset == "ycbineoat":
+        if YcbineoatReader is None:
+            return None
+        return YcbineoatReader(video_dir)
+
+    if resolved_dataset == "ycbinisaac":
+        if YCBInIsaacReader is None:
+            return None
+        return YCBInIsaacReader(video_dir)
+
+    return None
+
+
 def load_gt_key_points(
     register_folder: str,
     object_number: int,
@@ -1256,6 +1389,7 @@ def load_gt_key_points(
     results_dir: Optional[str] = None,
     video_name: Optional[str] = None,
     ho3d_root: Optional[str] = None,
+    dataset: str = "auto",
 ) -> Optional[np.ndarray]:
     """Load ground truth key points by transforming key point map using GT pose.
 
@@ -1265,7 +1399,8 @@ def load_gt_key_points(
         frame_number: Frame number to load GT key points for
         results_dir: Results directory for new structure (optional)
         video_name: Video sequence name for new structure (optional)
-        ho3d_root: HO3D dataset root directory (optional, will try to infer)
+        ho3d_root: Dataset root directory (optional, kept for backward compatibility)
+        dataset: Dataset type ('auto', 'ho3d', 'ycbineoat', 'ycbinisaac')
 
     Returns:
         GT key points in current frame coordinate system (N, 3) or None if not found
@@ -1320,214 +1455,20 @@ def load_gt_key_points(
             print("Key point map is empty")
             return None
 
-        # Load GT pose for current frame using datareader
-        # Try to infer video directory from ho3d_root first (HO3D dataset location)
-        # Then fall back to results_dir if needed
-        video_dir = None
-
-        # Priority 1: ho3d_root/video_name (actual HO3D dataset location)
-        if ho3d_root and video_name:
-            potential_video_dir = os.path.join(ho3d_root, video_name)
-            # Verify it's a valid HO3D video directory (should have rgb/ subdirectory)
-            if os.path.exists(potential_video_dir) and os.path.exists(
-                os.path.join(potential_video_dir, "rgb")
-            ):
-                video_dir = potential_video_dir
-
-        # Priority 2: results_dir/video_name (fallback, but usually doesn't have rgb/)
-        if video_dir is None and results_dir and video_name:
-            potential_video_dir = os.path.join(results_dir, video_name)
-            # Only use if it has rgb/ subdirectory (unlikely but check anyway)
-            if os.path.exists(potential_video_dir) and os.path.exists(
-                os.path.join(potential_video_dir, "rgb")
-            ):
-                video_dir = potential_video_dir
-
-        # If still not found and video_name is provided, try common locations
-        if video_dir is None and video_name:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            project_root = os.path.dirname(os.path.dirname(script_dir))
-            potential_paths = [
-                os.path.join(project_root, "data", "ho3d", video_name),
-                os.path.join(project_root, "data", video_name),
-                os.path.join(
-                    "/mnt",
-                    "9a72c439-d0a7-45e8-8d20-d7a235d02763",
-                    "DATASET",
-                    "HO3D",
-                    video_name,
-                ),
-            ]
-            # Also try with ho3d_root if provided
-            if ho3d_root:
-                potential_paths.insert(0, os.path.join(ho3d_root, video_name))
-
-            for path in potential_paths:
-                # Verify it's a valid HO3D video directory (should have rgb/ subdirectory)
-                if os.path.exists(path) and os.path.exists(os.path.join(path, "rgb")):
-                    video_dir = path
-                    break
-
-        if video_dir is None or not os.path.exists(video_dir):
-            print(
-                f"Warning: Could not find video directory for {video_name}, cannot load GT pose"
-            )
-            if ho3d_root:
-                searched_path = os.path.join(ho3d_root, video_name)
-                exists = os.path.exists(searched_path)
-                has_rgb = (
-                    os.path.exists(os.path.join(searched_path, "rgb"))
-                    if exists
-                    else False
-                )
-                print(
-                    f"  Tried: {searched_path} (exists: {exists}, has rgb/: {has_rgb})"
-                )
-            if results_dir:
-                searched_path = os.path.join(results_dir, video_name)
-                exists = os.path.exists(searched_path)
-                has_rgb = (
-                    os.path.exists(os.path.join(searched_path, "rgb"))
-                    if exists
-                    else False
-                )
-                print(
-                    f"  Tried: {searched_path} (exists: {exists}, has rgb/: {has_rgb})"
-                )
-            return None
-
-        # Verify video_dir has rgb/ subdirectory before proceeding
-        rgb_dir = os.path.join(video_dir, "rgb")
-        if not os.path.exists(rgb_dir):
-            print(
-                f"Warning: Video directory {video_dir} does not contain rgb/ subdirectory, cannot load GT pose"
-            )
-            return None
-
-        # Try to infer ho3d_root if not provided or if provided ho3d_root doesn't have models
-        # The ho3d_root should contain a "models" directory
-        actual_ho3d_root = ho3d_root
-        if ho3d_root is None or not os.path.exists(os.path.join(ho3d_root, "models")):
-            # Common HO3D root locations
-            potential_roots = []
-            if ho3d_root:
-                # If ho3d_root was provided but doesn't have models, try parent directory
-                potential_roots.append(os.path.dirname(ho3d_root))
-            if video_dir:
-                potential_roots.extend(
-                    [
-                        os.path.dirname(
-                            video_dir
-                        ),  # Video dir might be directly under ho3d_root
-                        os.path.join(os.path.dirname(video_dir), ".."),
-                    ]
-                )
-            potential_roots.extend(
-                [
-                    os.path.join(
-                        "/mnt",
-                        "9a72c439-d0a7-45e8-8d20-d7a235d02763",
-                        "DATASET",
-                        "HO3D",
-                    ),
-                ]
-            )
-            for root in potential_roots:
-                if (
-                    root
-                    and os.path.exists(root)
-                    and os.path.exists(os.path.join(root, "models"))
-                ):
-                    actual_ho3d_root = root
-                    break
-
-        # If we still don't have a valid ho3d_root, use the provided one anyway
-        if actual_ho3d_root is None:
-            actual_ho3d_root = ho3d_root
-
-        # Create datareader
-        reader = None
-        if actual_ho3d_root and os.path.exists(actual_ho3d_root) and video_dir:
-            try:
-                print(
-                    f"Creating Ho3dReader with video_dir={video_dir}, ho3d_root={actual_ho3d_root}"
-                )
-                reader = Ho3dReader(video_dir, actual_ho3d_root)
-            except Exception as e:
-                print(f"Warning: Could not create Ho3dReader: {e}")
-                import traceback
-
-                traceback.print_exc()
-
-        if reader is None:
-            print("Warning: Could not create datareader, cannot load GT pose")
-            return None
-
-        # Get GT pose for current frame
-        if frame_number >= len(reader):
-            print(
-                f"Frame {frame_number} out of range for datareader (length: {len(reader)})"
-            )
-            return None
-
-        gt_pose_current_raw = reader.get_gt_pose(frame_number)
-        if gt_pose_current_raw is None:
+        gt_pose_current = get_gt_pose_for_frame(
+            register_folder,
+            frame_number,
+            results_dir=results_dir,
+            video_name=video_name,
+            ho3d_root=ho3d_root,
+            dataset=dataset,
+        )
+        if gt_pose_current is None:
             print(f"GT pose not available for frame {frame_number}")
             return None
 
-        # Get GT pose for first frame (for reference)
-        # Note: We need the transform from first frame to current frame
-        # because the key_point_map is stored in the first frame's coordinate system.
-        # This is true even for accumulated maps - new points are transformed back to frame 0 before adding.
-
-        # Find index of frame 0 (or whatever the reference frame is)
-        # Assuming the map reference frame is the one at index 0 of the sequence
-        first_frame_idx = 0
-        gt_pose_first = reader.get_gt_pose(first_frame_idx)
-
-        if gt_pose_first is None:
-            # If first frame doesn't have GT (e.g. tracking started mid-sequence), try to find first valid GT
-            for i in range(len(reader)):
-                pose = reader.get_gt_pose(i)
-                if pose is not None:
-                    gt_pose_first = pose
-                    first_frame_idx = i
-                    print(
-                        f"Using frame {i} as reference for GT pose (first frame was None)"
-                    )
-                    break
-
-            if gt_pose_first is None:
-                print(
-                    "GT pose not available for any frame, using current frame pose directly"
-                )
-                # Transform key points directly with current GT pose
-                # Assuming key points are in object frame, transform to camera frame
-                key_points_h = np.hstack(
-                    [key_point_map, np.ones((len(key_point_map), 1))]
-                )
-                gt_key_points = (gt_pose_current_raw @ key_points_h.T).T[:, :3]
-                return gt_key_points
-
-        # Transform GT poses by inverse of first frame's pose (assuming first frame is identity)
-        if inverse_SE3 is not None:
-            # gt_pose_current = inverse_SE3(gt_pose_first) @ gt_pose_current_raw
-            gt_pose_current = gt_pose_current_raw @ inverse_SE3(gt_pose_first)
-            gt_pose_first_transformed = (
-                inverse_SE3(gt_pose_first) @ gt_pose_first
-            )  # This should be identity
-        else:
-            # Fallback to numpy inverse if inverse_SE3 not available
-            gt_pose_first_inv = np.linalg.inv(gt_pose_first)
-            gt_pose_current = gt_pose_first_inv @ gt_pose_current_raw
-            gt_pose_first_transformed = (
-                gt_pose_first_inv @ gt_pose_first
-            )  # This should be identity
-
-        # Transform key points from first frame to current frame using transformed GT poses
-        # Key points are in first frame coordinate system (reference frame)
-        # Since first frame is now identity, transform is just gt_pose_current
-        # Transform: gt_pose_current @ key_points (where gt_pose_current is already relative to first frame)
+        # Keypoint map is stored in first-frame coordinates.
+        # get_gt_pose_for_frame returns first-frame -> current transform.
         transform = gt_pose_current
 
         key_points_h = np.hstack([key_point_map, np.ones((len(key_point_map), 1))])
@@ -1555,6 +1496,7 @@ def get_gt_keypoint_map_for_frame(
     results_dir: Optional[str] = None,
     video_name: Optional[str] = None,
     ho3d_root: Optional[str] = None,
+    dataset: str = "auto",
 ) -> Optional[np.ndarray]:
     """Get GT keypoint map in the CURRENT frame coordinate system for a given frame.
 
@@ -1608,6 +1550,7 @@ def get_gt_keypoint_map_for_frame(
             results_dir=results_dir,
             video_name=video_name,
             ho3d_root=ho3d_root,
+            dataset=dataset,
         )
         if gt_pose_current is None:
             print("Warning: Could not load GT pose for keypoint map")
@@ -3145,6 +3088,7 @@ def get_gt_pose_for_frame(
     results_dir: Optional[str] = None,
     video_name: Optional[str] = None,
     ho3d_root: Optional[str] = None,
+    dataset: str = "auto",
 ) -> Optional[np.ndarray]:
     """Get ground truth pose for a given frame.
 
@@ -3153,156 +3097,32 @@ def get_gt_pose_for_frame(
         frame_number: Frame number to get GT pose for
         results_dir: Results directory for new structure (optional)
         video_name: Video sequence name for new structure (optional)
-        ho3d_root: HO3D dataset root directory (optional, will try to infer)
+        ho3d_root: Dataset root directory (optional, kept for backward compatibility)
+        dataset: Dataset type ('auto', 'ho3d', 'ycbineoat', 'ycbinisaac')
 
     Returns:
         GT pose matrix (4, 4) or None if not found
     """
-    # Try to infer video directory from ho3d_root first (HO3D dataset location)
-    # Then fall back to results_dir if needed
-    video_dir = None
-
-    # Priority 1: ho3d_root/video_name (actual HO3D dataset location)
-    if ho3d_root and video_name:
-        potential_video_dir = os.path.join(ho3d_root, video_name)
-        # Verify it's a valid HO3D video directory (should have rgb/ subdirectory)
-        if os.path.exists(potential_video_dir) and os.path.exists(
-            os.path.join(potential_video_dir, "rgb")
-        ):
-            video_dir = potential_video_dir
-
-    # Priority 2: results_dir/video_name (fallback, but usually doesn't have rgb/)
-    if video_dir is None and results_dir and video_name:
-        potential_video_dir = os.path.join(results_dir, video_name)
-        # Only use if it has rgb/ subdirectory (unlikely but check anyway)
-        if os.path.exists(potential_video_dir) and os.path.exists(
-            os.path.join(potential_video_dir, "rgb")
-        ):
-            video_dir = potential_video_dir
-
-    # If still not found and video_name is provided, try common locations
-    if video_dir is None and video_name:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(os.path.dirname(script_dir))
-        potential_paths = [
-            os.path.join(project_root, "data", "ho3d", video_name),
-            os.path.join(project_root, "data", video_name),
-            os.path.join(
-                "/mnt",
-                "9a72c439-d0a7-45e8-8d20-d7a235d02763",
-                "DATASET",
-                "HO3D",
-                video_name,
-            ),
-        ]
-        # Also try with ho3d_root if provided
-        if ho3d_root:
-            potential_paths.insert(0, os.path.join(ho3d_root, video_name))
-
-        for path in potential_paths:
-            # Verify it's a valid HO3D video directory (should have rgb/ subdirectory)
-            if os.path.exists(path) and os.path.exists(os.path.join(path, "rgb")):
-                video_dir = path
-                break
-
-    if video_dir is None or not os.path.exists(video_dir):
+    video_dir = _find_video_dir_for_gt(
+        video_name=video_name,
+        dataset_root=ho3d_root,
+        results_dir=results_dir,
+        register_folder=register_folder,
+        dataset=dataset,
+    )
+    if video_dir is None:
         print(
             f"Warning: Could not find video directory for {video_name}, cannot load GT pose"
         )
-        if video_name:
-            print(f"  Searched paths (must contain rgb/ subdirectory):")
-            if ho3d_root:
-                searched_path = os.path.join(ho3d_root, video_name)
-                exists = os.path.exists(searched_path)
-                has_rgb = (
-                    os.path.exists(os.path.join(searched_path, "rgb"))
-                    if exists
-                    else False
-                )
-                print(f"    - {searched_path} (exists: {exists}, has rgb/: {has_rgb})")
-            if results_dir:
-                searched_path = os.path.join(results_dir, video_name)
-                exists = os.path.exists(searched_path)
-                has_rgb = (
-                    os.path.exists(os.path.join(searched_path, "rgb"))
-                    if exists
-                    else False
-                )
-                print(f"    - {searched_path} (exists: {exists}, has rgb/: {has_rgb})")
         return None
 
-    # Verify video_dir has rgb/ subdirectory before proceeding
-    rgb_dir = os.path.join(video_dir, "rgb")
-    if not os.path.exists(rgb_dir):
-        print(
-            f"Warning: Video directory {video_dir} does not contain rgb/ subdirectory, cannot load GT pose"
-        )
-        return None
-
-    # Try to infer ho3d_root if not provided or if provided ho3d_root doesn't have models
-    actual_ho3d_root = ho3d_root
-    if ho3d_root is None or not os.path.exists(os.path.join(ho3d_root, "models")):
-        potential_roots = []
-        if ho3d_root:
-            potential_roots.append(os.path.dirname(ho3d_root))
-        if video_dir:
-            potential_roots.extend(
-                [
-                    os.path.dirname(video_dir),
-                    os.path.join(os.path.dirname(video_dir), ".."),
-                ]
-            )
-        potential_roots.extend(
-            [
-                os.path.join(
-                    "/mnt",
-                    "9a72c439-d0a7-45e8-8d20-d7a235d02763",
-                    "DATASET",
-                    "HO3D",
-                ),
-            ]
-        )
-        for root in potential_roots:
-            if (
-                root
-                and os.path.exists(root)
-                and os.path.exists(os.path.join(root, "models"))
-            ):
-                actual_ho3d_root = root
-                break
-
-    # If we still don't have a valid ho3d_root, use the provided one anyway
-    if actual_ho3d_root is None:
-        actual_ho3d_root = ho3d_root
-
-    # Create datareader
-    reader = None
-    if actual_ho3d_root and os.path.exists(actual_ho3d_root) and video_dir:
-        try:
-            print(
-                f"Creating Ho3dReader with video_dir={video_dir}, ho3d_root={actual_ho3d_root}"
-            )
-            reader = Ho3dReader(video_dir, actual_ho3d_root)
-        except Exception as e:
-            print(f"Warning: Could not create Ho3dReader: {e}")
-            import traceback
-
-            traceback.print_exc()
-            return None
-
+    reader = _build_gt_reader(video_dir, dataset=dataset, dataset_root=ho3d_root)
     if reader is None:
-        print("Warning: Could not create datareader, cannot load GT pose")
-        print(f"  video_dir: {video_dir}")
-        print(f"  actual_ho3d_root: {actual_ho3d_root}")
         print(
-            f"  ho3d_root exists: {os.path.exists(actual_ho3d_root) if actual_ho3d_root else False}"
-        )
-        print(
-            f"  video_dir exists: {os.path.exists(video_dir) if video_dir else False}"
+            f"Warning: Could not create datareader for dataset={dataset} at {video_dir}"
         )
         return None
 
-    # Get GT pose for current frame
     if frame_number >= len(reader):
         print(
             f"Frame {frame_number} out of range for datareader (length: {len(reader)})"
@@ -3314,36 +3134,24 @@ def get_gt_pose_for_frame(
         print(f"Warning: GT pose not available for frame {frame_number}")
         return None
 
-    # Transform GT pose by inverse of first frame's pose (assuming first frame is identity)
-    # Get first frame GT pose
-    first_frame_idx = 0
-    gt_pose_first = reader.get_gt_pose(first_frame_idx)
-
+    gt_pose_first = reader.get_gt_pose(0)
     if gt_pose_first is None:
-        # If first frame doesn't have GT, try to find first valid GT pose
         for i in range(len(reader)):
             pose = reader.get_gt_pose(i)
             if pose is not None:
                 gt_pose_first = pose
-                first_frame_idx = i
                 break
 
-    if gt_pose_first is not None:
-        # Transform: gt_pose @ inverse_SE3(gt_pose_first) to make first frame identity
-        # This gives transform from first frame to current frame
-        if inverse_SE3 is not None:
-            gt_pose_transformed = gt_pose @ inverse_SE3(gt_pose_first)
-        else:
-            # Fallback to numpy inverse if inverse_SE3 not available
-            gt_pose_first_inv = np.linalg.inv(gt_pose_first)
-            gt_pose_transformed = gt_pose @ gt_pose_first_inv
-        return gt_pose_transformed
-    else:
-        # If no first frame pose available, return original (shouldn't happen in practice)
-        print(
-            f"Warning: Could not find first frame GT pose, returning untransformed pose"
+    if gt_pose_first is None:
+        print("Warning: Could not find first valid GT pose, returning raw pose")
+        return np.asarray(gt_pose, dtype=float)
+
+    if inverse_SE3 is not None:
+        return np.asarray(gt_pose, dtype=float) @ inverse_SE3(
+            np.asarray(gt_pose_first, dtype=float)
         )
-        return gt_pose
+    gt_pose_first_inv = np.linalg.inv(np.asarray(gt_pose_first, dtype=float))
+    return np.asarray(gt_pose, dtype=float) @ gt_pose_first_inv
 
 
 def plot_error_vs_uncertainty(
@@ -3357,6 +3165,7 @@ def plot_error_vs_uncertainty(
     results_dir: Optional[str] = None,
     video_name: Optional[str] = None,
     ho3d_root: Optional[str] = None,
+    dataset: str = "auto",
     output_path: Optional[str] = None,
     mode: str = "f2m",
 ):
@@ -3372,7 +3181,8 @@ def plot_error_vs_uncertainty(
         frame_number: Frame number
         results_dir: Results directory (optional)
         video_name: Video sequence name (optional)
-        ho3d_root: HO3D dataset root directory (optional)
+        ho3d_root: Dataset root directory (optional)
+        dataset: Dataset type ('auto', 'ho3d', 'ycbineoat', 'ycbinisaac')
         output_path: Optional path to save the figure
         mode: Registration mode ("f2f" or "f2m") for title
     """
@@ -3406,6 +3216,7 @@ def plot_error_vs_uncertainty(
             results_dir=results_dir,
             video_name=video_name,
             ho3d_root=ho3d_root,
+            dataset=dataset,
         )
         if gt_map is None:
             print(
@@ -3571,6 +3382,7 @@ def main(args):
     results_dir = getattr(args, "results_dir", None)
     video_name = getattr(args, "video_name", None)
     ho3d_root = getattr(args, "ho3d_root", None)
+    dataset = getattr(args, "dataset", "auto")
 
     # If results_dir or video_name not provided, try to extract from register_folder path
     if (results_dir is None or video_name is None) and register_folder:
@@ -3676,6 +3488,7 @@ def main(args):
             results_dir=results_dir,
             video_name=video_name,
             ho3d_root=ho3d_root,
+            dataset=dataset,
         )
     else:
         print("Warning: Skipping registration stats plot due to empty residuals")
@@ -3784,6 +3597,7 @@ def main(args):
                 results_dir=results_dir,
                 video_name=video_name,
                 ho3d_root=ho3d_root,
+                dataset=dataset,
             )
             if gt_key_points is not None and len(gt_key_points) > 0:
                 plot_3d_with_gt_key_points(
@@ -3835,6 +3649,7 @@ def main(args):
                 results_dir=results_dir,
                 video_name=video_name,
                 ho3d_root=ho3d_root,
+                dataset=dataset,
             )
             if gt_key_points is not None and len(gt_key_points) > 0:
                 plot_3d_with_gt_key_points(
@@ -3879,6 +3694,7 @@ def main(args):
             results_dir=results_dir,
             video_name=video_name,
             ho3d_root=ho3d_root,
+            dataset=dataset,
             output_path=plot_error_vs_uncertainty_output_path if output_path else None,
             mode=detected_mode,
         )
@@ -3974,7 +3790,15 @@ if __name__ == "__main__":
         "--ho3d_root",
         type=str,
         default="/home/justin/data/HO3D_V3/evaluation",
-        help="HO3D dataset root directory (optional, will try to infer from video path)",
+        help="Dataset root directory (legacy name kept for compatibility)",
+    )
+
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="auto",
+        choices=["auto", "ho3d", "ycbineoat", "ycbinisaac"],
+        help="Dataset type for GT loading (default: auto)",
     )
 
     parsed_args = parser.parse_args()

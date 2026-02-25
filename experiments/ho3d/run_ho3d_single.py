@@ -157,7 +157,9 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
 
     mesh_paths = export_final_meshes_from_pipeline(pipeline, mesh_folder)
     if len(gt_poses) == 0:
-        print(f"Warning: No GT poses found for video {video_name}, skipping evaluation.")
+        print(
+            f"Warning: No GT poses found for video {video_name}, skipping evaluation."
+        )
         return
 
     gt_poses = np.array(gt_poses)

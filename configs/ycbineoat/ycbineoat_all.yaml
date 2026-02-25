@@ -104,6 +104,7 @@ register:
     select_3d_dist_fill_missing_depth: true
     select_3d_dist_window_size: 5
     select_3d_dist_min_neighbors: 1
+    select_dense_map_close_margin: 1e-3
 
     # front end
     remove_outside_mask: true
@@ -195,7 +196,7 @@ tracker:
 sampler: 
   type: uniform_fps
   params:
-    num_points: 30
+    num_points: 25
     density_per_kpx: -1
     fps_oversample_factor: 3
 

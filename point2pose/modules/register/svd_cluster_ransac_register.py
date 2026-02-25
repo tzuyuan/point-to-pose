@@ -60,6 +60,9 @@ class SVDClusterRANSACRegister(Register):
         self._select_3d_dist_min_neighbors = int(
             config.get("select_3d_dist_min_neighbors", 1)
         )
+        self._select_dense_map_close_margin = float(
+            config.get("select_dense_map_close_margin", 1e-3)
+        )
 
         self._min_var = float(config.get("min_variance", 1e-2))
 
@@ -251,7 +254,7 @@ class SVDClusterRANSACRegister(Register):
             for c in candidates:
                 T_map2cur = c["T"]
                 sdf_score = self._sdf_residual(
-                    trg_pcd_full, inverse_SE3(T_map2cur), obj
+                    trg_pcd_full, inverse_SE3(T_map2cur), obj, robust_percentile=90.0
                 )
                 if np.isfinite(sdf_score):
                     dists = float(sdf_score)
@@ -261,7 +264,25 @@ class SVDClusterRANSACRegister(Register):
                     c["3d_dist"] = float(-1)
 
                 dist_errors.append(float(dists))
-            best_cluster_idx = int(np.argmin(dist_errors))
+            ranked_idx = np.argsort(np.asarray(dist_errors, dtype=float))
+            best_cluster_idx = int(ranked_idx[0])
+
+            # Tie-break close top-2 SDF scores with a motion prior to previous estimate.
+            if ranked_idx.size >= 2:
+                second_idx = int(ranked_idx[1])
+                best_score = float(dist_errors[best_cluster_idx])
+                second_score = float(dist_errors[second_idx])
+                if (second_score - best_score) <= self._select_dense_map_close_margin:
+                    ref_T = prev_T if prev_T is not None else init_pose
+                    if ref_T is not None:
+                        d0 = self._pose_dist(candidates[best_cluster_idx]["T"], ref_T)
+                        d1 = self._pose_dist(candidates[second_idx]["T"], ref_T)
+                        candidates[best_cluster_idx]["dense_map_prev_pose_dist"] = (
+                            float(d0)
+                        )
+                        candidates[second_idx]["dense_map_prev_pose_dist"] = float(d1)
+                        if d1 < d0:
+                            best_cluster_idx = second_idx
 
         elif self._select_method == "3d_dist_kf":
             dist_errors = []
@@ -469,11 +490,14 @@ class SVDClusterRANSACRegister(Register):
             # sample a subset of the remaining pool
             samp = np.random.choice(idx, self._sample_size, replace=False)
             # fit a rigid transformation to the sampled points
-            Tk = (
-                self._weighted_svd_fit(p0[samp], tgt_pcd[samp], w[samp])
-                if w is not None
-                else self._svd_fit(p0[samp], tgt_pcd[samp])
-            )
+            try:
+                Tk = (
+                    self._weighted_svd_fit(p0[samp], tgt_pcd[samp], w[samp])
+                    if w is not None
+                    else self._svd_fit(p0[samp], tgt_pcd[samp])
+                )
+            except np.linalg.LinAlgError:
+                continue
             # Tk = self._svd_fit(p0[samp], tgt_pcd[samp])
             # compute the residuals between the transformed source points and the target points
             r = np.linalg.norm(transform_pts(Tk, p0[idx]) - tgt_pcd[idx], axis=1)
@@ -723,6 +747,35 @@ class SVDClusterRANSACRegister(Register):
         ddeg = float(np.degrees(dR))
         return dt, ddeg
 
+    def _svd_residual_outlier_fit(self, p0, tgt_pcd, N):
+        # fit transformation using svd
+        T = self._svd_fit(p0, tgt_pcd)
+
+        inliers = np.ones(N, dtype=bool)
+
+        for it in range(self._max_iter):
+            p_T = transform_pts(T, p0)
+            residuals = np.linalg.norm(p_T - tgt_pcd, axis=1)
+
+            thr = float(self._inlier_thres)
+
+            new_inliers = residuals <= thr
+
+            # stop if no change or too few inliers
+            if (
+                np.array_equal(new_inliers, inliers)
+                or new_inliers.sum() < self._min_inliers
+                or it == self._max_iter - 1
+            ):
+
+                break
+
+            inliers = new_inliers
+
+            # refit on inliers
+            T = self._svd_fit(p0[inliers], tgt_pcd[inliers])
+        return T, inliers, residuals
+
     def _sdf_residual(self, pts_cur, T_cur2obj, obj, robust_percentile=70.0):
         if (
             obj is None
@@ -767,31 +820,84 @@ class SVDClusterRANSACRegister(Register):
         support = float(np.mean(np.isfinite(sdf_vals)))
         return base + 0.05 * (1.0 - support)
 
-    def _svd_residual_outlier_fit(self, p0, tgt_pcd, N):
-        # fit transformation using svd
-        T = self._svd_fit(p0, tgt_pcd)
+    # def _sdf_residual(
+    #     self,
+    #     pts_cur,
+    #     T_cur2obj,
+    #     obj,
+    #     robust_percentile=70.0,
+    #     tau=0.02,
+    #     min_support=0.2,
+    #     min_inliers=10,
+    #     w_support=0.05,
+    #     w_inlier=0.05,
+    # ):
+    #     if (
+    #         obj is None
+    #         or getattr(obj, "sdf", None) is None
+    #         or pts_cur is None
+    #         or pts_cur.shape[0] == 0
+    #     ):
+    #         return np.inf
 
-        inliers = np.ones(N, dtype=bool)
+    #     pts_obj = transform_pts(T_cur2obj, pts_cur)
 
-        for it in range(self._max_iter):
-            p_T = transform_pts(T, p0)
-            residuals = np.linalg.norm(p_T - tgt_pcd, axis=1)
+    #     # --- NVBlox / ESDF-style ---
+    #     if getattr(obj, "sdf_volume", None) is not None and hasattr(
+    #         obj.sdf_volume, "query_sdf"
+    #     ):
+    #         qvals = obj.sdf_volume.query_sdf(pts_obj)
+    #         if qvals is None or qvals.shape[0] != pts_obj.shape[0]:
+    #             return np.inf
 
-            thr = float(self._inlier_thres)
+    #         finite = np.isfinite(qvals)
+    #         support_ratio = float(np.mean(finite))
+    #         if support_ratio < min_support:
+    #             return np.inf
 
-            new_inliers = residuals <= thr
+    #         abs_sdf = np.abs(qvals[finite])
+    #         inl = abs_sdf <= tau
+    #         if int(np.count_nonzero(inl)) < min_inliers:
+    #             return np.inf
 
-            # stop if no change or too few inliers
-            if (
-                np.array_equal(new_inliers, inliers)
-                or new_inliers.sum() < self._min_inliers
-                or it == self._max_iter - 1
-            ):
+    #         q = float(np.clip(robust_percentile, 0.0, 100.0))
+    #         base = float(np.percentile(abs_sdf[inl], q))
+    #         inlier_ratio = float(np.mean(inl))
+    #         return (
+    #             base
+    #             + w_support * (1.0 - support_ratio)
+    #             + w_inlier * (1.0 - inlier_ratio)
+    #         )
 
-                break
+    #     # --- Dense TSDF grid ---
+    #     if "tsdf" in obj.sdf:
+    #         tsdf = obj.sdf["tsdf"]
+    #         origin = obj.sdf["vol_origin"]
+    #         voxel = float(obj.sdf["voxel_size"])
+    #         vol_dim = np.array(tsdf.shape, dtype=np.int32)
 
-            inliers = new_inliers
+    #         vox = np.floor((pts_obj - origin[None, :]) / voxel).astype(np.int32)
+    #         inb = np.logical_and(
+    #             np.all(vox >= 0, axis=1), np.all(vox < vol_dim[None, :], axis=1)
+    #         )
+    #         support_ratio = float(np.mean(inb))
+    #         if support_ratio < min_support:
+    #             return np.inf
 
-            # refit on inliers
-            T = self._svd_fit(p0[inliers], tgt_pcd[inliers])
-        return T, inliers, residuals
+    #         vox_in = vox[inb]
+    #         abs_sdf = np.abs(tsdf[vox_in[:, 0], vox_in[:, 1], vox_in[:, 2]])
+
+    #         inl = abs_sdf <= tau
+    #         if int(np.count_nonzero(inl)) < min_inliers:
+    #             return np.inf
+
+    #         q = float(np.clip(robust_percentile, 0.0, 100.0))
+    #         base = float(np.percentile(abs_sdf[inl], q))
+    #         inlier_ratio = float(np.mean(inl))
+    #         return (
+    #             base
+    #             + w_support * (1.0 - support_ratio)
+    #             + w_inlier * (1.0 - inlier_ratio)
+    #         )
+
+    #     return np.inf

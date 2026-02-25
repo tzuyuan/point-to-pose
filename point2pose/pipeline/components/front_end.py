@@ -858,9 +858,7 @@ class FrontEnd:
 
         vis_obj = cur_visible[obj_idx]
 
-        both_mask = (
-            vis_obj & val_obj & uncer_obj & valid_kp_obj & finite_xy & inside_mask_np
-        )
+        both_mask = vis_obj & val_obj & uncer_obj & finite_xy & inside_mask_np
 
         idx = obj_idx[both_mask]
         key_points = obj.key_points[both_mask].copy()

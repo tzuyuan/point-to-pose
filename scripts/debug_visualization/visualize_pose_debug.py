@@ -9,10 +9,15 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 try:
-    from point2pose.io.sources.dataset.datareader import Ho3dReader, YcbineoatReader
+    from point2pose.io.sources.dataset.datareader import (
+        Ho3dReader,
+        YcbineoatReader,
+        YCBInIsaacReader,
+    )
 except Exception:
     Ho3dReader = None
     YcbineoatReader = None
+    YCBInIsaacReader = None
 
 from point2pose.utils.transform import inverse_SE3
 
@@ -2720,9 +2725,9 @@ def main():
     parser.add_argument(
         "--dataset",
         type=str,
-        choices=["ho3d", "ycbineoat"],
+        choices=["ho3d", "ycbineoat", "ycbinisaac"],
         default="ho3d",
-        help="Dataset type: 'ho3d' or 'ycbineoat' (default: ho3d)",
+        help="Dataset type: 'ho3d', 'ycbineoat', or 'ycbinisaac' (default: ho3d)",
     )
     parser.add_argument(
         "--data_path",
@@ -2813,7 +2818,12 @@ def main():
     # 2. Load GT if provided
     gt_poses = None
     if args.data_path and args.video_name:
-        if Ho3dReader is None or YcbineoatReader is None:
+        missing_reader = (
+            (args.dataset == "ho3d" and Ho3dReader is None)
+            or (args.dataset == "ycbineoat" and YcbineoatReader is None)
+            or (args.dataset == "ycbinisaac" and YCBInIsaacReader is None)
+        )
+        if missing_reader:
             print(
                 "Warning: Dataset readers could not be imported (missing optional deps like cv2). "
                 "Skipping GT load."
@@ -2837,6 +2847,9 @@ def main():
             elif args.dataset == "ycbineoat":
                 # YCBInEoat layout: root/VIDEO_NAME
                 video_path = os.path.join(args.data_path, args.video_name)
+            elif args.dataset == "ycbinisaac":
+                # YCBInIsaac layout: root/VIDEO_NAME
+                video_path = os.path.join(args.data_path, args.video_name)
             else:
                 print(f"Error: Unknown dataset type: {args.dataset}")
                 video_path = None
@@ -2854,6 +2867,9 @@ def main():
                     elif args.dataset == "ycbineoat":
                         reader = YcbineoatReader(video_path)
                         reader_name = "YcbineoatReader"
+                    elif args.dataset == "ycbinisaac":
+                        reader = YCBInIsaacReader(video_path)
+                        reader_name = "YCBInIsaacReader"
                     else:
                         raise ValueError(f"Unknown dataset type: {args.dataset}")
 

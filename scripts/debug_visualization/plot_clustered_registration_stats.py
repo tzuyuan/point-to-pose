@@ -49,10 +49,15 @@ if project_root not in sys.path:
 
 # Optional dataset readers for GT pose
 try:
-    from point2pose.io.sources.dataset.datareader import Ho3dReader, YcbineoatReader
+    from point2pose.io.sources.dataset.datareader import (
+        Ho3dReader,
+        YcbineoatReader,
+        YCBInIsaacReader,
+    )
 except Exception:
     Ho3dReader = None
     YcbineoatReader = None
+    YCBInIsaacReader = None
 
 try:
     # For pose distance metric matching the register's `_pose_dist`
@@ -155,6 +160,49 @@ class _SimpleYcbineoatGTReader:
             raise FileNotFoundError(
                 f"No GT pose files found under: {self.video_dir}/annotated_poses"
             )
+
+    def __len__(self):
+        return len(self.gt_pose_files)
+
+    def get_gt_pose(self, i: int) -> Optional[np.ndarray]:
+        try:
+            pose = np.loadtxt(self.gt_pose_files[int(i)]).reshape(4, 4)
+            return np.asarray(pose, dtype=float)
+        except Exception:
+            return None
+
+
+class _SimpleYcbinisaacGTReader:
+    """Lightweight YCBInIsaac GT pose reader.
+
+    Supports both layouts:
+      - video_dir/annotated_poses/<object_name>/*
+      - video_dir/annotated_poses/* (flat, fallback)
+    """
+
+    def __init__(self, video_dir: str):
+        self.video_dir = video_dir
+        poses_root = os.path.join(self.video_dir, "annotated_poses")
+        if not os.path.isdir(poses_root):
+            raise FileNotFoundError(
+                f"Missing annotated_poses directory in: {video_dir}"
+            )
+
+        object_dirs = [
+            d
+            for d in sorted(os.listdir(poses_root))
+            if os.path.isdir(os.path.join(poses_root, d))
+        ]
+        if object_dirs:
+            first_obj = object_dirs[0]
+            self.gt_pose_files = sorted(
+                glob.glob(os.path.join(poses_root, first_obj, "*"))
+            )
+        else:
+            self.gt_pose_files = sorted(glob.glob(os.path.join(poses_root, "*")))
+
+        if not self.gt_pose_files:
+            raise FileNotFoundError(f"No GT pose files found under: {poses_root}")
 
     def __len__(self):
         return len(self.gt_pose_files)
@@ -351,7 +399,14 @@ def _pose_dist(Ta: np.ndarray, Tb: np.ndarray) -> float:
 def _infer_dataset(video_dir: str) -> str:
     if not video_dir:
         return "auto"
-    if os.path.isdir(os.path.join(video_dir, "annotated_poses")):
+    annotated_poses_dir = os.path.join(video_dir, "annotated_poses")
+    if os.path.isdir(annotated_poses_dir):
+        has_obj_subdirs = any(
+            os.path.isdir(os.path.join(annotated_poses_dir, d))
+            for d in os.listdir(annotated_poses_dir)
+        )
+        if has_obj_subdirs:
+            return "ycbinisaac"
         return "ycbineoat"
     rgb_dir = os.path.join(video_dir, "rgb")
     if os.path.isdir(rgb_dir):
@@ -389,6 +444,16 @@ def _build_reader(dataset: str, video_dir: str, ho3d_root: Optional[str]) -> Any
                 pass
         try:
             return _SimpleYcbineoatGTReader(video_dir)
+        except Exception:
+            return None
+    if dataset == "ycbinisaac":
+        if YCBInIsaacReader is not None:
+            try:
+                return YCBInIsaacReader(video_dir)
+            except Exception:
+                pass
+        try:
+            return _SimpleYcbinisaacGTReader(video_dir)
         except Exception:
             return None
     return None
@@ -998,6 +1063,23 @@ def _load_frame_from_reader(reader: Any, frame_idx: int) -> Optional[Any]:
                 intrinsics=reader.K,
                 depth_factor=1.0,
             )
+        elif YCBInIsaacReader is not None and isinstance(reader, YCBInIsaacReader):
+            rgb = reader.get_color(frame_idx)
+            depth = reader.get_depth(frame_idx)
+            mask = reader.get_mask(frame_idx)
+            H, W = rgb.shape[:2]
+            if torch is not None:
+                mask_tensor = torch.from_numpy(mask).float().unsqueeze(0).unsqueeze(0)
+            else:
+                mask_tensor = np.expand_dims(np.expand_dims(mask, 0), 0)
+            return Frame(
+                id=frame_idx,
+                rgb=rgb,
+                depth=depth,
+                mask=mask_tensor,
+                intrinsics=reader.K,
+                depth_factor=1.0,
+            )
     except Exception as e:
         print(f"Warning: Failed to load frame {frame_idx}: {e}")
         return None
@@ -1396,7 +1478,7 @@ def main():
         "--dataset",
         type=str,
         default="auto",
-        choices=["auto", "ho3d", "ycbineoat"],
+        choices=["auto", "ho3d", "ycbineoat", "ycbinisaac"],
         help="Dataset type for GT loading (default: auto).",
     )
     ap.add_argument(
@@ -1476,6 +1558,27 @@ def main():
             for ycb_root in ycbineoat_roots:
                 if os.path.isdir(ycb_root):
                     candidates.append(os.path.join(ycb_root, args.video_name))
+                    break
+
+        # For YCBInIsaac dataset
+        if args.dataset in ("auto", "ycbinisaac"):
+            ycbinisaac_roots = []
+            if args.ho3d_root:
+                parent = os.path.dirname(os.path.normpath(args.ho3d_root))
+                ycbinisaac_roots.append(parent)
+                ycbinisaac_roots.append(os.path.join(parent, "YCBInIsaac"))
+
+            ycbinisaac_roots.extend(
+                [
+                    "/mnt/9a72c439-d0a7-45e8-8d20-d7a235d02763/DATASET/YCBInIsaac",
+                    os.path.expanduser("~/data/YCBInIsaac"),
+                    os.path.expanduser("~/datasets/YCBInIsaac"),
+                ]
+            )
+
+            for isaac_root in ycbinisaac_roots:
+                if os.path.isdir(isaac_root):
+                    candidates.append(os.path.join(isaac_root, args.video_name))
                     break
 
         # Try to find the video directory
