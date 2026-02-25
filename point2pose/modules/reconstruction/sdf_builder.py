@@ -1,7 +1,9 @@
 import numpy as np
+import os
 
 from numba import njit, prange
 import open3d as o3d
+import trimesh
 from skimage import measure
 from typing import Optional
 
@@ -441,6 +443,7 @@ class SDFBuilder:
 
     def __init__(self, cfg):
         self.enabled = bool(cfg.get("build_sdf_after_global_opt", True))
+        self.fuse_color = bool(cfg.get("sdf_fuse_color", True))
         self.use_gpu = bool(cfg.get("sdf_use_gpu", True))
         self.backend = str(cfg.get("sdf_backend", "nvblox")).lower()
         self.voxel_size = float(cfg.get("sdf_voxel_size", 0.005))
@@ -506,7 +509,7 @@ class SDFBuilder:
             self._init_object_volume(obj, pts_obj)
 
         frame = keyframe.frame
-        if frame is None or frame.depth is None or frame.rgb is None:
+        if frame is None or frame.depth is None:
             return False
 
         depth_m = frame.depth.astype(np.float32) / float(frame.depth_factor)
@@ -526,9 +529,17 @@ class SDFBuilder:
         else:
             mask = None
 
+        color_im = None
+        if self.fuse_color and getattr(frame, "rgb", None) is not None:
+            color_im = np.asarray(frame.rgb)
+        else:
+            # Keep geometry integration working even when RGB is unavailable or disabled.
+            h, w = depth_m.shape
+            color_im = np.zeros((h, w, 3), dtype=np.uint8)
+
         cam_pose_obj = np.linalg.inv(np.asarray(keyframe.pose, dtype=np.float32))
         obj.sdf_volume.integrate(
-            color_im=np.asarray(frame.rgb),
+            color_im=color_im,
             depth_im=depth_m,
             cam_intr=np.asarray(frame.intrinsics, dtype=np.float32),
             cam_pose=cam_pose_obj,
@@ -540,6 +551,7 @@ class SDFBuilder:
         tsdf_vol, color_vol = obj.sdf_volume.get_volume()
         obj.sdf = {
             "backend": self.backend,
+            "fuse_color": bool(self.fuse_color),
             "vol_bnds": obj.sdf_volume._vol_bnds.copy(),
             "vol_origin": obj.sdf_volume._vol_origin.copy(),
             "voxel_size": float(obj.sdf_volume._voxel_size),
@@ -560,17 +572,33 @@ class SDFBuilder:
             ):
                 return True
 
-            tsdf_vol, color_vol = obj.sdf_volume.get_volume()
-            if tsdf_vol is None:
+            mesh = self._build_colored_o3d_mesh(obj)
+            if mesh is None:
                 return False
-            verts, faces, norms, _ = measure.marching_cubes(
-                tsdf_vol, level=0, method="lewiner"
-            )
+            o3d.io.write_triangle_mesh(save_path, mesh, write_ascii=False)
+            return True
+        except Exception:
+            return False
+
+    def _build_colored_o3d_mesh(self, obj):
+        tsdf_vol, color_vol = obj.sdf_volume.get_volume()
+        if tsdf_vol is None:
+            return None
+
+        verts, faces, norms, _ = measure.marching_cubes(
+            tsdf_vol, level=0, method="lewiner"
+        )
+        verts_xyz = verts * obj.sdf_volume._voxel_size + obj.sdf_volume._vol_origin
+
+        mesh = o3d.geometry.TriangleMesh()
+        mesh.vertices = o3d.utility.Vector3dVector(verts_xyz.astype(np.float64))
+        mesh.triangles = o3d.utility.Vector3iVector(faces.astype(np.int32))
+        mesh.vertex_normals = o3d.utility.Vector3dVector(norms.astype(np.float64))
+
+        if color_vol is not None:
             verts_ind = np.clip(
                 np.round(verts).astype(int), 0, np.array(tsdf_vol.shape) - 1
             )
-            verts_xyz = verts * obj.sdf_volume._voxel_size + obj.sdf_volume._vol_origin
-
             rgb_vals = color_vol[verts_ind[:, 0], verts_ind[:, 1], verts_ind[:, 2]]
             cconst = obj.sdf_volume._color_const
             colors_b = np.floor(rgb_vals / cconst)
@@ -580,13 +608,46 @@ class SDFBuilder:
                 np.stack([colors_r, colors_g, colors_b], axis=1).astype(np.float32)
                 / 255.0
             )
-
-            mesh = o3d.geometry.TriangleMesh()
-            mesh.vertices = o3d.utility.Vector3dVector(verts_xyz.astype(np.float64))
-            mesh.triangles = o3d.utility.Vector3iVector(faces.astype(np.int32))
-            mesh.vertex_normals = o3d.utility.Vector3dVector(norms.astype(np.float64))
             mesh.vertex_colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
-            o3d.io.write_triangle_mesh(save_path, mesh, write_ascii=False)
-            return True
+
+        return mesh
+
+    def export_textured_mesh(self, obj, save_path):
+        if getattr(obj, "sdf_volume", None) is None:
+            return False
+        try:
+            save_dir = os.path.dirname(save_path)
+            if save_dir:
+                os.makedirs(save_dir, exist_ok=True)
+
+            # Let backend-specific exporters handle the target path if available.
+            if hasattr(obj.sdf_volume, "export_mesh") and obj.sdf_volume.export_mesh(
+                save_path
+            ):
+                return True
+
+            mesh = self._build_colored_o3d_mesh(obj)
+            if mesh is None:
+                return False
+
+            verts = np.asarray(mesh.vertices)
+            faces = np.asarray(mesh.triangles)
+            if verts.size == 0 or faces.size == 0:
+                return False
+
+            kwargs = {"process": False}
+            if len(mesh.vertex_normals) == len(mesh.vertices):
+                kwargs["vertex_normals"] = np.asarray(mesh.vertex_normals)
+            if len(mesh.vertex_colors) == len(mesh.vertices):
+                colors = np.asarray(mesh.vertex_colors)
+                colors = np.clip(np.round(colors * 255.0), 0, 255).astype(np.uint8)
+                if colors.shape[1] == 3:
+                    alpha = np.full((colors.shape[0], 1), 255, dtype=np.uint8)
+                    colors = np.hstack([colors, alpha])
+                kwargs["vertex_colors"] = colors
+
+            tri_mesh = trimesh.Trimesh(vertices=verts, faces=faces, **kwargs)
+            tri_mesh.export(save_path)
+            return os.path.exists(save_path)
         except Exception:
             return False

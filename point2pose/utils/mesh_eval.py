@@ -78,6 +78,7 @@ def export_final_meshes_from_pipeline(
     sdf_builder = getattr(pipeline, "sdf_builder", None)
     for obj_idx, obj in enumerate(pipeline.objects):
         save_path = os.path.join(mesh_dir, f"{prefix}_{obj_idx}.ply")
+        textured_save_path = os.path.join(mesh_dir, f"{prefix}_{obj_idx}_textured.glb")
         saved = False
         if sdf_builder is not None and hasattr(sdf_builder, "export_debug_mesh"):
             try:
@@ -90,6 +91,13 @@ def export_final_meshes_from_pipeline(
                 saved = bool(obj.sdf_volume.export_mesh(save_path))
             except Exception:
                 saved = False
+
+        # Also export a textured final mesh when possible.
+        if sdf_builder is not None and hasattr(sdf_builder, "export_textured_mesh"):
+            try:
+                sdf_builder.export_textured_mesh(obj, textured_save_path)
+            except Exception:
+                pass
 
         out[obj_idx] = save_path if saved and os.path.exists(save_path) else None
 

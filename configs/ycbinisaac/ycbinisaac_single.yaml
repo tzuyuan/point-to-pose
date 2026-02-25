@@ -59,11 +59,12 @@ reconstructor:
     build_sdf_after_global_opt: true
     sdf_use_gpu: true
     sdf_backend: python_tsdf
-    sdf_voxel_size: 0.003
+    sdf_voxel_size: 0.005
     sdf_bounds_padding: 0.02
     sdf_min_points: 300
     sdf_filter_max_radius: 0.25
     sdf_filter_keep_percentile: 98.0
+    sdf_fuse_color: true
 
 
 

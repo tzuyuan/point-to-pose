@@ -64,6 +64,7 @@ reconstructor:
     sdf_min_points: 300
     sdf_filter_max_radius: 0.25
     sdf_filter_keep_percentile: 98.0
+    sdf_fuse_color: true
 
 
 
