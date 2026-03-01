@@ -9,3 +9,4 @@ from .svd_cluster_ransac_register import SVDClusterRANSACRegister
 from .svd_cluster_register import SVDClusterRegister
 from .pnp_cluster_ransac_register import PnPClusterRANSACRegister
 from .svd_outlier_sdf_register import SVDOutlierSDFRegister
+from .svd_cluster_sdf_register import SVDClusterSDFRefineRegister

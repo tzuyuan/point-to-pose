@@ -38,6 +38,38 @@ class SVDClusterRegister(Register):
         self._min_inliers = int(config.get("min_inliers", 3))
         self._select_method = config.get("select_method", "reproj_error")
 
+        self._select_w_prev = float(config.get("select_w_prev", 0.55))
+        self._select_w_kf = float(config.get("select_w_kf", 0.30))
+        self._select_w_motion = float(config.get("select_w_motion", 0.15))
+        self._select_w_sparse_map = float(config.get("select_w_sparse_map", 0.7))
+        self._select_w_sdf = float(config.get("select_w_sdf", 0.3))
+        self._select_overlap_dist = float(config.get("select_overlap_dist", 0.02))
+        self._select_min_overlap_ratio = float(
+            config.get("select_min_overlap_ratio", 0.15)
+        )
+        self._select_robust_percentile = float(
+            config.get("select_robust_percentile", 70.0)
+        )
+        self._select_bad_penalty = float(config.get("select_bad_penalty", 0.02))
+        self._select_3d_dist_min_depth = float(
+            config.get("select_3d_dist_min_depth", 0.08)
+        )
+        self._select_3d_dist_max_depth = float(
+            config.get("select_3d_dist_max_depth", 0.5)
+        )
+        self._select_3d_dist_fill_missing_depth = bool(
+            config.get("select_3d_dist_fill_missing_depth", False)
+        )
+        self._select_3d_dist_window_size = int(
+            config.get("select_3d_dist_window_size", 3)
+        )
+        self._select_3d_dist_min_neighbors = int(
+            config.get("select_3d_dist_min_neighbors", 1)
+        )
+        self._select_dense_map_close_margin = float(
+            config.get("select_dense_map_close_margin", 1e-3)
+        )
+
         # uncertainty weights (optional)
         self._use_uncertainty = bool(config.get("use_uncertainty", False))
         self._min_var = float(config.get("min_variance", 1e-2))
@@ -143,6 +175,51 @@ class SVDClusterRegister(Register):
                 c["3d_dist"] = float(dists)
             best_cluster_idx = int(np.argmin(dist_errors))
 
+        elif self._select_method == "3d_dist_dense_map":
+            dist_errors = []
+            trg_pcd_full = extract_cropped_point_cloud(
+                cur_frame,
+                obj_id,
+                min_depth=self._select_3d_dist_min_depth,
+                max_depth=self._select_3d_dist_max_depth,
+                fill_missing_depth=self._select_3d_dist_fill_missing_depth,
+                window_size=self._select_3d_dist_window_size,
+                min_neighbors=self._select_3d_dist_min_neighbors,
+            )
+            # map_pts = obj.key_points
+            for c in candidates:
+                T_map2cur = c["T"]
+                sdf_score = self._sdf_residual(
+                    trg_pcd_full, inverse_SE3(T_map2cur), obj, robust_percentile=90.0
+                )
+                if np.isfinite(sdf_score):
+                    dists = float(sdf_score)
+                    c["3d_dist"] = float(dists)
+                else:
+                    dists = np.finfo(np.float32).max
+                    c["3d_dist"] = float(-1)
+
+                dist_errors.append(float(dists))
+            ranked_idx = np.argsort(np.asarray(dist_errors, dtype=float))
+            best_cluster_idx = int(ranked_idx[0])
+
+            # Tie-break close top-2 SDF scores with a motion prior to previous estimate.
+            if ranked_idx.size >= 2:
+                second_idx = int(ranked_idx[1])
+                best_score = float(dist_errors[best_cluster_idx])
+                second_score = float(dist_errors[second_idx])
+                if (second_score - best_score) <= self._select_dense_map_close_margin:
+                    ref_T = prev_T if prev_T is not None else init_pose
+                    if ref_T is not None:
+                        d0 = self._pose_dist(candidates[best_cluster_idx]["T"], ref_T)
+                        d1 = self._pose_dist(candidates[second_idx]["T"], ref_T)
+                        candidates[best_cluster_idx]["dense_map_prev_pose_dist"] = (
+                            float(d0)
+                        )
+                        candidates[second_idx]["dense_map_prev_pose_dist"] = float(d1)
+                        if d1 < d0:
+                            best_cluster_idx = second_idx
+
         elif self._select_method == "3d_dist_prev_and_kf":
             dist_errors = []
             src_pcd_full = extract_cropped_point_cloud(cur_frame, obj_id)
@@ -226,9 +303,15 @@ class SVDClusterRegister(Register):
         ww = w[idx] if (w is not None) else None
 
         # initial fit (deterministic)
-        T_rel = (
-            self._weighted_svd_fit(P, Q, ww) if ww is not None else self._svd_fit(P, Q)
-        )
+        try:
+            T_rel = (
+                self._weighted_svd_fit(P, Q, ww)
+                if ww is not None
+                else self._svd_fit(P, Q)
+            )
+        except Exception as e:
+            print(f"[Register] Error in svd fit: {e}")
+            return None
 
         inliers = np.ones(idx.size, dtype=bool)
         last_thr = None
@@ -275,9 +358,17 @@ class SVDClusterRegister(Register):
 
             if ww is not None:
                 win = ww[inliers]
-                T_rel = self._weighted_svd_fit(Pin, Qin, win)
+                try:
+                    T_rel = self._weighted_svd_fit(Pin, Qin, win)
+                except Exception as e:
+                    print(f"[Register] Error in weighted svd fit: {e}")
+                    continue
             else:
-                T_rel = self._svd_fit(Pin, Qin)
+                try:
+                    T_rel = self._svd_fit(Pin, Qin)
+                except Exception as e:
+                    print(f"[Register] Error in svd fit: {e}")
+                    continue
 
         # finalize inlier set under the last threshold
         if last_res is None:
@@ -433,3 +524,47 @@ class SVDClusterRegister(Register):
         nn_index = cKDTree(source_pcd)
         nn_dists, _ = nn_index.query(target_pcd, k=1, workers=-1)
         return nn_dists.mean()
+
+    def _sdf_residual(self, pts_cur, T_cur2obj, obj, robust_percentile=70.0):
+        if (
+            obj is None
+            or getattr(obj, "sdf", None) is None
+            or pts_cur is None
+            or pts_cur.shape[0] == 0
+        ):
+            return np.inf
+
+        pts_obj = transform_pts(T_cur2obj, pts_cur)
+        sdf_vals = None
+
+        # nvblox-style query path
+        if getattr(obj, "sdf_volume", None) is not None and hasattr(
+            obj.sdf_volume, "query_sdf"
+        ):
+            qvals = obj.sdf_volume.query_sdf(pts_obj)
+            if qvals is not None and qvals.shape[0] == pts_obj.shape[0]:
+                sdf_vals = np.abs(qvals[np.isfinite(qvals)])
+
+        # legacy dense grid path
+        if (sdf_vals is None or sdf_vals.size == 0) and "tsdf" in obj.sdf:
+            tsdf = obj.sdf["tsdf"]
+            origin = obj.sdf["vol_origin"]
+            voxel = float(obj.sdf["voxel_size"])
+            vol_dim = np.array(tsdf.shape, dtype=np.int32)
+            vox = np.floor((pts_obj - origin[None, :]) / voxel).astype(np.int32)
+
+            inb = np.logical_and(
+                np.all(vox >= 0, axis=1), np.all(vox < vol_dim[None, :], axis=1)
+            )
+            if not np.any(inb):
+                return np.inf
+            vox_in = vox[inb]
+            sdf_vals = np.abs(tsdf[vox_in[:, 0], vox_in[:, 1], vox_in[:, 2]])
+
+        if sdf_vals is None or sdf_vals.size == 0:
+            return np.inf
+
+        q = float(np.clip(robust_percentile, 0.0, 100.0))
+        base = float(np.percentile(sdf_vals, q))
+        support = float(np.mean(np.isfinite(sdf_vals)))
+        return base + 0.05 * (1.0 - support)

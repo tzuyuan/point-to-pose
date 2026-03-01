@@ -40,6 +40,7 @@ EXTRACT_RAGGED_FIELDS = {
     "extract_valid_kp_mask",
     "extract_uncertainty_thres",
     "extract_obj_idx",
+    "extract_obj_rows",
     "extract_inside_mask",
     "extract_finite_xy",
 }

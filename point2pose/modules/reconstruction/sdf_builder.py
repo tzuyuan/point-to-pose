@@ -487,6 +487,10 @@ class SDFBuilder:
             )
         obj.sdf_num_integrated = 0
 
+        print(
+            f"Initialized SDF volume for object {getattr(obj, 'obj_id', 'backend is: '+self.backend)} with bounds {vol_bnds} and voxel size {self.voxel_size}"
+        )
+
     def integrate_keyframe(self, obj, keyframe):
         if not self.enabled:
             return False

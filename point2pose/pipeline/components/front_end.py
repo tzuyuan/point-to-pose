@@ -2,9 +2,11 @@ import time
 import os
 import numpy as np
 import torch
+import torch.nn.functional as F
 import open3d as o3d
 from typing import Tuple, Optional, Dict, Any
 from scipy.spatial.transform import Rotation as scipy_R
+from scipy.optimize import minimize
 
 from point2pose.core.build import build_from_cfg
 from point2pose.core.module_registry import REGISTER, TRACKER, SEGMENTER
@@ -49,8 +51,39 @@ class FrontEnd:
         # -------------- registration params --------------
         self.reg_uncer_thres = self.cfg.register.params.get("uncer_thres", 0.3)
         self.reg_residual_thres = self.cfg.register.params.get("residual_thres", 0.0007)
+        self.reg_mask_border_margin_px = int(
+            self.cfg.register.params.get("mask_border_margin_px", 0)
+        )
         self._reg_remove_outside_mask = self.cfg.register.params.get(
             "remove_outside_mask", False
+        )
+        self.max_rel_rotation_deg = float(
+            self.pipeline_cfg.get("max_rel_rotation_deg", 20.0)
+        )
+        self.max_rel_translation = float(self.pipeline_cfg.get("max_rel_translation", 0.05))
+        self.pose_jump_guard_enable = bool(
+            self.pipeline_cfg.get("pose_jump_guard_enable", True)
+        )
+        self.pose_jump_guard_trans_thres = float(
+            self.pipeline_cfg.get("pose_jump_guard_trans_thres", self.max_rel_translation)
+        )
+        self.pose_jump_guard_rot_deg_thres = float(
+            self.pipeline_cfg.get(
+                "pose_jump_guard_rot_deg_thres", self.max_rel_rotation_deg
+            )
+        )
+        reg_min_inliers = int(self.cfg.register.params.get("min_inliers", 5))
+        self.pose_jump_guard_min_inliers = int(
+            self.pipeline_cfg.get("pose_jump_guard_min_inliers", max(8, reg_min_inliers))
+        )
+        self.pose_jump_guard_min_inlier_ratio = float(
+            self.pipeline_cfg.get("pose_jump_guard_min_inlier_ratio", 0.2)
+        )
+        self.pose_jump_guard_single_cluster_min_inliers = int(
+            self.pipeline_cfg.get(
+                "pose_jump_guard_single_cluster_min_inliers",
+                max(self.pose_jump_guard_min_inliers, reg_min_inliers + 2),
+            )
         )
 
         # -------------- registration mode --------------
@@ -79,6 +112,27 @@ class FrontEnd:
         self.inlier_drop_ratio = self.pipeline_cfg.get(
             "inlier_drop_ratio", 0.3
         )  # ratio threshold for sudden inlier drop (e.g., 0.5 means 50% drop)
+        self.dense_recovery_min_points = int(
+            self.pipeline_cfg.get("dense_recovery_min_points", 100)
+        )
+        self.dense_recovery_sdf_percentile = float(
+            self.pipeline_cfg.get("dense_recovery_sdf_percentile", 70.0)
+        )
+        self.dense_recovery_sdf_max_points = int(
+            self.pipeline_cfg.get("dense_recovery_sdf_max_points", 2000)
+        )
+        self.dense_recovery_sdf_rot_bound = float(
+            self.pipeline_cfg.get("dense_recovery_sdf_rot_bound", 0.15)
+        )
+        self.dense_recovery_sdf_trans_bound = float(
+            self.pipeline_cfg.get("dense_recovery_sdf_trans_bound", 0.03)
+        )
+        self.dense_recovery_sdf_max_iter = int(
+            self.pipeline_cfg.get("dense_recovery_sdf_max_iter", 25)
+        )
+        self.dense_recovery_sdf_min_improve = float(
+            self.pipeline_cfg.get("dense_recovery_sdf_min_improve", 1e-4)
+        )
 
         # -------------- debug related --------------
         self.debug_level = self.pipeline_cfg.get("debug_level", 0)
@@ -107,6 +161,45 @@ class FrontEnd:
         )
         self.vel_trans_change_thres = float(
             self.pipeline_cfg.get("vel_trans_change_thres", 0.03)
+        )
+
+        # Fallback: when confirmed valid map points are too few, temporarily allow
+        # tentative points (obj.valid=False) that pass current frame quality gates.
+        fallback_min_cfg = int(
+            self.pipeline_cfg.get("tentative_fallback_min_valid_points", 4)
+        )
+        reg_min_inliers = int(self.cfg.register.params.get("min_inliers", 3))
+        reg_sample_size = int(self.cfg.register.params.get("sample_size", 3))
+        self.tentative_fallback_min_valid_points = max(
+            fallback_min_cfg, reg_min_inliers, reg_sample_size, 3
+        )
+        if self.tentative_fallback_min_valid_points > fallback_min_cfg:
+            print(
+                "[FrontEnd] tentative_fallback_min_valid_points raised from "
+                f"{fallback_min_cfg} to {self.tentative_fallback_min_valid_points} "
+                f"(register min_inliers={reg_min_inliers}, sample_size={reg_sample_size})."
+            )
+
+        fallback_max_cfg = int(
+            self.pipeline_cfg.get("tentative_fallback_max_points", 20)
+        )
+        self.tentative_fallback_max_points = max(
+            fallback_max_cfg, self.tentative_fallback_min_valid_points
+        )
+        if self.tentative_fallback_max_points > fallback_max_cfg:
+            print(
+                "[FrontEnd] tentative_fallback_max_points raised from "
+                f"{fallback_max_cfg} to {self.tentative_fallback_max_points} "
+                "to satisfy the fallback minimum."
+            )
+        self.tentative_fallback_recent_frames = int(
+            self.pipeline_cfg.get("tentative_fallback_recent_frames", 20)
+        )
+        self.tentative_fallback_uncer_scale = float(
+            self.pipeline_cfg.get("tentative_fallback_uncer_scale", 1.0)
+        )
+        self.tentative_fallback_allow_stale_when_empty = bool(
+            self.pipeline_cfg.get("tentative_fallback_allow_stale_when_empty", True)
         )
 
     def initialize(self, frame):
@@ -260,6 +353,7 @@ class FrontEnd:
 
                 stats_reg["correspond_curr3d"] = correspond_curr3d
                 stats_reg["valid_idx"] = idx
+                self._attach_sampling_hint_stats(stats_reg, valid_stats)
 
             elif self.frame_reg_mode == "f2m":
                 # Frame-to-map registration (absolute pose)
@@ -285,6 +379,8 @@ class FrontEnd:
                         uncertainties,
                         frame.mask[obj_id, 0],
                         uncertainty_thres=self.reg_uncer_thres,
+                        mask_border_margin_px=self.reg_mask_border_margin_px,
+                        frame_id=frame.id,
                     )
                 )
 
@@ -308,6 +404,9 @@ class FrontEnd:
                 # solve frame to map registration
                 if key_points.shape[0] >= 3 and correspond_curr3d.shape[0] >= 3:
                     t_start = time.time()
+                    if frame.id == 100:
+                        print("frame id 100")
+
                     T_c2w_est, stats_reg = self.register.register(
                         src_pcd=key_points,
                         tgt_pcd=correspond_curr3d,
@@ -323,6 +422,17 @@ class FrontEnd:
                     )
                     fe_timings["registration"] += time.time() - t_start
                     mean_res = self._compute_mean_residual(stats_reg)
+
+                    T_c2w_est, jump_rejected, jump_info = self._apply_pose_jump_guard(
+                        T_candidate=T_c2w_est,
+                        T_prev=prev_pose,
+                        stats=stats_reg,
+                    )
+                    stats_reg["pose_jump_guard_info"] = jump_info
+                    if jump_rejected:
+                        obj.lost = True
+                    elif 0 < mean_res < self.reg_residual_thres:
+                        obj.lost = False
                 else:
                     print(
                         f"[FrontEnd] Frame {frame.id} - Object {obj_id} - Not enough points for registration."
@@ -334,8 +444,10 @@ class FrontEnd:
 
                 stats_reg["correspond_curr3d"] = correspond_curr3d
                 stats_reg["valid_idx"] = idx
+                self._attach_sampling_hint_stats(stats_reg, valid_stats)
 
             T_rel_dense = None
+            T_c2w_dense = None
             # Store before dense recovery info
             pose_before_dense = None
             rel_before_dense = None
@@ -345,12 +457,13 @@ class FrontEnd:
             result.dense_recovery_triggered[obj_id] = False
 
             # Check for sudden jump/drop and apply dense registration if needed
-            # Note: Dense recovery currently only works with f2f mode
             if (
                 self.use_dense_registration
                 and self.dense_register is not None
-                and self.prev_frame is not None
-                and self.frame_reg_mode == "f2f"
+                and (
+                    (self.frame_reg_mode == "f2f" and self.prev_frame is not None)
+                    or self.frame_reg_mode == "f2m"
+                )
             ):
                 should_recover, reason = self._check_registration_quality(
                     obj_id, mean_res, stats_reg
@@ -365,7 +478,16 @@ class FrontEnd:
                 if should_recover:
                     # Capture state before dense recovery
                     pose_before_dense = obj.pose.copy()
-                    rel_before_dense = T_rel.copy() if T_rel is not None else np.eye(4)
+                    if self.frame_reg_mode == "f2f":
+                        rel_before_dense = (
+                            T_rel.copy() if T_rel is not None else np.eye(4)
+                        )
+                    else:
+                        rel_before_dense = (
+                            T_c2w_est.copy()
+                            if T_c2w_est is not None
+                            else obj.pose.copy()
+                        )
                     stats_before_dense = stats_reg.copy() if stats_reg else {}
 
                     print(
@@ -375,9 +497,20 @@ class FrontEnd:
 
                     # perform dense recovery
                     t_start = time.time()
-                    T_rel_dense, stats_dense_after = self._apply_dense_recovery(
-                        obj_id, self.prev_frame, frame, T_rel
-                    )
+                    if self.frame_reg_mode == "f2f":
+                        T_rel_dense, stats_dense_after = self._apply_dense_recovery(
+                            obj_id, self.prev_frame, frame, T_rel
+                        )
+                    else:
+                        init_pose = T_c2w_est if T_c2w_est is not None else obj.pose
+                        T_c2w_dense, stats_dense_after = (
+                            self._apply_dense_recovery_f2m_sdf(
+                                obj_id=obj_id,
+                                curr_frame=frame,
+                                obj=obj,
+                                init_pose=init_pose,
+                            )
+                        )
                     fe_timings["dense_recovery"] += time.time() - t_start
 
                     # Store dense recovery info in result
@@ -386,8 +519,11 @@ class FrontEnd:
                     result.dense_recovery_rel_before[obj_id] = rel_before_dense
                     result.dense_recovery_stats_before[obj_id] = stats_before_dense
 
-                    if T_rel_dense is not None:
-                        result.dense_recovery_rel_after[obj_id] = T_rel_dense
+                    dense_after_pose = (
+                        T_rel_dense if self.frame_reg_mode == "f2f" else T_c2w_dense
+                    )
+                    if dense_after_pose is not None:
+                        result.dense_recovery_rel_after[obj_id] = dense_after_pose
                         result.dense_recovery_stats_after[obj_id] = (
                             stats_dense_after if stats_dense_after else {}
                         )
@@ -397,9 +533,16 @@ class FrontEnd:
 
             # Predict odom pose
             T_prev = obj.pose.copy()
-            if T_rel_dense is not None:
-                # Dense recovery (only for f2f mode)
+            if self.frame_reg_mode == "f2f" and T_rel_dense is not None:
+                # Dense recovery (f2f mode)
                 T_odom = T_rel_dense @ T_prev
+                print(
+                    f"[FrontEnd] Frame {frame.id} - Object {obj_id} - "
+                    "Dense recovery successful"
+                )
+            elif self.frame_reg_mode == "f2m" and T_c2w_dense is not None:
+                # Dense recovery (f2m mode)
+                T_odom = T_c2w_dense
                 print(
                     f"[FrontEnd] Frame {frame.id} - Object {obj_id} - "
                     "Dense recovery successful"
@@ -591,6 +734,58 @@ class FrontEnd:
         result.mean_residuals[obj_id] = mean_res
         result.valid_stats[obj_id] = valid_stats
 
+    def _attach_sampling_hint_stats(self, stats: dict, valid_stats: dict):
+        if not isinstance(stats, dict) or not isinstance(valid_stats, dict):
+            return
+
+        def _to_int(v):
+            if v is None:
+                return None
+            try:
+                return int(v)
+            except Exception:
+                return None
+
+        confirmed = _to_int(valid_stats.get("extract_confirmed_count", None))
+        tentative_pool = _to_int(valid_stats.get("extract_tentative_pool_count", None))
+        tentative_added = _to_int(
+            valid_stats.get("extract_tentative_added_count", None)
+        )
+        tentative_pool_all = _to_int(
+            valid_stats.get("extract_tentative_pool_count_all", None)
+        )
+        tentative_pool_recent = _to_int(
+            valid_stats.get("extract_tentative_pool_count_recent", None)
+        )
+
+        if confirmed is not None:
+            stats["extract_confirmed_count"] = confirmed
+        if tentative_pool is not None:
+            stats["extract_tentative_pool_count"] = tentative_pool
+        if tentative_added is not None:
+            stats["extract_tentative_added_count"] = tentative_added
+        if tentative_pool_all is not None:
+            stats["extract_tentative_pool_count_all"] = tentative_pool_all
+        if tentative_pool_recent is not None:
+            stats["extract_tentative_pool_count_recent"] = tentative_pool_recent
+
+        corr = stats.get("correspond_curr3d", np.empty((0, 3)))
+        try:
+            num_used = int(np.asarray(corr).shape[0])
+        except Exception:
+            num_used = 0
+
+        effective_num_pts = num_used
+        if confirmed is not None:
+            effective_num_pts = max(effective_num_pts, confirmed)
+            if tentative_pool is not None:
+                effective_num_pts = max(
+                    effective_num_pts, confirmed + max(0, tentative_pool)
+                )
+
+        stats["num_pts_used_for_registration"] = int(num_used)
+        stats["effective_num_pts_for_sampling"] = int(effective_num_pts)
+
     def _compute_mean_residual(self, stats: dict):
         residuals = stats.get("residuals", np.array([]))
         inliers = stats.get("inliers", np.array([]))
@@ -600,6 +795,88 @@ class FrontEnd:
             else:
                 return float(np.mean(residuals))
         return -1.0
+
+    def _count_cluster_candidates(self, stats: dict) -> int:
+        clusters = stats.get("clusters", [])
+        if clusters is None:
+            return 0
+        if isinstance(clusters, dict):
+            return 1
+        if isinstance(clusters, (list, tuple)):
+            return len(clusters)
+        if isinstance(clusters, np.ndarray):
+            if clusters.ndim == 0:
+                item = clusters.item()
+                if isinstance(item, dict):
+                    return 1
+                if isinstance(item, (list, tuple)):
+                    return len(item)
+                return 0
+            return int(clusters.shape[0])
+        return 0
+
+    def _apply_pose_jump_guard(
+        self,
+        T_candidate: np.ndarray,
+        T_prev: np.ndarray,
+        stats: dict,
+    ):
+        info = {
+            "enabled": bool(self.pose_jump_guard_enable),
+            "rejected": False,
+            "dt": -1.0,
+            "ddeg": -1.0,
+            "used": 0,
+            "ninliers": 0,
+            "inlier_ratio": 0.0,
+            "num_clusters": 0,
+        }
+        if (
+            (not self.pose_jump_guard_enable)
+            or T_candidate is None
+            or T_prev is None
+            or stats is None
+        ):
+            return T_candidate, False, info
+
+        dt, ddeg = self._se3_delta(T_candidate, T_prev)
+        inliers = np.asarray(stats.get("inliers", np.array([])), dtype=bool)
+        used = int(inliers.shape[0])
+        ninliers = int(np.sum(inliers)) if used > 0 else 0
+        inlier_ratio = float(ninliers / max(1, used))
+        num_clusters = self._count_cluster_candidates(stats)
+
+        info.update(
+            {
+                "dt": float(dt),
+                "ddeg": float(ddeg),
+                "used": int(used),
+                "ninliers": int(ninliers),
+                "inlier_ratio": float(inlier_ratio),
+                "num_clusters": int(num_clusters),
+            }
+        )
+
+        big_jump = (dt > self.pose_jump_guard_trans_thres) or (
+            ddeg > self.pose_jump_guard_rot_deg_thres
+        )
+        weak_support = (ninliers < self.pose_jump_guard_min_inliers) or (
+            inlier_ratio < self.pose_jump_guard_min_inlier_ratio
+        )
+        weak_single_hypothesis = (num_clusters <= 1) and (
+            ninliers < self.pose_jump_guard_single_cluster_min_inliers
+        )
+
+        if big_jump and (weak_support or weak_single_hypothesis):
+            info["rejected"] = True
+            print(
+                f"[FrontEnd] Pose jump guard rejected candidate "
+                f"(dT={dt:.3f}m, dR={ddeg:.2f}deg, "
+                f"inliers={ninliers}/{used}, clusters={num_clusters})."
+            )
+            return T_prev, True, info
+
+        return T_candidate, False, info
 
     def _seed_pose_history(self, obj_id: int, pose: np.ndarray):
         if pose is None:
@@ -762,8 +1039,13 @@ class FrontEnd:
         cur_uncertainties,
         uncertainty_thres=0.3,
     ):
-        obj_idx = np.asarray(obj_idx)
-        valid_kp_bool = np.asarray(obj.valid, dtype=bool)
+        obj_idx = np.asarray(obj_idx, dtype=np.int64)
+        obj_rows = self._map_track_ids_to_obj_rows(obj, obj_idx)
+
+        valid_kp_bool = np.zeros(obj_idx.shape[0], dtype=bool)
+        row_ok = (obj_rows >= 0) & (obj_rows < len(obj.valid))
+        if np.any(row_ok):
+            valid_kp_bool[row_ok] = np.asarray(obj.valid, dtype=bool)[obj_rows[row_ok]]
 
         vis_obj = np.asarray(cur_visible, dtype=bool)[obj_idx]
         val_obj = np.asarray(cur_valid, dtype=bool)[obj_idx]
@@ -773,7 +1055,12 @@ class FrontEnd:
         both_mask = vis_obj & val_obj & valid_kp_bool & uncer_obj
 
         idx = obj_idx[both_mask]
-        key_points = obj.key_points[both_mask].copy()
+        rows = obj_rows[both_mask]
+        rows_ok = (rows >= 0) & (rows < len(obj.key_points))
+        if not np.all(rows_ok):
+            idx = idx[rows_ok]
+            rows = rows[rows_ok]
+        key_points = obj.key_points[rows].copy()
         correspond_curr3d = cur_pts_3d[idx].copy()
 
         valid_stats = {
@@ -789,6 +1076,28 @@ class FrontEnd:
 
         return idx, key_points, correspond_curr3d, valid_stats
 
+    def _map_track_ids_to_obj_rows(self, obj, track_ids: np.ndarray) -> np.ndarray:
+        """
+        Robust mapping from global track ids to object keypoint row indices.
+        Returns -1 where mapping is unavailable/invalid.
+        """
+        tids = np.asarray(track_ids, dtype=np.int64).reshape(-1)
+        rows = np.full(tids.shape[0], -1, dtype=np.int64)
+
+        t2o = getattr(obj, "track_idx_2_obj_idx", None)
+        if t2o is None:
+            return rows
+
+        t2o = np.asarray(t2o).reshape(-1)
+        if t2o.size == 0:
+            return rows
+
+        tid_ok = (tids >= 0) & (tids < t2o.shape[0])
+        if np.any(tid_ok):
+            rows[tid_ok] = np.asarray(t2o[tids[tid_ok]], dtype=np.int64)
+
+        return rows
+
     def _extract_valid_key_points_mask_remove(
         self,
         obj,
@@ -800,6 +1109,8 @@ class FrontEnd:
         cur_uncertainties,
         frame_mask_gpu,
         uncertainty_thres=0.3,
+        mask_border_margin_px=0,
+        frame_id=None,
     ):
 
         # idx, key_points, correspond_curr3d, cur_visible, valid_stats = (
@@ -833,11 +1144,14 @@ class FrontEnd:
         cur_valid = np.asarray(cur_valid, dtype=bool)
         cur_uncertainties = np.asarray(cur_uncertainties, dtype=np.float32)
 
+        obj_rows = self._map_track_ids_to_obj_rows(obj, obj_idx)
+
         val_obj = cur_valid[obj_idx]
         uncer_obj = cur_uncertainties[obj_idx] < float(uncertainty_thres)
-        valid_kp_obj = np.asarray(
-            getattr(obj, "valid", np.ones(len(obj_idx), dtype=bool)), dtype=bool
-        )
+        valid_kp_obj = np.zeros(obj_idx.shape[0], dtype=bool)
+        row_ok = (obj_rows >= 0) & (obj_rows < len(obj.valid))
+        if np.any(row_ok):
+            valid_kp_obj[row_ok] = np.asarray(obj.valid, dtype=bool)[obj_rows[row_ok]]
 
         pts2d_obj = cur_pts_2d[obj_idx]
         finite_xy = np.isfinite(pts2d_obj).all(axis=1)
@@ -851,6 +1165,19 @@ class FrontEnd:
         x_t = torch.from_numpy(x).to(device=dev, dtype=torch.long)
         y_t = torch.from_numpy(y).to(device=dev, dtype=torch.long)
         inside_mask_np = mask_bool[y_t, x_t].detach().cpu().numpy()
+        border_safe_np = np.ones_like(inside_mask_np, dtype=bool)
+
+        margin = int(mask_border_margin_px)
+        if margin > 0:
+            # Keep only points that are inside an eroded mask so they are at
+            # least `margin` pixels away from the object boundary.
+            kernel_size = 2 * margin + 1
+            inv_mask = (~mask_bool).to(dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+            dilated_inv = F.max_pool2d(
+                inv_mask, kernel_size=kernel_size, stride=1, padding=margin
+            )
+            eroded_mask = (1.0 - dilated_inv).squeeze(0).squeeze(0) > 0.5
+            border_safe_np = eroded_mask[y_t, x_t].detach().cpu().numpy()
 
         outside_or_bad = (~inside_mask_np) | (~finite_xy)
         if outside_or_bad.any():
@@ -858,10 +1185,88 @@ class FrontEnd:
 
         vis_obj = cur_visible[obj_idx]
 
-        both_mask = vis_obj & val_obj & uncer_obj & finite_xy & inside_mask_np
+        quality_mask = (
+            vis_obj & val_obj & uncer_obj & finite_xy & inside_mask_np & border_safe_np
+        )
+        both_mask = quality_mask & valid_kp_obj
+
+        # If confirmed points are too few, temporarily use tentative points
+        # (obj.valid=False) so tracking does not drop before promotion catches up.
+        n_confirmed = int(np.sum(both_mask))
+        n_tentative_added = 0
+        n_tentative_pool = 0
+        n_tentative_pool_all = 0
+        n_tentative_pool_recent = 0
+        tentative_pool_used_stale = False
+        if (
+            self.tentative_fallback_min_valid_points > 0
+            and n_confirmed < self.tentative_fallback_min_valid_points
+        ):
+            tentative_uncer_thres = float(uncertainty_thres) * float(
+                self.tentative_fallback_uncer_scale
+            )
+            tentative_uncer_obj = cur_uncertainties[obj_idx] < tentative_uncer_thres
+            tentative_pool_mask_all = (
+                vis_obj
+                & val_obj
+                & tentative_uncer_obj
+                & finite_xy
+                & inside_mask_np
+                & border_safe_np
+                & (~valid_kp_obj)
+            )
+            tentative_pool_mask = tentative_pool_mask_all.copy()
+            n_tentative_pool_all = int(np.sum(tentative_pool_mask_all))
+            n_tentative_pool_recent = n_tentative_pool_all
+
+            # Keep tentative fallback focused on recently added points.
+            recent_limit = int(self.tentative_fallback_recent_frames)
+            if recent_limit >= 0 and frame_id is not None:
+                kp_frames_all = np.asarray(
+                    getattr(obj, "key_point_frames", np.full((0,), -1)),
+                    dtype=np.int64,
+                )
+                kp_frames = np.full(obj_idx.shape[0], -1, dtype=np.int64)
+                row_ok = (obj_rows >= 0) & (obj_rows < kp_frames_all.shape[0])
+                if np.any(row_ok):
+                    kp_frames[row_ok] = kp_frames_all[obj_rows[row_ok]]
+                ages = int(frame_id) - kp_frames
+                recent_mask = (kp_frames >= 0) & (ages >= 0) & (ages <= recent_limit)
+                tentative_pool_mask_recent = tentative_pool_mask_all & recent_mask
+                n_tentative_pool_recent = int(np.sum(tentative_pool_mask_recent))
+                tentative_pool_mask = tentative_pool_mask_recent
+
+                if (
+                    self.tentative_fallback_allow_stale_when_empty
+                    and n_tentative_pool_recent == 0
+                    and n_tentative_pool_all > 0
+                ):
+                    tentative_pool_mask = tentative_pool_mask_all
+                    tentative_pool_used_stale = True
+
+            n_tentative_pool = int(np.sum(tentative_pool_mask))
+            if n_tentative_pool > 0:
+                # Once fallback is triggered, fill up to max_points (not just min_valid_points)
+                # so registration has more support while promotions catch up.
+                fallback_target = max(0, int(self.tentative_fallback_max_points))
+                need = fallback_target - n_confirmed
+                if need > 0:
+                    local_idx = np.flatnonzero(tentative_pool_mask)
+                    # Pick lower-uncertainty tentative points first.
+                    order = np.argsort(cur_uncertainties[obj_idx][local_idx])
+                    take_n = min(local_idx.size, need)
+                    if take_n > 0:
+                        chosen = local_idx[order[:take_n]]
+                        both_mask[chosen] = True
+                        n_tentative_added = int(take_n)
 
         idx = obj_idx[both_mask]
-        key_points = obj.key_points[both_mask].copy()
+        rows = obj_rows[both_mask]
+        rows_ok = (rows >= 0) & (rows < len(obj.key_points))
+        if not np.all(rows_ok):
+            idx = idx[rows_ok]
+            rows = rows[rows_ok]
+        key_points = obj.key_points[rows].copy()
         correspond_curr3d = cur_pts_3d[idx].copy()
 
         valid_stats = {
@@ -872,7 +1277,23 @@ class FrontEnd:
             "extract_uncertainty_thres": uncertainty_thres,
             "extract_obj_idx": obj_idx,
             "extract_inside_mask": inside_mask_np,
+            "extract_border_safe_mask": border_safe_np,
+            "extract_mask_border_margin_px": margin,
             "extract_finite_xy": finite_xy,
+            "extract_obj_rows": obj_rows,
+            "extract_confirmed_count": n_confirmed,
+            "extract_tentative_fallback_min_valid_points": int(
+                self.tentative_fallback_min_valid_points
+            ),
+            "extract_tentative_recent_frames_limit": int(
+                self.tentative_fallback_recent_frames
+            ),
+            "extract_tentative_pool_count": n_tentative_pool,
+            "extract_tentative_pool_count_all": n_tentative_pool_all,
+            "extract_tentative_pool_count_recent": n_tentative_pool_recent,
+            "extract_tentative_added_count": n_tentative_added,
+            "extract_tentative_fallback_used": bool(n_tentative_added > 0),
+            "extract_tentative_pool_used_stale": bool(tentative_pool_used_stale),
         }
 
         return idx, key_points, correspond_curr3d, cur_visible, valid_stats
@@ -1116,6 +1537,173 @@ class FrontEnd:
         except Exception as e:
             print(f"[FrontEnd] Dense recovery failed: {e}")
             return None, {}
+
+    def _query_abs_sdf_values(self, obj, pts_obj: np.ndarray) -> np.ndarray:
+        """Query absolute SDF values at object-frame points."""
+        if obj is None or pts_obj is None or pts_obj.shape[0] == 0:
+            return np.empty((0,), dtype=np.float64)
+
+        sdf_vals = np.empty((0,), dtype=np.float64)
+
+        if getattr(obj, "sdf_volume", None) is not None and hasattr(
+            obj.sdf_volume, "query_sdf"
+        ):
+            try:
+                qvals = obj.sdf_volume.query_sdf(pts_obj)
+                if qvals is not None:
+                    qvals = np.asarray(qvals).reshape(-1)
+                    sdf_vals = np.abs(qvals[np.isfinite(qvals)])
+            except Exception:
+                sdf_vals = np.empty((0,), dtype=np.float64)
+
+        if (
+            sdf_vals.size == 0
+            and getattr(obj, "sdf", None) is not None
+            and "tsdf" in obj.sdf
+        ):
+            tsdf = obj.sdf["tsdf"]
+            origin = obj.sdf["vol_origin"]
+            voxel = float(obj.sdf["voxel_size"])
+            vol_dim = np.array(tsdf.shape, dtype=np.int32)
+            vox = np.floor((pts_obj - origin[None, :]) / voxel).astype(np.int32)
+
+            inb = np.logical_and(
+                np.all(vox >= 0, axis=1), np.all(vox < vol_dim[None, :], axis=1)
+            )
+            if np.any(inb):
+                vox_in = vox[inb]
+                sdf_vals = np.abs(tsdf[vox_in[:, 0], vox_in[:, 1], vox_in[:, 2]])
+
+        return np.asarray(sdf_vals, dtype=np.float64)
+
+    def _sdf_alignment_cost(
+        self, pts_cur: np.ndarray, T_cur2obj: np.ndarray, obj, robust_percentile: float
+    ) -> Tuple[float, float]:
+        """
+        Return robust SDF alignment cost and support ratio.
+        Smaller cost is better.
+        """
+        pts_obj = transform_pts(T_cur2obj, pts_cur)
+        sdf_vals = self._query_abs_sdf_values(obj, pts_obj)
+        if sdf_vals.size == 0:
+            return np.inf, 0.0
+
+        q = float(np.clip(robust_percentile, 0.0, 100.0))
+        cost = float(np.percentile(sdf_vals, q))
+        support = float(sdf_vals.size) / float(max(1, pts_cur.shape[0]))
+        return cost, support
+
+    def _apply_dense_recovery_f2m_sdf(
+        self,
+        obj_id: int,
+        curr_frame,
+        obj,
+        init_pose: np.ndarray,
+    ) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
+        """
+        Dense recovery for f2m mode by aligning the current depth crop to object SDF.
+        Returns absolute pose T_c2w.
+        """
+        has_sdf = getattr(obj, "sdf_volume", None) is not None or (
+            getattr(obj, "sdf", None) is not None and "tsdf" in obj.sdf
+        )
+        if not has_sdf:
+            return None, {"reason": "no_sdf"}
+
+        pts_cur = self._extract_cropped_point_cloud(curr_frame, obj_id)
+        if pts_cur.shape[0] < self.dense_recovery_min_points:
+            print(
+                f"[FrontEnd] Dense recovery (f2m+sdf) skipped: insufficient points "
+                f"({pts_cur.shape[0]} < {self.dense_recovery_min_points})"
+            )
+            return None, {
+                "reason": "insufficient_points",
+                "num_points": pts_cur.shape[0],
+            }
+
+        if pts_cur.shape[0] > self.dense_recovery_sdf_max_points:
+            step = int(
+                np.ceil(pts_cur.shape[0] / float(self.dense_recovery_sdf_max_points))
+            )
+            pts_cur = pts_cur[::step]
+
+        T_seed = init_pose.copy() if init_pose is not None else np.eye(4)
+        T_seed_cur2obj = inverse_SE3(T_seed)
+        cost_before, support_before = self._sdf_alignment_cost(
+            pts_cur,
+            T_seed_cur2obj,
+            obj,
+            robust_percentile=self.dense_recovery_sdf_percentile,
+        )
+        if not np.isfinite(cost_before):
+            return None, {"reason": "invalid_initial_cost"}
+
+        def objective(xi):
+            dT = exp_se3(vec_to_se3(xi))
+            T_cur = dT @ T_seed
+            T_cur2obj = inverse_SE3(T_cur)
+            cost, _ = self._sdf_alignment_cost(
+                pts_cur,
+                T_cur2obj,
+                obj,
+                robust_percentile=self.dense_recovery_sdf_percentile,
+            )
+            return 1e6 if not np.isfinite(cost) else float(cost)
+
+        x0 = np.zeros(6, dtype=np.float64)
+        bounds = [
+            (-self.dense_recovery_sdf_rot_bound, self.dense_recovery_sdf_rot_bound)
+        ] * 3 + [
+            (-self.dense_recovery_sdf_trans_bound, self.dense_recovery_sdf_trans_bound)
+        ] * 3
+
+        try:
+            opt = minimize(
+                objective,
+                x0=x0,
+                method="L-BFGS-B",
+                bounds=bounds,
+                options={"maxiter": self.dense_recovery_sdf_max_iter},
+            )
+        except Exception as e:
+            print(f"[FrontEnd] Dense recovery (f2m+sdf) optimization failed: {e}")
+            return None, {"reason": "optimizer_exception", "error": str(e)}
+
+        if not opt.success:
+            return None, {"reason": "optimizer_failed", "message": str(opt.message)}
+
+        T_opt = exp_se3(vec_to_se3(opt.x)) @ T_seed
+        cost_after, support_after = self._sdf_alignment_cost(
+            pts_cur,
+            inverse_SE3(T_opt),
+            obj,
+            robust_percentile=self.dense_recovery_sdf_percentile,
+        )
+        improvement = float(cost_before - cost_after)
+        if (
+            not np.isfinite(cost_after)
+            or improvement < self.dense_recovery_sdf_min_improve
+        ):
+            return None, {
+                "reason": "insufficient_improvement",
+                "sdf_before": float(cost_before),
+                "sdf_after": float(cost_after) if np.isfinite(cost_after) else np.inf,
+                "improvement": improvement,
+            }
+
+        stats = {
+            "mode": "f2m_sdf",
+            "num_points": int(pts_cur.shape[0]),
+            "sdf_before": float(cost_before),
+            "sdf_after": float(cost_after),
+            "sdf_improvement": improvement,
+            "support_before": float(support_before),
+            "support_after": float(support_after),
+            "opt_success": bool(opt.success),
+            "opt_message": str(opt.message),
+            "opt_iterations": int(getattr(opt, "nit", -1)),
+        }
+        return T_opt, stats
 
     def _se3_delta(self, T_new, T_old):
         dT = T_new @ inverse_SE3(T_old)

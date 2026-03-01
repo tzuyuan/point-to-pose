@@ -2,6 +2,7 @@ import os
 import time
 import numpy as np
 import torch
+import copy
 from collections import deque
 import open3d as o3d
 from scipy.spatial.transform import Rotation as scipy_R
@@ -92,6 +93,7 @@ class ModularPipeline:
         self.num_hist = self.cfg.register.params.get("num_hist", 5)
         self.hist_frames = deque(maxlen=self.num_hist)
         self.hist_fe_results = deque(maxlen=self.num_hist)
+        self.hist_track_tables = deque(maxlen=self.num_hist)
 
         # Logging
         self.save_pose = self.pipeline_cfg.get("save_pose", False)
@@ -202,6 +204,15 @@ class ModularPipeline:
         )
 
         self.kf_graph.update(new_kfs)
+
+        for kf in new_kfs:
+            obj = self.objects[kf.obj_id]
+            sdf_ok = self.sdf_builder.integrate_keyframe(obj=obj, keyframe=kf)
+            if not sdf_ok:
+                print(
+                    f"Frame {frame.id}: Failed to integrate keyframe for obj {obj.id}"
+                )
+                continue
 
         # 4. Initial Optimization
         if self.use_local_graph:
@@ -387,9 +398,6 @@ class ModularPipeline:
             else:
                 pose_frontend[obj_id] = np.eye(4)
 
-        # update history
-        self._update_history_frames(frame, fe_result)
-
         #################################################################
         ##                     Track Table Update                      ##
         #################################################################
@@ -402,6 +410,9 @@ class ModularPipeline:
             fe_result.uncertainties,
             fe_result.visibles,
         )
+
+        # update history
+        self._update_history_frames(frame, fe_result, self.track_table)
         module_times["track_table"] = time.time() - t0
 
         #################################################################
@@ -409,14 +420,14 @@ class ModularPipeline:
         #################################################################
         # perform frame to map registration if the object is marked as lost
         t0 = time.time()
-        self.recovery_manager.update(
-            frame,
-            fe_result,
-            self.objects,
-            self.track_table,
-            self.kf_manager.keyframes,
-            self.frontend.register,
-        )
+        # self.recovery_manager.update(
+        #     frame,
+        #     fe_result,
+        #     self.objects,
+        #     self.track_table,
+        #     self.kf_manager.keyframes,
+        #     self.frontend.register,
+        # )
         module_times["recovery"] = time.time() - t0
 
         #################################################################
@@ -489,13 +500,15 @@ class ModularPipeline:
         #################################################################
         # check, initialize new keyframes, and sample new keypoints
         t0 = time.time()
+
         new_keyframes = self.kf_manager.update(
             hist_frames=self.hist_frames,
             hist_fe_results=self.hist_fe_results,
+            hist_track_tables=self.hist_track_tables,
             track_table=self.track_table,
             objects=self.objects,
             tracker=self.frontend.tracker,
-            conservative=False,
+            conservative=True,
         )
         module_times["keyframe"] = time.time() - t0
 
@@ -515,43 +528,47 @@ class ModularPipeline:
             )
 
         for kf in new_keyframes:
+            obj = self.objects[kf.obj_id]
             key = (kf.obj_id, kf.kf_idx)
             if key in updated_global_poses:
                 global_pose = updated_global_poses[key]
 
-                dt, ddeg = self._se3_delta(global_pose, self.objects[kf.obj_id].pose)
+                dt, ddeg = self._se3_delta(global_pose, obj.pose)
                 if dt > self.max_rel_translation or ddeg > self.max_rel_rotation_deg:
                     print(
                         f"Frame {frame.id}: Warning: Large pose change after global optimization for obj {kf.obj_id} kf {kf.kf_idx}. Δt={dt:.3f}m, ΔR={ddeg:.2f}deg"
                     )
-                    continue
+                else:
+                    obj.pose = global_pose.copy()
+                    kf.pose = global_pose.copy()
 
-                obj = self.objects[kf.obj_id]
-                obj.pose = global_pose.copy()
-                kf.pose = global_pose.copy()
+                if kf.obj_id in updated_landmarks:
+                    lm_pts, lm_global_track_ids = updated_landmarks[kf.obj_id]
+                    lm_idx = obj.track_idx_2_obj_idx[lm_global_track_ids]
+                    lm_ok = (lm_idx >= 0) & (lm_idx < len(obj.key_points))
+                    if np.any(lm_ok):
+                        obj.key_points[lm_idx[lm_ok]] = lm_pts[lm_ok].copy()
+            else:
+                print(
+                    f"Frame {frame.id}: No optimized global pose for obj {kf.obj_id} kf {kf.kf_idx}; using keyframe pose for SDF fusion."
+                )
 
-                lm_global_track_ids = updated_landmarks[kf.obj_id][1]
-                lm_idx = obj.track_idx_2_obj_idx[lm_global_track_ids]
-                lm_pts = updated_landmarks[kf.obj_id][0]
-
-                self.objects[kf.obj_id].key_points[lm_idx] = lm_pts.copy()
-
-                sdf_ok = self.sdf_builder.integrate_keyframe(obj=obj, keyframe=kf)
-                if sdf_ok:
-                    print(
-                        f"Frame {frame.id}: Updated SDF for obj {kf.obj_id} from keyframe {kf.kf_idx} (num_integrated={obj.sdf_num_integrated})."
+            sdf_ok = self.sdf_builder.integrate_keyframe(obj=obj, keyframe=kf)
+            if sdf_ok:
+                print(
+                    f"Frame {frame.id}: Updated SDF for obj {kf.obj_id} from keyframe {kf.kf_idx} (num_integrated={obj.sdf_num_integrated})."
+                )
+                if (
+                    self.sdf_mesh_save_every > 0
+                    and (obj.sdf_num_integrated % self.sdf_mesh_save_every) == 0
+                ):
+                    mesh_path = os.path.join(
+                        self.sdf_mesh_save_dir,
+                        f"obj_{kf.obj_id}_frame_{frame.id}_kf_{kf.kf_idx}.ply",
                     )
-                    if (
-                        self.sdf_mesh_save_every > 0
-                        and (obj.sdf_num_integrated % self.sdf_mesh_save_every) == 0
-                    ):
-                        mesh_path = os.path.join(
-                            self.sdf_mesh_save_dir,
-                            f"obj_{kf.obj_id}_frame_{frame.id}_kf_{kf.kf_idx}.ply",
-                        )
-                        saved = self.sdf_builder.export_debug_mesh(obj, mesh_path)
-                        if saved and self.debug_level > 1:
-                            print(f"Frame {frame.id}: Saved SDF mesh to {mesh_path}")
+                    saved = self.sdf_builder.export_debug_mesh(obj, mesh_path)
+                    if saved and self.debug_level > 1:
+                        print(f"Frame {frame.id}: Saved SDF mesh to {mesh_path}")
 
         module_times["global_opt"] = time.time() - t0
 
@@ -665,6 +682,28 @@ class ModularPipeline:
                 # Keep the raw cluster candidate list for later analysis.
                 "reg_clusters": reg_stats.get("clusters", []),
                 "reg_best_cluster_idx": int(reg_stats.get("best_cluster_idx", -1)),
+                "reg_sdf_refine": reg_stats.get("sdf_refine", {}),
+                "reg_pose_jump_guard_rejected": bool(
+                    reg_stats.get("pose_jump_guard_info", {}).get("rejected", False)
+                ),
+                "reg_pose_jump_guard_dt": float(
+                    reg_stats.get("pose_jump_guard_info", {}).get("dt", -1.0)
+                ),
+                "reg_pose_jump_guard_ddeg": float(
+                    reg_stats.get("pose_jump_guard_info", {}).get("ddeg", -1.0)
+                ),
+                "reg_pose_jump_guard_used": int(
+                    reg_stats.get("pose_jump_guard_info", {}).get("used", 0)
+                ),
+                "reg_pose_jump_guard_ninliers": int(
+                    reg_stats.get("pose_jump_guard_info", {}).get("ninliers", 0)
+                ),
+                "reg_pose_jump_guard_inlier_ratio": float(
+                    reg_stats.get("pose_jump_guard_info", {}).get("inlier_ratio", 0.0)
+                ),
+                "reg_pose_jump_guard_num_clusters": int(
+                    reg_stats.get("pose_jump_guard_info", {}).get("num_clusters", 0)
+                ),
                 "iter": reg_stats.get("iter", -1),
                 # Intermediate Poses
                 "pose_frontend": (
@@ -854,8 +893,8 @@ class ModularPipeline:
     def _update_object_from_frontend(self, obj_id, fe_result):
         obj = self.objects[obj_id]
 
-        if obj.lost:
-            return
+        # if obj.lost:
+        #     return
 
         # 1. Pose update from front end
         if obj_id in fe_result.obj_poses:
@@ -882,9 +921,10 @@ class ModularPipeline:
         # 6. Lost condition
         # obj.lost = obj.mean_residual > self.reg_residual_thres
 
-    def _update_history_frames(self, frame, fe_result):
+    def _update_history_frames(self, frame, fe_result, track_table):
         self.hist_frames.append(frame)
         self.hist_fe_results.append(fe_result)
+        self.hist_track_tables.append(copy.deepcopy(track_table))
 
     def _se3_delta(self, T_new, T_old):
         dT = T_new @ inverse_SE3(T_old)

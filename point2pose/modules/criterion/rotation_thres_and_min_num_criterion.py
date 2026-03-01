@@ -17,6 +17,10 @@ class RotationThresholdAndMinNumCriterion(SampleCriterion):
         self._max_angle_deg = config.get("max_angle_deg", 60)
         self._min_num_pts = config.get("min_num_pts", 10)
         self._min_mask_area = config.get("min_mask_area", 100)
+        self._use_effective_num_pts = bool(config.get("use_effective_num_pts", False))
+        self._effective_num_pts_key = str(
+            config.get("effective_num_pts_key", "effective_num_pts_for_sampling")
+        )
 
         # v is a list of direction vectors. (num_dirs, 3)
         # we assume the first vector to be the initial direction as (0, 0, 1)
@@ -37,13 +41,22 @@ class RotationThresholdAndMinNumCriterion(SampleCriterion):
         # if reg_stats is None:
         #     return True
         num_pts = reg_stats["correspond_curr3d"].shape[0]
-        print(f"[Criterion] num visible points: {num_pts}")
+        num_pts_eff = int(num_pts)
+        if self._use_effective_num_pts:
+            try:
+                num_pts_eff = int(reg_stats.get(self._effective_num_pts_key, num_pts))
+            except Exception:
+                num_pts_eff = int(num_pts)
+
+        print(
+            f"[Criterion] num visible points: {num_pts} (effective for sampling: {num_pts_eff})"
+        )
         if context.frame.id == 261:
             print(f"[Criterion] reg_stats: {reg_stats}")
         # sum number of pixel being in mask being 1
-        mask_area = torch.sum(context.frame.mask[obj_id, 0] > 0)
+        mask_area = int(torch.sum(context.frame.mask[obj_id, 0] > 0).item())
 
-        if (num_pts < self._min_num_pts) and (mask_area > self._min_mask_area):
+        if (num_pts_eff < self._min_num_pts) and (mask_area > self._min_mask_area):
             return True
 
         # pts_id = context.track_table.obj2track_map[obj_id]
@@ -59,7 +72,7 @@ class RotationThresholdAndMinNumCriterion(SampleCriterion):
 
         # compute inner product of u and v
         inner_product = u @ self._v_list[obj_id].T
-        angle = np.arccos(inner_product)
+        angle = np.arccos(np.clip(inner_product, -1.0, 1.0))
         angle_deg = np.rad2deg(angle)
 
         print(f"[Criterion] angle_deg: {angle_deg}")

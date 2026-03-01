@@ -81,6 +81,52 @@ def gt_bbox_minmax_from_mesh(mesh):
     return np.vstack([bmin.astype(float), bmax.astype(float)])  # (2,3)
 
 
+def load_is_obj_in_image_labels(reader, video_path, obj_name, num_frames):
+    """
+    Load per-frame object visibility labels for evaluation filtering.
+    """
+    canonical_name = _canonical_object_name(reader, obj_name)
+    candidates = [
+        os.path.join(
+            video_path,
+            "is_obj_in_image_labels",
+            obj_name,
+            "is_obj_in_image.npy",
+        ),
+        os.path.join(
+            video_path,
+            "is_obj_in_image_labels",
+            canonical_name,
+            "is_obj_in_image.npy",
+        ),
+    ]
+
+    label_path = None
+    for path in candidates:
+        if os.path.exists(path):
+            label_path = path
+            break
+
+    if label_path is None:
+        raise FileNotFoundError(
+            f"Could not find visibility labels for object {obj_name}. Checked: {candidates}"
+        )
+
+    labels = np.asarray(np.load(label_path)).reshape(-1) > 0
+    if labels.shape[0] != num_frames:
+        print(
+            f"[{obj_name}] Visibility label length mismatch: "
+            f"{labels.shape[0]} vs num_frames={num_frames}. Adjusting to frame count."
+        )
+        if labels.shape[0] < num_frames:
+            padded = np.zeros((num_frames,), dtype=bool)
+            padded[: labels.shape[0]] = labels
+            labels = padded
+        else:
+            labels = labels[:num_frames]
+    return labels
+
+
 def run_ycbineoat_single(
     data_path: str, video_name: str, out_dir: str, config_path: str, model_path: str
 ):
@@ -137,14 +183,27 @@ def run_ycbineoat_single(
     # Load mesh and bbox for each object.
     meshes = {}
     gt_bbox_minmax_by_object = {}
+    is_obj_in_image_labels_by_object = {}
     for obj_name in object_names:
         mesh = load_ycb_mesh(reader, model_path, obj_name)
         meshes[obj_name] = mesh
         gt_bbox_minmax_by_object[obj_name] = gt_bbox_minmax_from_mesh(mesh)
+        try:
+            is_obj_in_image_labels_by_object[obj_name] = load_is_obj_in_image_labels(
+                reader=reader,
+                video_path=video_path,
+                obj_name=obj_name,
+                num_frames=len(reader),
+            )
+        except Exception as e:
+            print(f"Error loading is_obj_in_image_labels for {obj_name}: {e}")
+            is_obj_in_image_labels_by_object[obj_name] = np.ones(
+                len(reader), dtype=bool
+            )
 
     out_poses_by_object = {obj_name: [] for obj_name in object_names}
     gt_poses_by_object = {obj_name: [] for obj_name in object_names}
-    gt_ids_by_object = {obj_name: [] for obj_name in object_names}
+    eval_ids_by_object = {obj_name: [] for obj_name in object_names}
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     for i in range(len(reader)):
@@ -177,9 +236,9 @@ def run_ycbineoat_single(
             pred_pose = out_pose[obj_idx].reshape(4, 4)
             out_poses_by_object[obj_name].append(pred_pose)
             gt_pose = gt_pose_map.get(obj_name, None)
-            if gt_pose is not None:
-                gt_ids_by_object[obj_name].append(i)
-                gt_poses_by_object[obj_name].append(gt_pose)
+            gt_poses_by_object[obj_name].append(gt_pose)
+            if is_obj_in_image_labels_by_object[obj_name][i]:
+                eval_ids_by_object[obj_name].append(i)
             if i == 0 and gt_pose is not None and obj_idx < len(pipeline.objects):
                 pipeline.objects[obj_idx].init_pose = gt_pose
 
@@ -235,15 +294,27 @@ def run_ycbineoat_single(
     all_adi_errs = []
     all_add_errs = []
     for obj_name in object_names:
-        gt_ids = gt_ids_by_object[obj_name]
-        if len(gt_ids) == 0:
-            print(f"[{obj_name}] No GT poses found, skipping object evaluation.")
+        eval_ids = eval_ids_by_object[obj_name]
+        if len(eval_ids) == 0:
+            print(
+                f"[{obj_name}] No visible frames from visibility labels, skipping object evaluation."
+            )
             continue
 
-        pred_poses = np.array(out_poses_by_object[obj_name])[gt_ids]
-        gt_poses = np.array(gt_poses_by_object[obj_name])
+        pred_poses = []
+        gt_poses = []
+        for frame_id in eval_ids:
+            gt_pose = gt_poses_by_object[obj_name][frame_id]
+            if gt_pose is None:
+                continue
+            pred_poses.append(out_poses_by_object[obj_name][frame_id])
+            gt_poses.append(gt_pose)
+        pred_poses = np.array(pred_poses)
+        gt_poses = np.array(gt_poses)
         if len(pred_poses) == 0 or len(gt_poses) == 0:
-            print(f"[{obj_name}] Not enough poses for evaluation.")
+            print(
+                f"[{obj_name}] Not enough valid poses in visible frames for evaluation."
+            )
             continue
 
         # Align first valid frame for this object.
@@ -336,6 +407,8 @@ def run_ycbineoat_single(
         print("No GT poses found for any object, skipping evaluation.")
         return
 
+    agg_adi = None
+    agg_add = None
     if len(all_adi_errs) > 0:
         agg_adi = np.concatenate(all_adi_errs)
         agg_add = np.concatenate(all_add_errs)
@@ -347,6 +420,7 @@ def run_ycbineoat_single(
             f"ADD_AUC: {compute_auc(agg_add)*100:.2f}"
         )
 
+    mesh_cd_by_object = {}
     for obj_idx, obj_name in enumerate(object_names):
         if obj_name not in per_object_results:
             continue
@@ -366,6 +440,29 @@ def run_ycbineoat_single(
             print(f"video {video_name}, obj {obj_name}, mesh_CD: {mesh_cd_cm:.3f}[cm]")
         else:
             print(f"video {video_name}, obj {obj_name}, mesh_CD: skipped")
+        mesh_cd_by_object[obj_name] = mesh_cd_cm
+
+    valid_mesh = [
+        mesh_cd for mesh_cd in mesh_cd_by_object.values() if np.isfinite(mesh_cd)
+    ]
+    avg_mesh_cd = float(np.mean(valid_mesh)) if len(valid_mesh) > 0 else np.inf
+    return {
+        "video_name": video_name,
+        "add_s_err_mean": (
+            float(agg_adi.mean() * 100) if agg_adi is not None else np.inf
+        ),
+        "add_err_mean": float(agg_add.mean() * 100) if agg_add is not None else np.inf,
+        "add_s_auc": float(compute_auc(agg_adi) * 100) if agg_adi is not None else 0.0,
+        "add_auc": float(compute_auc(agg_add) * 100) if agg_add is not None else 0.0,
+        "mesh_cd_cm": avg_mesh_cd,
+    }
+
+
+def run_ycbinisaac_single(
+    data_path: str, video_name: str, out_dir: str, config_path: str, model_path: str
+):
+    """Alias kept for consistent naming with the dataset and script filename."""
+    return run_ycbineoat_single(data_path, video_name, out_dir, config_path, model_path)
 
 
 if __name__ == "__main__":
@@ -382,7 +479,7 @@ if __name__ == "__main__":
         "--video_name",
         "-v",
         type=str,
-        default="two_objects",
+        default="021_bleach_cleanser_easy",
         help="Name of the video folder (e.g. 0048 or bleach0)",
     )
     parser.add_argument(

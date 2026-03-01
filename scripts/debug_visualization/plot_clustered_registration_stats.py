@@ -188,18 +188,48 @@ class _SimpleYcbinisaacGTReader:
                 f"Missing annotated_poses directory in: {video_dir}"
             )
 
+        # Keep frame id strings from RGB filenames so we can map GT poses by id.
+        rgb_files = sorted(glob.glob(os.path.join(self.video_dir, "rgb", "*.png")))
+        if not rgb_files:
+            rgb_files = sorted(glob.glob(os.path.join(self.video_dir, "rgb", "*.jpg")))
+        self.id_strs = [os.path.splitext(os.path.basename(p))[0] for p in rgb_files]
+
         object_dirs = [
             d
             for d in sorted(os.listdir(poses_root))
             if os.path.isdir(os.path.join(poses_root, d))
         ]
         if object_dirs:
-            first_obj = object_dirs[0]
+            # Match canonical reader behavior: prefer first object discovered under masks/.
+            selected_obj = None
+            masks_root = os.path.join(self.video_dir, "masks")
+            if os.path.isdir(masks_root):
+                mask_object_dirs = [
+                    d
+                    for d in sorted(os.listdir(masks_root))
+                    if os.path.isdir(os.path.join(masks_root, d))
+                ]
+                for obj_name in mask_object_dirs:
+                    if os.path.isdir(os.path.join(poses_root, obj_name)):
+                        selected_obj = obj_name
+                        break
+            if selected_obj is None:
+                selected_obj = object_dirs[0]
             self.gt_pose_files = sorted(
-                glob.glob(os.path.join(poses_root, first_obj, "*"))
+                glob.glob(os.path.join(poses_root, selected_obj, "*"))
             )
         else:
             self.gt_pose_files = sorted(glob.glob(os.path.join(poses_root, "*")))
+
+        self.gt_pose_files = [p for p in self.gt_pose_files if os.path.isfile(p)]
+        self.pose_by_stem = {
+            os.path.splitext(os.path.basename(p))[0]: p for p in self.gt_pose_files
+        }
+        self._stem_width = (
+            max((len(k) for k in self.pose_by_stem.keys()), default=0)
+            if self.pose_by_stem
+            else 0
+        )
 
         if not self.gt_pose_files:
             raise FileNotFoundError(f"No GT pose files found under: {poses_root}")
@@ -209,7 +239,30 @@ class _SimpleYcbinisaacGTReader:
 
     def get_gt_pose(self, i: int) -> Optional[np.ndarray]:
         try:
-            pose = np.loadtxt(self.gt_pose_files[int(i)]).reshape(4, 4)
+            idx = int(i)
+            pose_path = None
+
+            # First, interpret i as a frame index into RGB stream and map by id string.
+            if 0 <= idx < len(self.id_strs):
+                pose_path = self.pose_by_stem.get(self.id_strs[idx], None)
+
+            # Second, interpret i as a frame id string.
+            if pose_path is None:
+                candidates = {str(idx), f"{idx:05d}", f"{idx:06d}"}
+                if self._stem_width > 0:
+                    candidates.add(f"{idx:0{self._stem_width}d}")
+                for key in candidates:
+                    if key in self.pose_by_stem:
+                        pose_path = self.pose_by_stem[key]
+                        break
+
+            # Finally, fall back to direct index into sorted pose files.
+            if pose_path is None and 0 <= idx < len(self.gt_pose_files):
+                pose_path = self.gt_pose_files[idx]
+            if pose_path is None:
+                return None
+
+            pose = np.loadtxt(pose_path).reshape(4, 4)
             return np.asarray(pose, dtype=float)
         except Exception:
             return None

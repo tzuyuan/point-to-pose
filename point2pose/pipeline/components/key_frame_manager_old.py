@@ -1,6 +1,6 @@
 import os
 from collections import defaultdict
-from typing import List, Dict, Tuple
+from typing import List, Dict
 
 import open3d as o3d
 import numpy as np
@@ -95,9 +95,6 @@ class KeyFrameManager:
         self.pending_ttl = self.pipeline_cfg.get("pending_ttl", 15)
         self.pending_max_bad = self.pipeline_cfg.get("pending_max_bad", 6)
         self.pending_uncer_thres = self.pipeline_cfg.get("pending_uncer_thres", 0.3)
-        self.pending_ttl_on_growth_frames = bool(
-            self.pipeline_cfg.get("pending_ttl_on_growth_frames", True)
-        )
 
         # Pose stability gate for promotion (tighter than your max_rel_rotation_deg)
         self.pending_stable_rot_deg = self.pipeline_cfg.get(
@@ -120,94 +117,6 @@ class KeyFrameManager:
         )
         self.sdf_kf_gate_min_dense = int(
             self.pipeline_cfg.get("sdf_kf_gate_min_dense", 200)
-        )
-
-        # -------------------------
-        # Safe map growth / pending promotion robustness
-        # -------------------------
-        self.map_growth_gate = self.pipeline_cfg.get("map_growth_gate", True)
-        self.map_growth_cooldown_after_recovery = int(
-            self.pipeline_cfg.get("map_growth_cooldown_after_recovery", 3)
-        )
-        self.map_growth_max_mean_residual = float(
-            self.pipeline_cfg.get("map_growth_max_mean_residual", 0.0007)
-        )
-        self.map_growth_cooldown_until = {}  # obj_id -> frame_id
-        self.pending_update_when_growth_blocked = bool(
-            self.pipeline_cfg.get("pending_update_when_growth_blocked", True)
-        )
-
-        # Pending point geometric consistency checks (object-frame)
-        self.pending_obs_min_count = int(
-            self.pipeline_cfg.get("pending_obs_min_count", 4)
-        )
-        self.pending_obs_max_keep = int(
-            self.pipeline_cfg.get("pending_obs_max_keep", 1)
-        )
-        self.pending_obj_spread_thres = float(
-            self.pipeline_cfg.get("pending_obj_spread_thres", 0.008)
-        )  # meters
-        self.pending_use_view_diversity = self.pipeline_cfg.get(
-            "pending_use_view_diversity", True
-        )
-        self.pending_min_view_angle_deg = float(
-            self.pipeline_cfg.get("pending_min_view_angle_deg", 5.0)
-        )
-
-        # Optional SDF gate for pending promotion (point-wise)
-        self.pending_sdf_gate = self.pipeline_cfg.get("pending_sdf_gate", False)
-        self.pending_sdf_gate_thres = float(
-            self.pipeline_cfg.get("pending_sdf_gate_thres", 0.02)
-        )
-        self.pending_sdf_gate_percentile = float(
-            self.pipeline_cfg.get("pending_sdf_gate_percentile", 100.0)
-        )
-        self.pending_sdf_min_support = float(
-            self.pipeline_cfg.get("pending_sdf_min_support", 1.0)
-        )
-
-        # Newly promoted points: start with lower trust (higher uncertainty), then anneal
-        self.promoted_warmup_frames = int(
-            self.pipeline_cfg.get("promoted_warmup_frames", 4)
-        )
-        self.promoted_init_uncer = float(
-            self.pipeline_cfg.get("promoted_init_uncer", 0.2)
-        )
-        self.promoted_min_uncer = float(
-            self.pipeline_cfg.get("promoted_min_uncer", 0.02)
-        )
-        self.promoted_spread_to_uncer = float(
-            self.pipeline_cfg.get("promoted_spread_to_uncer", 20.0)
-        )
-        self.promoted_uncer_decay = float(
-            self.pipeline_cfg.get("promoted_uncer_decay", 0.6)
-        )
-        self.promoted_meta = {}  # (obj_id, track_id) -> {obj_idx, age, target_unc}
-
-        # Pending keyframe promotion (conservative mode):
-        # sampled keyframes are staged and only promoted to graph/SDF after checks.
-        self.pending_keyframes: Dict[int, List[dict]] = defaultdict(list)
-        self.pending_kf_min_promoted_ratio = float(
-            self.pipeline_cfg.get("pending_kf_min_promoted_ratio", 0.3)
-        )
-        self.pending_kf_min_promoted_count = int(
-            self.pipeline_cfg.get("pending_kf_min_promoted_count", 8)
-        )
-        self.pending_kf_ttl = int(self.pipeline_cfg.get("pending_kf_ttl", 30))
-        self.pending_kf_ttl_on_growth_frames = bool(
-            self.pipeline_cfg.get("pending_kf_ttl_on_growth_frames", True)
-        )
-        self.pending_kf_require_reg_quality = bool(
-            self.pipeline_cfg.get("pending_kf_require_reg_quality", True)
-        )
-        self.pending_kf_require_pose_stable = bool(
-            self.pipeline_cfg.get("pending_kf_require_pose_stable", True)
-        )
-        self.pending_kf_sdf_gate = bool(
-            self.pipeline_cfg.get("pending_kf_sdf_gate", False)
-        )
-        self.pending_kf_sdf_gate_thres = float(
-            self.pipeline_cfg.get("pending_kf_sdf_gate_thres", 0.02)
         )
 
     # -------------------------------------------------------------------------
@@ -332,32 +241,10 @@ class KeyFrameManager:
             # If object is lost, avoid sampling
             if getattr(obj, "lost", False):
                 continue
-
-            frame_growth_ok, frame_growth_reason = self._frame_allows_map_growth(
-                obj_id=obj_id, frame_id=int(cur_frame.id), fe_result=cur_fe_result
-            )
-
             if conservative:
                 self._update_pending_pts_for_obj(
-                    obj_id,
-                    obj,
-                    cur_frame,
-                    cur_track_table_copy,
-                    cur_fe_result,
-                    allow_promotion=frame_growth_ok,
+                    obj_id, obj, cur_frame, anchor_track_table, cur_fe_result
                 )
-                self._update_pending_keyframes_for_obj(
-                    obj_id=obj_id,
-                    obj=obj,
-                    frame=cur_frame,
-                    front_end_result=cur_fe_result,
-                    allow_promotion=frame_growth_ok,
-                    created_keyframes=created_keyframes,
-                )
-
-            if conservative and (not frame_growth_ok):
-                # Still update pending bookkeeping above, but do not grow the map on weak frames.
-                continue
 
             # Large rotation jump
             # rel_pose = cur_fe_result.rel_poses.get(obj_id)
@@ -499,12 +386,10 @@ class KeyFrameManager:
                         "good": 0,
                         "bad": 0,
                         "age": 0,
-                        "eval_age": 0,
-                        "obs_obj": [],  # list[(3,)] robust support in object frame
-                        "obs_frame_ids": [],  # list[int]
-                        "obs_view_dirs": [],  # list[(3,)] optional view diversity
-                        "last_obs_frame": -1,
                     }
+
+                # this is NOT a committed keyframe
+                self.is_key_frame[obj_id] = False
 
                 track_table.append_track_table(
                     track_2d=new_sampled_points,
@@ -513,41 +398,6 @@ class KeyFrameManager:
                     uncertainties=0.5 * np.ones(len(new_sampled_points), dtype=float),
                     visibles=np.ones(len(new_sampled_points), dtype=bool),
                 )
-
-                # Build a keyframe candidate, but keep it pending until support checks pass.
-                kp = dict(
-                    track_ids=np.asarray(new_indices, dtype=np.int64),
-                    uv=new_sampled_points,
-                    xyz_cam=new_points_3d,
-                    xyz_obj=new_points_3d_obj,
-                    valid=valid_new_points_3d,
-                )
-                obs = self._build_obs_for_frame(
-                    obj_id=obj_id,
-                    frame=anchor_frame,
-                    track_table=anchor_track_table,
-                    obj=obj,
-                    anchor_pose=anchor_pose,
-                )
-                kf = self._create_keyframe(
-                    frame=anchor_frame,
-                    obj=obj,
-                    kp=kp,
-                    obs=obs,
-                    reg_stats=anchor_fe_result.reg_stats.get(obj_id, {}),
-                    anchor_pose=anchor_pose,
-                )
-                # Stage conservative keyframes. They are promoted to active keyframes
-                # (graph + SDF) only after enough tentative points are verified.
-                self._queue_pending_keyframe(
-                    obj_id=obj_id,
-                    keyframe=kf,
-                    track_ids=np.asarray(new_indices, dtype=np.int64)[
-                        np.asarray(valid_new_points_3d, dtype=bool)
-                    ],
-                    frame_id=int(cur_frame.id),
-                )
-                self.is_key_frame[obj_id] = False
             else:
                 # More aggressive approach: trust the new depth measurements (even if noisy) and mark them as valid
                 # Update object with these new keypoints
@@ -857,568 +707,109 @@ class KeyFrameManager:
             return [kf for kfs in self.keyframes.values() for kf in kfs]
         return list(self.keyframes.get(obj_id, []))
 
-    def _pending_kf_age_for_ttl(self, meta: dict) -> int:
-        if self.pending_kf_ttl_on_growth_frames:
-            return int(meta.get("eval_age", 0))
-        return int(meta.get("age", 0))
-
-    def _queue_pending_keyframe(
-        self, obj_id: int, keyframe: KeyFrame, track_ids: np.ndarray, frame_id: int
+    def _update_pending_pts_for_obj(
+        self, obj_id, obj, frame, track_table, front_end_result
     ):
-        # kf_idx is assigned when promoted into the active keyframe list.
-        keyframe.kf_idx = -1
-        self.pending_keyframes[obj_id].append(
-            {
-                "keyframe": keyframe,
-                "track_ids": np.asarray(track_ids, dtype=np.int64).reshape(-1),
-                "birth_frame": int(frame_id),
-                "age": 0,
-                "eval_age": 0,
-            }
-        )
+        """
+        Promote/reject pending points for one object.
 
-    def _pending_kf_support_counts(
-        self, obj, track_ids: np.ndarray
-    ) -> Tuple[int, int, float]:
-        track_ids = np.asarray(track_ids, dtype=np.int64).reshape(-1)
-        n_total = int(track_ids.size)
-        if n_total == 0:
-            return 0, 0, 0.0
+        Promotion:
+        - point is "good" for K consecutive frames
+        - then: set obj.valid[obj_idx] = True and overwrite obj.key_points[obj_idx]
+                using the CURRENT pose and current xyz_cam.
 
-        rows = np.full((n_total,), -1, dtype=np.int64)
-        in_map = (track_ids >= 0) & (track_ids < obj.track_idx_2_obj_idx.shape[0])
-        if np.any(in_map):
-            rows[in_map] = obj.track_idx_2_obj_idx[track_ids[in_map]]
-
-        ok = (rows >= 0) & (rows < len(obj.valid))
-        promoted = np.zeros((n_total,), dtype=bool)
-        if np.any(ok):
-            promoted[ok] = np.asarray(obj.valid, dtype=bool)[rows[ok]]
-
-        n_promoted = int(np.count_nonzero(promoted))
-        ratio = float(n_promoted / max(1, n_total))
-        return n_promoted, n_total, ratio
-
-    def _pending_kf_sdf_ok(self, obj, keyframe: KeyFrame) -> bool:
-        if not self.pending_kf_sdf_gate:
-            return True
-
-        # If SDF has not been initialized yet, do not block promotion.
-        if obj is None or (
-            getattr(obj, "sdf", None) is None
-            and getattr(obj, "sdf_volume", None) is None
-        ):
-            return True
-
-        dense_pts = getattr(keyframe, "dense_pts", None)
-        if dense_pts is None or dense_pts.shape[0] < int(self.sdf_kf_gate_min_dense):
-            return False
-
-        sdf_res = self._sdf_residual_dense(
-            dense_pts=dense_pts,
-            obj_pose=np.asarray(keyframe.pose, dtype=np.float64),
-            obj=obj,
-        )
-        return bool(np.isfinite(sdf_res) and sdf_res <= self.pending_kf_sdf_gate_thres)
-
-    def _update_pending_keyframes_for_obj(
-        self,
-        obj_id: int,
-        obj,
-        frame,
-        front_end_result,
-        allow_promotion: bool,
-        created_keyframes: List[KeyFrame],
-    ):
-        pend = self.pending_keyframes.get(obj_id, [])
-        if not pend:
+        Rejection:
+        - too old (TTL) or too many consecutive bad frames
+        - then: leave obj.valid[obj_idx] = False forever (map ignores it).
+        """
+        pend_list = self.pending_track_ids.get(obj_id, [])
+        if not pend_list:
             return
 
-        reg_ok = (
-            self._get_reg_quality(front_end_result, obj_id)
-            if self.pending_kf_require_reg_quality
-            else True
-        )
-        pose_ok = (
-            self._pending_pose_stable(front_end_result, obj_id)
-            if self.pending_kf_require_pose_stable
-            else True
-        )
-
-        keep = []
-        for meta in pend:
-            meta["age"] = int(meta.get("age", 0)) + 1
-            if allow_promotion:
-                meta["eval_age"] = int(meta.get("eval_age", 0)) + 1
-
-            track_ids = np.asarray(meta.get("track_ids", []), dtype=np.int64).reshape(
-                -1
-            )
-            n_prom, n_total, ratio = self._pending_kf_support_counts(obj, track_ids)
-
-            promote_ok = bool(
-                allow_promotion
-                and reg_ok
-                and pose_ok
-                and (n_prom >= int(self.pending_kf_min_promoted_count))
-                and (ratio >= float(self.pending_kf_min_promoted_ratio))
-                and self._pending_kf_sdf_ok(obj=obj, keyframe=meta["keyframe"])
-            )
-
-            if promote_ok:
-                kf = meta["keyframe"]
-                kf.kf_idx = len(self.keyframes[obj_id])
-                self.keyframes[obj_id].append(kf)
-                created_keyframes.append(kf)
-
-                obj.last_keyframe_frame_id = kf.frame_id
-                obj.last_keyframe = kf
-                obj.num_keyframes = len(self.keyframes[obj_id])
-                obj.keyframes = self.keyframes[obj_id]
-                self.is_key_frame[obj_id] = True
-                continue
-
-            ttl_age = self._pending_kf_age_for_ttl(meta)
-            if ttl_age > int(self.pending_kf_ttl):
-                continue
-
-            keep.append(meta)
-
-        self.pending_keyframes[obj_id] = keep
-
-    def _frame_allows_map_growth(
-        self, obj_id: int, frame_id: int, fe_result
-    ) -> Tuple[bool, str]:
-        """
-        Frame-level gate for map growth (sampling + pending promotion).
-
-        Blocks growth on dense recovery frames, for a cooldown window after recovery,
-        and on weak registration quality.
-        """
-        if not self.map_growth_gate:
-            return True, "disabled"
-
-        dense_triggered = False
-        if hasattr(fe_result, "dense_recovery_triggered"):
-            dense_triggered = bool(
-                fe_result.dense_recovery_triggered.get(obj_id, False)
-            )
-
-        if dense_triggered:
-            self.map_growth_cooldown_until[obj_id] = max(
-                int(self.map_growth_cooldown_until.get(obj_id, -1)),
-                int(frame_id) + int(self.map_growth_cooldown_after_recovery),
-            )
-            return False, "dense_recovery_triggered"
-
-        cooldown_until = int(self.map_growth_cooldown_until.get(obj_id, -1))
-        if int(frame_id) <= cooldown_until:
-            return False, f"cooldown_until_{cooldown_until}"
-
-        if not self._get_reg_quality(fe_result, obj_id):
-            return False, "reg_quality_bad"
-
-        mean_res = None
-        if hasattr(fe_result, "mean_residuals"):
-            mean_res = fe_result.mean_residuals.get(obj_id, None)
-        if mean_res is not None:
-            try:
-                mean_res = float(mean_res)
-            except Exception:
-                mean_res = None
-        if mean_res is not None and np.isfinite(mean_res):
-            if mean_res > self.map_growth_max_mean_residual:
-                return False, f"mean_residual_{mean_res:.4e}"
-
-        return True, "ok"
-
-    def _query_abs_sdf_points_obj(self, pts_obj: np.ndarray, obj):
-        """
-        Query |SDF| values for points already in object frame.
-        Returns (abs_sdf_vals, support_ratio). support_ratio is the fraction of query
-        points with valid / in-bounds SDF values.
-        """
-        pts_obj = np.asarray(pts_obj, dtype=np.float32).reshape(-1, 3)
-        if pts_obj.shape[0] == 0:
-            return np.empty((0,), dtype=np.float32), 0.0
-
-        if obj is None:
-            return np.empty((0,), dtype=np.float32), 0.0
-
-        # nvblox / mapper query path
-        if getattr(obj, "sdf_volume", None) is not None and hasattr(
-            obj.sdf_volume, "query_sdf"
-        ):
-            try:
-                qvals = obj.sdf_volume.query_sdf(pts_obj)
-            except Exception:
-                qvals = None
-            if qvals is not None:
-                qvals = np.asarray(qvals).reshape(-1)
-                if qvals.shape[0] == pts_obj.shape[0]:
-                    finite = np.isfinite(qvals)
-                    support = float(np.mean(finite))
-                    return np.abs(qvals[finite]).astype(np.float32), support
-
-        # legacy dense TSDF path
-        if getattr(obj, "sdf", None) is not None and ("tsdf" in obj.sdf):
-            tsdf = obj.sdf["tsdf"]
-            origin = np.asarray(obj.sdf["vol_origin"], dtype=np.float32)
-            voxel = float(obj.sdf["voxel_size"])
-            vol_dim = np.array(tsdf.shape, dtype=np.int32)
-            vox = np.floor((pts_obj - origin[None, :]) / voxel).astype(np.int32)
-            inb = np.logical_and(
-                np.all(vox >= 0, axis=1), np.all(vox < vol_dim[None, :], axis=1)
-            )
-            support = float(np.mean(inb))
-            if not np.any(inb):
-                return np.empty((0,), dtype=np.float32), support
-            vox_in = vox[inb]
-            vals = np.abs(tsdf[vox_in[:, 0], vox_in[:, 1], vox_in[:, 2]]).astype(
-                np.float32
-            )
-            vals = vals[np.isfinite(vals)]
-            if vals.size == 0:
-                return np.empty((0,), dtype=np.float32), support
-            return vals, support
-
-        return np.empty((0,), dtype=np.float32), 0.0
-
-    def _pending_sdf_ok(self, xyz_obj: np.ndarray, obj) -> bool:
-        if not self.pending_sdf_gate:
-            return True
-        # If no SDF yet, do not block promotion.
-        if obj is None or (
-            getattr(obj, "sdf", None) is None
-            and getattr(obj, "sdf_volume", None) is None
-        ):
-            return True
-
-        vals, support = self._query_abs_sdf_points_obj(
-            np.asarray(xyz_obj)[None, :], obj
-        )
-        if support < self.pending_sdf_min_support:
-            return False
-        if vals.size == 0:
-            return False
-        q = float(np.clip(self.pending_sdf_gate_percentile, 0.0, 100.0))
-        score = float(np.percentile(vals, q))
-        return bool(np.isfinite(score) and score <= self.pending_sdf_gate_thres)
-
-    def _pending_obs_geom_ok(self, meta: dict) -> Tuple[bool, dict]:
-        obs = np.asarray(meta.get("obs_obj", []), dtype=np.float32).reshape(-1, 3)
-        if obs.shape[0] < self.pending_obs_min_count:
-            return False, {"n_obs": int(obs.shape[0]), "spread": np.inf}
-
-        med = np.median(obs, axis=0)
-        d = np.linalg.norm(obs - med[None, :], axis=1)
-        spread = float(np.median(d)) if d.size else np.inf
-        if (not np.isfinite(spread)) or (spread > self.pending_obj_spread_thres):
-            return False, {"n_obs": int(obs.shape[0]), "spread": spread}
-
-        if self.pending_use_view_diversity:
-            vdirs = np.asarray(meta.get("obs_view_dirs", []), dtype=np.float32).reshape(
-                -1, 3
-            )
-            if vdirs.shape[0] >= 2:
-                vnorm = np.linalg.norm(vdirs, axis=1, keepdims=True)
-                good = vnorm[:, 0] > 1e-8
-                vv = vdirs[good] / np.clip(vnorm[good], 1e-8, None)
-                if vv.shape[0] >= 2:
-                    c = np.clip(vv @ vv.T, -1.0, 1.0)
-                    ang = np.degrees(np.arccos(c))
-                    max_ang = float(np.max(ang))
-                    if max_ang < self.pending_min_view_angle_deg:
-                        return False, {
-                            "n_obs": int(obs.shape[0]),
-                            "spread": spread,
-                            "max_view_angle_deg": max_ang,
-                        }
-
-        return True, {"n_obs": int(obs.shape[0]), "spread": spread}
-
-    def _pending_fuse_obs(self, meta: dict) -> Tuple[np.ndarray, float]:
-        obs = np.asarray(meta.get("obs_obj", []), dtype=np.float32).reshape(-1, 3)
-        if obs.shape[0] == 0:
-            return np.zeros(3, dtype=np.float32), np.inf
-        xyz = np.median(obs, axis=0).astype(np.float32)
-        d = np.linalg.norm(obs - xyz[None, :], axis=1)
-        spread = float(np.median(d)) if d.size else 0.0
-        return xyz, spread
-
-    def _pending_age_for_ttl(self, meta: dict) -> int:
-        if self.pending_ttl_on_growth_frames:
-            return int(meta.get("eval_age", 0))
-        return int(meta.get("age", 0))
-
-    def _pending_mask_for_obj(self, frame, obj_id: int):
-        if (
-            self.pending_require_inside_mask
-            and getattr(frame, "mask", None) is not None
-            and frame.mask.shape[0] > obj_id
-        ):
-            return frame.mask[obj_id, 0]
-        return None
-
-    def _pending_pose_stable(self, front_end_result, obj_id: int) -> bool:
+        # --- pose stability gate
+        pose_stable = True
         rel_pose = front_end_result.rel_poses.get(obj_id)
-        if rel_pose is None:
-            return True
-        rot_deg = float(np.degrees(scipy_R.from_matrix(rel_pose[:3, :3]).magnitude()))
-        trans = float(np.linalg.norm(rel_pose[:3, 3]))
-        return (rot_deg < self.pending_stable_rot_deg) and (
-            trans < self.pending_stable_trans
-        )
+        if rel_pose is not None:
+            rot_deg = float(
+                np.degrees(scipy_R.from_matrix(rel_pose[:3, :3]).magnitude())
+            )
+            trans = float(np.linalg.norm(rel_pose[:3, 3]))
+            pose_stable = (rot_deg < self.pending_stable_rot_deg) and (
+                trans < self.pending_stable_trans
+            )
 
-    def _pending_point_inside_mask(self, uv: np.ndarray, mask) -> bool:
-        if mask is None:
-            return True
-        if not np.isfinite(uv).all():
-            return False
-        H, W = int(mask.shape[0]), int(mask.shape[1])
-        x = int(np.clip(np.rint(uv[0]), 0, W - 1))
-        y = int(np.clip(np.rint(uv[1]), 0, H - 1))
-        return bool(mask[y, x] > 0)
-
-    def _pending_point_gate_good(
-        self, track_table, tid: int, pose_stable: bool, mask
-    ) -> bool:
-        if not pose_stable:
-            return False
-        if not (bool(track_table.visible[tid]) and bool(track_table.valid[tid])):
-            return False
-        if float(track_table.uncertainty[tid]) >= self.pending_uncer_thres:
-            return False
-        return self._pending_point_inside_mask(track_table.track_2d[tid], mask)
-
-    def _pending_mark_good(self, meta: dict):
-        meta["good"] = int(meta.get("good", 0)) + 1
-        meta["bad"] = 0
-
-    def _pending_mark_bad(self, meta: dict):
-        meta["bad"] = int(meta.get("bad", 0)) + 1
-        meta["good"] = 0
-
-    def _pending_cleanup(self, key: Tuple[int, int]):
-        self.pending_birth_frame.pop(key, None)
-        self.pending_meta.pop(key, None)
-
-    def _pending_should_reject(self, meta: dict) -> bool:
-        ttl_age = self._pending_age_for_ttl(meta)
-        return (ttl_age > self.pending_ttl) or (
-            int(meta.get("bad", 0)) > self.pending_max_bad
-        )
-
-    def _pending_collect_support_observation(
-        self, meta: dict, obj, frame_id: int, xyz_cam: np.ndarray, T_c2o: np.ndarray
-    ) -> bool:
-        xyz_cam = np.asarray(xyz_cam, dtype=np.float32).reshape(3)
-        if not np.isfinite(xyz_cam).all():
-            return False
-
-        xyz_obj = transform_pts(T_c2o, xyz_cam[None])[0].astype(np.float32)
-        if not self._pending_sdf_ok(xyz_obj, obj):
-            return False
-
-        if int(meta.get("last_obs_frame", -1)) != frame_id:
-            obs_obj = meta.setdefault("obs_obj", [])
-            obs_frames = meta.setdefault("obs_frame_ids", [])
-            obs_vdirs = meta.setdefault("obs_view_dirs", [])
-
-            obs_obj.append(xyz_obj.copy())
-            obs_frames.append(frame_id)
-
-            cam_center_obj = T_c2o[:3, 3].astype(np.float32)
-            v = cam_center_obj - xyz_obj
-            n = float(np.linalg.norm(v))
-            obs_vdirs.append((v / max(n, 1e-8)).astype(np.float32))
-
-            max_keep = max(1, int(self.pending_obs_max_keep))
-            if len(obs_obj) > max_keep:
-                del obs_obj[:-max_keep]
-                del obs_frames[:-max_keep]
-                del obs_vdirs[:-max_keep]
-
-            meta["last_obs_frame"] = frame_id
-
-        return True
-
-    def _pending_try_promote(self, key: Tuple[int, int], meta: dict, obj) -> bool:
-        if int(meta.get("good", 0)) < int(self.pending_promote_streak):
-            return False
-
-        geom_ok, _ = self._pending_obs_geom_ok(meta)
-        if not geom_ok:
-            return False
-
-        obj_idx = int(meta.get("obj_idx", -1))
-        if 0 <= obj_idx < len(obj.key_points):
-            xyz_obj_fused, spread = self._pending_fuse_obs(meta)
-            obj.key_points[obj_idx] = xyz_obj_fused
-            obj.valid[obj_idx] = True
-
-            if obj_idx < len(obj.uncertainties):
-                target_unc = max(
-                    float(self.promoted_min_uncer),
-                    float(spread) * float(self.promoted_spread_to_uncer),
-                )
-                init_unc = max(float(self.promoted_init_uncer), target_unc)
-                obj.uncertainties[obj_idx] = init_unc
-                self.promoted_meta[key] = {
-                    "obj_idx": int(obj_idx),
-                    "age": 0,
-                    "target_unc": float(target_unc),
-                }
-
-        self._pending_cleanup(key)
-        return True
-
-    def _pending_reject(self, key: Tuple[int, int], meta: dict, obj):
-        obj_idx = int(meta.get("obj_idx", -1))
-        if 0 <= obj_idx < len(obj.valid):
-            obj.valid[obj_idx] = False
-        self._pending_cleanup(key)
-
-    def _update_recently_promoted_pts_for_obj(
-        self, obj_id, obj, frame, track_table, allow_promotion: bool
-    ):
-        """
-        Newly promoted points are valid but start with larger uncertainty, then anneal
-        down over a few good frames. This reduces how much fresh points dominate f2m.
-        """
-        keys = [k for k in self.promoted_meta.keys() if k[0] == obj_id]
-        if not keys:
-            return
-
+        # --- optional mask for inside check
         mask = None
         if (
             self.pending_require_inside_mask
             and getattr(frame, "mask", None) is not None
         ):
             if frame.mask.shape[0] > obj_id:
-                mask = frame.mask[obj_id, 0]
-
-        for key in keys:
-            _obj_id, tid = key
-            meta = self.promoted_meta.get(key, None)
-            if meta is None:
-                continue
-            obj_idx = int(meta.get("obj_idx", -1))
-            if obj_idx < 0 or obj_idx >= len(obj.valid):
-                self.promoted_meta.pop(key, None)
-                continue
-            if not bool(obj.valid[obj_idx]):
-                self.promoted_meta.pop(key, None)
-                continue
-
-            # Determine whether this frame provides a reliable confirmation of the promoted point
-            is_good = bool(allow_promotion)
-            if tid >= len(track_table.valid):
-                is_good = False
-            else:
-                is_good = (
-                    is_good
-                    and bool(track_table.visible[tid])
-                    and bool(track_table.valid[tid])
-                    and (float(track_table.uncertainty[tid]) < self.pending_uncer_thres)
-                )
-                if is_good and mask is not None:
-                    uv = track_table.track_2d[tid]
-                    if np.isfinite(uv).all():
-                        H, W = int(mask.shape[0]), int(mask.shape[1])
-                        x = int(np.clip(np.rint(uv[0]), 0, W - 1))
-                        y = int(np.clip(np.rint(uv[1]), 0, H - 1))
-                        is_good = bool(mask[y, x] > 0)
-                    else:
-                        is_good = False
-
-            if is_good:
-                meta["age"] = int(meta.get("age", 0)) + 1
-                cur_unc = float(obj.uncertainties[obj_idx])
-                target_unc = float(meta.get("target_unc", self.promoted_min_uncer))
-                new_unc = max(target_unc, cur_unc * self.promoted_uncer_decay)
-                obj.uncertainties[obj_idx] = new_unc
-            # If not good, keep uncertainty high and just wait.
-
-            if int(meta.get("age", 0)) >= self.promoted_warmup_frames:
-                target_unc = float(meta.get("target_unc", self.promoted_min_uncer))
-                obj.uncertainties[obj_idx] = max(
-                    target_unc, float(obj.uncertainties[obj_idx])
-                )
-                self.promoted_meta.pop(key, None)
-
-    def _update_pending_pts_for_obj(
-        self,
-        obj_id,
-        obj,
-        frame,
-        track_table,
-        front_end_result,
-        allow_promotion: bool = True,
-    ):
-        """
-        Promote/reject pending points for one object using multi-frame geometric
-        consistency in object frame, optional point-wise SDF checks, and robust fusion.
-
-        Pending points remain invalid until promoted; they never affect f2m until then.
-        """
-        # Update trust annealing for recently promoted points first.
-        self._update_recently_promoted_pts_for_obj(
-            obj_id=obj_id,
-            obj=obj,
-            frame=frame,
-            track_table=track_table,
-            allow_promotion=allow_promotion,
-        )
-
-        pend_list = self.pending_track_ids.get(obj_id, [])
-        if not pend_list:
-            return
-
-        update_pending = bool(
-            allow_promotion or self.pending_update_when_growth_blocked
-        )
-        pose_stable = self._pending_pose_stable(front_end_result, obj_id)
-        mask = self._pending_mask_for_obj(frame, obj_id)
-        T_c2o = inverse_SE3(obj.pose) if update_pending else None
+                mask = frame.mask[obj_id, 0]  # (H,W) torch/bool-like
 
         keep = []
         for tid in pend_list:
-            tid = int(tid)
-            key = (obj_id, tid)
+            key = (obj_id, int(tid))
             meta = self.pending_meta.get(key, None)
             if meta is None:
                 continue
 
-            meta["age"] = int(meta.get("age", 0)) + 1
-            if update_pending:
-                meta["eval_age"] = int(meta.get("eval_age", 0)) + 1
+            meta["age"] += 1
 
-            if tid >= len(track_table.valid):
-                self._pending_mark_bad(meta)
-            elif update_pending:
-                point_gate_good = self._pending_point_gate_good(
-                    track_table=track_table,
-                    tid=tid,
-                    pose_stable=pose_stable,
-                    mask=mask,
-                )
-                if point_gate_good and self._pending_collect_support_observation(
-                    meta=meta,
-                    obj=obj,
-                    frame_id=int(frame.id),
-                    xyz_cam=track_table.track_3d[tid],
-                    T_c2o=T_c2o,
-                ):
-                    self._pending_mark_good(meta)
+            # Read track state
+            vis = bool(track_table.visible[tid])
+            vld = bool(track_table.valid[tid])
+            uncer = float(track_table.uncertainty[tid])
+
+            inside = True
+            if mask is not None:
+                uv = track_table.track_2d[tid]
+                if np.isfinite(uv).all():
+                    H, W = int(mask.shape[0]), int(mask.shape[1])
+                    x = int(np.clip(np.rint(uv[0]), 0, W - 1))
+                    y = int(np.clip(np.rint(uv[1]), 0, H - 1))
+                    inside = bool(mask[y, x] > 0)
                 else:
-                    self._pending_mark_bad(meta)
-            # else: freeze pending updates when explicitly disabled.
+                    inside = False
 
-            if self._pending_try_promote(key=key, meta=meta, obj=obj):
+            good = (
+                pose_stable
+                and vis
+                and vld
+                and inside
+                and (uncer < self.pending_uncer_thres)
+            )
+
+            if good:
+                meta["good"] += 1
+                meta["bad"] = 0
+            else:
+                meta["bad"] += 1
+                meta["good"] = 0
+
+            # --- promote
+            if meta["good"] >= self.pending_promote_streak:
+                obj_idx = meta["obj_idx"]
+
+                xyz_cam = track_table.track_3d[tid]
+                # overwrite object-frame coordinate using CURRENT pose (important!)
+                xyz_obj = transform_pts(inverse_SE3(obj.pose), xyz_cam[None])[0]
+
+                obj.key_points[obj_idx] = xyz_obj
+                obj.valid[obj_idx] = True
+
+                # cleanup
+                self.pending_birth_frame.pop(key, None)
+                self.pending_meta.pop(key, None)
                 continue
-            if self._pending_should_reject(meta):
-                self._pending_reject(key=key, meta=meta, obj=obj)
+
+            # --- reject
+            if meta["age"] > self.pending_ttl or meta["bad"] > self.pending_max_bad:
+                obj_idx = meta["obj_idx"]
+                obj.valid[obj_idx] = False  # stays inactive for f2m forever
+
+                self.pending_birth_frame.pop(key, None)
+                self.pending_meta.pop(key, None)
                 continue
 
             keep.append(tid)

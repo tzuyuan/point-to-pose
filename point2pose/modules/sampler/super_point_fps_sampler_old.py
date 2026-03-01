@@ -39,28 +39,6 @@ class SuperPointFPSSampler(Sampler):
             config.get("debug_save_score_heatmap", True)
         )
 
-        # Safety filtering (sampler-side) to avoid risky points entering the map
-        self.sample_filter_enable = bool(config.get("sample_filter_enable", True))
-        self.sample_require_depth_valid = bool(
-            config.get("sample_require_depth_valid", True)
-        )
-        self.sample_reject_depth_edge = bool(
-            config.get("sample_reject_depth_edge", True)
-        )
-        self.sample_depth_edge_window = int(config.get("sample_depth_edge_window", 1))
-        self.sample_depth_edge_thres = float(
-            config.get("sample_depth_edge_thres", 0.03)
-        )  # meters (local patch depth span)
-        self.sample_min_pixel_dist_existing = float(
-            config.get("sample_min_pixel_dist_existing", 6.0)
-        )
-        self.sample_min_pixel_dist_new = float(
-            config.get("sample_min_pixel_dist_new", 4.0)
-        )
-        self.sample_max_per_obj = int(
-            config.get("sample_max_per_obj", 0)
-        )  # 0 => no cap
-
         from lightglue import SuperPoint
 
         self.super_point_extractor = (
@@ -132,8 +110,7 @@ class SuperPointFPSSampler(Sampler):
         # RAW (pre-filter) tensors -> numpy
         kps_xy_raw = feats["keypoints"][0]  # (N,2) (x,y) LOCAL (crop) coords
         kp_sc_raw = feats["keypoint_scores"][0]  # (N,)
-        desc_raw = feats.get("descriptors", None)
-        desc_raw = None if desc_raw is None else desc_raw[0]  # (N,D) or None
+        desc_raw = feats.get("descriptors", None)[0]  # (N,D) or None
 
         if torch.is_tensor(kps_xy_raw):
             kps_xy_raw = kps_xy_raw.detach().cpu().numpy()
@@ -201,35 +178,6 @@ class SuperPointFPSSampler(Sampler):
                 self._viz_hull(rgb, mask_inner, hull_xy, detect_mask, frame.id, obj_id)
             return np.empty((0, 2), dtype=np.int32)
 
-        # --- 6.5) Sampler-side safety filter (depth validity / depth edges / novelty)
-        pts_xy_int_local = np.round(kps_xy).astype(np.int32)
-        if used_crop:
-            pts_xy_int_global = pts_xy_int_local.copy()
-            pts_xy_int_global[:, 0] += x_offset
-            pts_xy_int_global[:, 1] += y_offset
-        else:
-            pts_xy_int_global = pts_xy_int_local.copy()
-
-        keep_safe = self._candidate_safety_keep_mask(
-            context=context,
-            obj_id=obj_id,
-            pts_global=pts_xy_int_global,
-        )
-        if keep_safe is not None:
-            if keep_safe.shape[0] != kps_xy.shape[0]:
-                raise RuntimeError("safety keep mask shape mismatch")
-            kps_xy = kps_xy[keep_safe]
-            kp_sc = kp_sc[keep_safe]
-            if desc is not None:
-                desc = desc[keep_safe]
-
-        if kps_xy.shape[0] == 0:
-            if getattr(self, "debug_level", 0) >= 1:
-                print(
-                    f"[SuperPoint] All keypoints filtered out by sampler safety filters (obj {obj_id})"
-                )
-            return np.empty((0, 2), dtype=np.int32)
-
         # --- 7) Sort by score (descending)
         sort_idx = np.argsort(-kp_sc)  # high score first
         kps_xy = kps_xy[sort_idx]
@@ -239,15 +187,6 @@ class SuperPointFPSSampler(Sampler):
 
         # --- 8) Recompute integer coords for sorted points
         pts_xy_int_local = np.round(kps_xy).astype(np.int32)
-
-        # Deduplicate integer pixels (keep highest-score first due to sorting)
-        uniq_keep = self._unique_xy_keep_first(pts_xy_int_local)
-        if uniq_keep.shape[0] < pts_xy_int_local.shape[0]:
-            pts_xy_int_local = pts_xy_int_local[uniq_keep]
-            kps_xy = kps_xy[uniq_keep]
-            kp_sc = kp_sc[uniq_keep]
-            if desc is not None:
-                desc = desc[uniq_keep]
 
         # --- 9) Optional coarse grid filter (still prioritizing high scores)
         # This keeps at most one point per cell of size cell_size, in score order.
@@ -305,21 +244,6 @@ class SuperPointFPSSampler(Sampler):
             pts_xy_int_global = pts_xy_int_local
 
         sel_pts = pts_xy_int_global  # (M,2) int in ORIGINAL IMAGE FRAME
-
-        # Enforce additional min spacing among newly selected points (global coords)
-        if (
-            self.sample_filter_enable
-            and self.sample_min_pixel_dist_new > 0
-            and len(sel_pts) > 1
-        ):
-            keep_new = self._greedy_min_dist_keep(
-                sel_pts, self.sample_min_pixel_dist_new
-            )
-            if keep_new.shape[0] > 0:
-                sel_pts = sel_pts[keep_new]
-
-        if self.sample_max_per_obj > 0 and len(sel_pts) > self.sample_max_per_obj:
-            sel_pts = sel_pts[: self.sample_max_per_obj]
 
         # --- 12) Debug viz (always in original frame coords)
         if getattr(self, "debug_level", 0) >= 1:
@@ -393,212 +317,6 @@ class SuperPointFPSSampler(Sampler):
             f"[SuperPoint Sampler] SuperPoint kept {len(sel_pts)} for object {obj_id}"
         )
         return sel_pts
-
-    # ------------------------------------------------------------------------
-    # Candidate safety filters (sampler-side)
-    # ------------------------------------------------------------------------
-    def _candidate_safety_keep_mask(
-        self, context: SamplerContext, obj_id: int, pts_global: np.ndarray
-    ):
-        """
-        Returns a boolean keep mask for candidate points in GLOBAL image coords.
-        Applies depth validity, depth-discontinuity rejection, and novelty w.r.t.
-        existing tracked points for the same object.
-        """
-        pts_global = np.asarray(pts_global, dtype=np.int32).reshape(-1, 2)
-        N = pts_global.shape[0]
-        if N == 0 or (not self.sample_filter_enable):
-            return np.ones((N,), dtype=bool)
-
-        keep = np.ones((N,), dtype=bool)
-        frame = context.frame
-
-        # In-bounds check (defensive; points should already be in-bounds)
-        H, W = frame.rgb.shape[:2]
-        xg = pts_global[:, 0]
-        yg = pts_global[:, 1]
-        keep &= (xg >= 0) & (xg < W) & (yg >= 0) & (yg < H)
-
-        depth_m = self._frame_depth_meters(frame)
-        if depth_m is not None:
-            if self.sample_require_depth_valid:
-                d = depth_m[np.clip(yg, 0, H - 1), np.clip(xg, 0, W - 1)]
-                finite = np.isfinite(d)
-                valid = finite & (d > 0)
-                min_d = getattr(context, "min_depth", None)
-                max_d = getattr(context, "max_depth", None)
-                if min_d is not None:
-                    valid &= d >= float(min_d)
-                if max_d is not None:
-                    valid &= d <= float(max_d)
-                keep &= valid
-
-            if self.sample_reject_depth_edge:
-                edge_good = self._depth_edge_keep_mask(
-                    depth_m=depth_m,
-                    pts_global=pts_global,
-                    patch_radius=int(self.sample_depth_edge_window),
-                    max_span_m=float(self.sample_depth_edge_thres),
-                )
-                keep &= edge_good
-
-        if self.sample_min_pixel_dist_existing > 0:
-            prev_xy = self._get_existing_visible_points_global(context, obj_id)
-            if prev_xy is not None and len(prev_xy) > 0:
-                far_enough = self._keep_far_from_existing(
-                    pts_global=pts_global,
-                    prev_xy=np.asarray(prev_xy, dtype=np.float32).reshape(-1, 2),
-                    min_dist_px=float(self.sample_min_pixel_dist_existing),
-                )
-                keep &= far_enough
-
-        return keep
-
-    def _frame_depth_meters(self, frame):
-        depth = getattr(frame, "depth", None)
-        if depth is None:
-            return None
-        if torch.is_tensor(depth):
-            depth_np = depth.detach().cpu().numpy()
-        else:
-            depth_np = np.asarray(depth)
-        if depth_np.ndim != 2:
-            return None
-        depth_m = depth_np.astype(np.float32)
-        depth_factor = getattr(frame, "depth_factor", None)
-        try:
-            if depth_factor is not None and float(depth_factor) > 0:
-                # Heuristic: integer depths are usually scaled by depth_factor.
-                if (
-                    not np.issubdtype(depth_np.dtype, np.floating)
-                    or float(depth_factor) != 1.0
-                ):
-                    depth_m = depth_m / float(depth_factor)
-        except Exception:
-            pass
-        depth_m[~np.isfinite(depth_m)] = np.nan
-        return depth_m
-
-    def _depth_edge_keep_mask(
-        self,
-        depth_m: np.ndarray,
-        pts_global: np.ndarray,
-        patch_radius: int,
-        max_span_m: float,
-    ):
-        pts_global = np.asarray(pts_global, dtype=np.int32).reshape(-1, 2)
-        N = pts_global.shape[0]
-        if N == 0 or patch_radius <= 0 or max_span_m <= 0:
-            return np.ones((N,), dtype=bool)
-        H, W = depth_m.shape
-        keep = np.ones((N,), dtype=bool)
-        r = int(patch_radius)
-        for i, (x, y) in enumerate(pts_global):
-            x0, x1 = max(0, x - r), min(W, x + r + 1)
-            y0, y1 = max(0, y - r), min(H, y + r + 1)
-            patch = depth_m[y0:y1, x0:x1]
-            vals = patch[np.isfinite(patch) & (patch > 0)]
-            if vals.size < 3:
-                keep[i] = False
-                continue
-            span = float(np.max(vals) - np.min(vals))
-            if span > max_span_m:
-                keep[i] = False
-        return keep
-
-    def _get_existing_visible_points_global(self, context: SamplerContext, obj_id: int):
-        tbl = getattr(context, "point_track_table", None) or getattr(
-            context, "track_table", None
-        )
-        if tbl is None:
-            return None
-
-        track_2d = getattr(tbl, "track_2d", None)
-        visible = getattr(tbl, "visible", None)
-        obj2track = getattr(tbl, "obj2track_map", None)
-
-        # Layout A: object-major arrays + obj2track_map (same as _fit_convex_hull path)
-        if (
-            track_2d is not None
-            and visible is not None
-            and obj2track is not None
-            and obj_id in obj2track
-        ):
-            try:
-                obj_idx = obj2track[obj_id]
-                vis_mask = np.asarray(visible, dtype=bool)[obj_idx]
-                pts = np.asarray(track_2d[obj_idx])
-                if (
-                    pts.ndim == 2
-                    and pts.shape[1] >= 2
-                    and vis_mask.shape[0] == pts.shape[0]
-                ):
-                    return pts[vis_mask, :2]
-            except Exception:
-                pass
-
-        # Layout B: global table with explicit per-object track ids map (best effort)
-        track_ids_map = getattr(tbl, "track_ids_of_obj", None)
-        if callable(track_ids_map) and track_2d is not None and visible is not None:
-            try:
-                tids = np.asarray(track_ids_map(obj_id), dtype=np.int64).reshape(-1)
-                pts = np.asarray(track_2d)[tids]
-                vis = np.asarray(visible, dtype=bool)[tids]
-                return pts[vis, :2]
-            except Exception:
-                pass
-
-        return None
-
-    def _keep_far_from_existing(
-        self, pts_global: np.ndarray, prev_xy: np.ndarray, min_dist_px: float
-    ):
-        pts_global = np.asarray(pts_global, dtype=np.float32).reshape(-1, 2)
-        prev_xy = np.asarray(prev_xy, dtype=np.float32).reshape(-1, 2)
-        if pts_global.shape[0] == 0 or prev_xy.shape[0] == 0 or min_dist_px <= 0:
-            return np.ones((pts_global.shape[0],), dtype=bool)
-        thr2 = float(min_dist_px) ** 2
-        keep = np.ones((pts_global.shape[0],), dtype=bool)
-        # brute-force is fine here (candidate counts are small)
-        for i, p in enumerate(pts_global):
-            diff = prev_xy - p[None, :]
-            d2 = np.einsum("ij,ij->i", diff, diff)
-            if d2.size > 0 and float(np.min(d2)) < thr2:
-                keep[i] = False
-        return keep
-
-    def _unique_xy_keep_first(self, pts_xy: np.ndarray) -> np.ndarray:
-        pts_xy = np.asarray(pts_xy, dtype=np.int32).reshape(-1, 2)
-        seen = set()
-        keep = []
-        for i, (x, y) in enumerate(pts_xy):
-            key = (int(x), int(y))
-            if key in seen:
-                continue
-            seen.add(key)
-            keep.append(i)
-        return np.asarray(keep, dtype=np.int32)
-
-    def _greedy_min_dist_keep(
-        self, pts_xy: np.ndarray, min_dist_px: float
-    ) -> np.ndarray:
-        """Greedy spacing filter that preserves incoming order (score/FPS priority)."""
-        pts_xy = np.asarray(pts_xy, dtype=np.float32).reshape(-1, 2)
-        N = pts_xy.shape[0]
-        if N == 0 or min_dist_px <= 0:
-            return np.arange(N, dtype=np.int32)
-        thr2 = float(min_dist_px) ** 2
-        keep = []
-        for i in range(N):
-            p = pts_xy[i]
-            if not keep:
-                keep.append(i)
-                continue
-            prev = pts_xy[np.asarray(keep, dtype=np.int32)]
-            d2 = np.sum((prev - p[None, :]) ** 2, axis=1)
-            if float(np.min(d2)) >= thr2:
-                keep.append(i)
-        return np.asarray(keep, dtype=np.int32)
 
     # ------------------------------------------------------------------------
     # FPS helper

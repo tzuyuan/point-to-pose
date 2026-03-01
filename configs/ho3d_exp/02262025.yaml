@@ -13,7 +13,7 @@ pipeline:
     fill_missing_depth_window_size: 5
     fill_missing_depth_min_neighbors: 1
     min_depth: 0.1
-    max_depth: 1.5
+    max_depth: 2
 
     use_depth_estimate: false
     depth_estimator_type: depth_anything
@@ -28,7 +28,7 @@ pipeline:
     anchor_trans: 0.03
     anchor_min_inliers: 10
     anchor_min_inlier_ratio: 0.0
-    anchor_max_median_res: 1.0
+    anchor_max_median_res: 0.01
     anchor_vel_hist_len: 5
     anchor_vel_rot_deg: 150.0
     anchor_vel_trans: 1.00
@@ -60,7 +60,7 @@ reconstructor:
     sdf_use_gpu: true
     sdf_backend: nvblox
     sdf_voxel_size: 0.005
-    sdf_bounds_padding: 0.1
+    sdf_bounds_padding: 0.2
     sdf_min_points: 300
     sdf_filter_max_radius: 0.25
     sdf_filter_keep_percentile: 98.0
@@ -92,9 +92,9 @@ register:
     ransac_iters: 100
     sample_size: 4
     inlier_thres: 0.004
-    min_inliers: 4
+    min_inliers: 5
     max_clusters: 10
-    use_uncertainty: false
+    use_uncertainty: true
     min_variance: 1e-2
     select_3d_dist_min_depth: 0.08
     select_3d_dist_max_depth: 2
@@ -110,20 +110,20 @@ register:
     remove_outside_mask: true
     uncer_thres: 0.1
     residual_thres: 0.007
-    mask_border_margin_px: 10
 
 # register:
-#   type: svd_cluster
+#   type: svd_outlier_sdf
 #   params:
-#     threshold_method: fixed
+#     threshold_method: mad
 #     ransac_iters: 50
 #     sample_size: 4
 #     inlier_thres: 0.005
 #     min_inliers: 4
 #     max_clusters: 10
-#     use_uncertainty: true
+#     use_uncertainty: false
 #     min_variance: 1e-3
 
+#     select_method: 3d_dist_dense_map
 #     select_3d_dist_min_depth: 0.08
 #     select_3d_dist_max_depth: 2
 #     select_3d_dist_fill_missing_depth: true
@@ -131,10 +131,20 @@ register:
 #     select_3d_dist_min_neighbors: 1
 #     select_dense_map_close_margin: 0.007
 
+
+#     sdf_opt_max_iter: 25
+#     sdf_opt_percentile: 70.0
+#     sdf_opt_rot_bound: 0.15
+#     sdf_opt_trans_bound: 0.03
+#     sdf_opt_reg_lambda: 1e-3
+#     sdf_opt_reg_rot: 1.0
+#     sdf_opt_reg_trans: 1.0
+    
 #     # front end
 #     remove_outside_mask: true
-#     uncer_thres: 0.3
+#     uncer_thres: 0.1
 #     residual_thres: 0.007
+
 
 # register:
 #   type: svd_ransac
@@ -204,11 +214,11 @@ sampler:
   params:
     num_points: 30
     density_per_kpx: -1
-    fps_oversample_factor: 10
+    fps_oversample_factor: 2
 
     min_points: 5
     max_points: 50
-    edge_margin_px: 3
+    edge_margin_px: 5
     remove_convex_hull: false
     inflate_points: false
     inflate_radius_px: 20
@@ -218,7 +228,7 @@ sampler:
     crop_to_mask: true
     crop_pad_px: 3
 
-    super_point_max_num_keypoints: 1024
+    super_point_max_num_keypoints: 512
 
     debug_level: 2
     debug_dir: /home/justin/code/point-to-pose/debug/sampler
@@ -261,7 +271,7 @@ criterion:
 local_optimizer:
   type: lm_graph
   params:
-    local_graph_max_num_frames: 10
+    local_graph_max_num_frames: 50
     max_iterations: 20
     relative_error_tol: 1e-5
     absolute_error_tol: 1e-5
@@ -283,7 +293,7 @@ global_optimizer:
     prior_noise_param: [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000]
     uncertainty_thres: 0.3
     uncertainty_min: 1e-2
-    use_between_factor: true
+    use_between_factor: false
     landmark_sigma_scale_by: residual
     landmark_sigma_min: 1e-3
     landmark_huber_k: 1.0
