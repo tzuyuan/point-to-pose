@@ -593,10 +593,39 @@ class SVDClusterRANSACRegister(Register):
         # Recompute residuals / inliers from final selected pose (after optional SDF refine).
         residuals = np.linalg.norm(transform_pts(selected_T, src_pcd) - tgt_pcd, axis=1)
         inliers = residuals <= self._inlier_thres
-        candidates[best_cluster_idx]["ninliers"] = int(np.count_nonzero(inliers))
+        selected_ninliers = int(np.count_nonzero(inliers))
+        candidates[best_cluster_idx]["ninliers"] = selected_ninliers
         candidates[best_cluster_idx]["mean_res"] = float(
             np.mean(residuals[inliers]) if np.any(inliers) else np.mean(residuals)
         )
+
+        # Final hard support gate (minimal safety check):
+        # if the finally selected hypothesis has too few inliers, fall back to
+        # init_pose (or identity when init_pose is unavailable).
+        final_inlier_gate = {
+            "applied": False,
+            "selected_ninliers": int(selected_ninliers),
+            "min_inliers": int(self._min_inliers),
+            "fallback_to": "",
+            "fallback_ninliers": int(selected_ninliers),
+        }
+        if selected_ninliers < int(self._min_inliers):
+            if init_pose is not None:
+                fallback_T = np.asarray(init_pose, dtype=np.float64)
+                final_inlier_gate["fallback_to"] = "init_pose"
+            else:
+                fallback_T = np.eye(4, dtype=np.float64)
+                final_inlier_gate["fallback_to"] = "identity"
+
+            residuals_fb = np.linalg.norm(
+                transform_pts(fallback_T, src_pcd) - tgt_pcd, axis=1
+            )
+            inliers_fb = residuals_fb <= self._inlier_thres
+            selected_T = fallback_T
+            residuals = residuals_fb
+            inliers = inliers_fb
+            final_inlier_gate["applied"] = True
+            final_inlier_gate["fallback_ninliers"] = int(np.count_nonzero(inliers_fb))
 
         stats["clusters"] = candidates
         stats["best_cluster_idx"] = best_cluster_idx
@@ -605,6 +634,7 @@ class SVDClusterRANSACRegister(Register):
         stats["residuals"] = residuals
         stats["support_guard"] = support_guard_info
         stats["sdf_refine"] = sdf_refine_info
+        stats["final_inlier_gate"] = final_inlier_gate
         if reproj_errors is not None:
             stats["reproj_errors"] = np.array(reproj_errors, dtype=float)
 
@@ -1466,7 +1496,9 @@ class SVDClusterRANSACRegister(Register):
             return 1.0 / (1.0 + x * x)
         return np.ones_like(r_abs, dtype=np.float64)
 
-    def _refine_pose_with_sdf(self, pts_cur, T_cur2obj_init, obj, src_corr=None, tgt_corr=None):
+    def _refine_pose_with_sdf(
+        self, pts_cur, T_cur2obj_init, obj, src_corr=None, tgt_corr=None
+    ):
         T = np.asarray(T_cur2obj_init, dtype=np.float64).copy()
         pts_cur = np.asarray(pts_cur, dtype=np.float64)
 
@@ -1533,7 +1565,8 @@ class SVDClusterRANSACRegister(Register):
             cost = float(np.mean(rw**2)) if rw.size else np.inf
             if support_ratio < self._sdf_min_support_ratio:
                 cost += float(
-                    self._sdf_bad_penalty * (self._sdf_min_support_ratio - support_ratio)
+                    self._sdf_bad_penalty
+                    * (self._sdf_min_support_ratio - support_ratio)
                 )
 
             dbg["cost_history"].append(cost)
@@ -1548,7 +1581,9 @@ class SVDClusterRANSACRegister(Register):
                 break
 
             dxi[:3] = np.clip(
-                dxi[:3], -self._sdf_refine_step_trans_clip, self._sdf_refine_step_trans_clip
+                dxi[:3],
+                -self._sdf_refine_step_trans_clip,
+                self._sdf_refine_step_trans_clip,
             )
             dxi[3:] = np.clip(
                 dxi[3:], -self._sdf_refine_step_rot_clip, self._sdf_refine_step_rot_clip
@@ -1584,7 +1619,8 @@ class SVDClusterRANSACRegister(Register):
 
     def _eval_sdf_cost(self, pts_cur, T_cur2obj, obj):
         pts_obj = transform_pts(
-            np.asarray(T_cur2obj, dtype=np.float32), np.asarray(pts_cur, dtype=np.float32)
+            np.asarray(T_cur2obj, dtype=np.float32),
+            np.asarray(pts_cur, dtype=np.float32),
         )
         vals, valid = self._query_sdf_signed(obj, pts_obj)
         if valid.sum() < self._sdf_refine_min_pts:
@@ -1600,7 +1636,9 @@ class SVDClusterRANSACRegister(Register):
         support = float(valid.mean())
         cost = float(np.mean(w * (rr**2)))
         if support < self._sdf_min_support_ratio:
-            cost += float(self._sdf_bad_penalty * (self._sdf_min_support_ratio - support))
+            cost += float(
+                self._sdf_bad_penalty * (self._sdf_min_support_ratio - support)
+            )
         return cost
 
     def _sdf_residual(self, pts_cur, T_cur2obj, obj, robust_percentile=70.0):

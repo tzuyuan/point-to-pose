@@ -73,6 +73,25 @@ def draw_points_on_image(image, points, colors):
         )
 
 
+def _map_track_ids_to_obj_rows(obj, track_ids):
+    """Map global track IDs to object keypoint rows. Returns -1 for missing IDs."""
+    tids = np.asarray(track_ids, dtype=np.int64).reshape(-1)
+    rows = np.full(tids.shape[0], -1, dtype=np.int64)
+
+    t2o = getattr(obj, "track_idx_2_obj_idx", None)
+    if t2o is None:
+        return rows
+
+    t2o = np.asarray(t2o).reshape(-1)
+    if t2o.size == 0:
+        return rows
+
+    ok = (tids >= 0) & (tids < t2o.shape[0])
+    if np.any(ok):
+        rows[ok] = np.asarray(t2o[tids[ok]], dtype=np.int64)
+    return rows
+
+
 def get_n_uncertainty_colors(uncertainties, u_min=0.0, u_max=1.0, inverse=False):
     """
     Map uncertainties to BGR colors using OpenCV colormap (e.g., COLORMAP_JET).
@@ -357,8 +376,16 @@ def visualize_and_save_tracking_results(
     bbox_frame="mesh",
 ):
     """
-    Visualize tracking results on the frame
-    TODO: make it more general by removing track_table dependency
+    Visualize tracking results on the frame.
+    points_vis_method options:
+      - "uncertainty"
+      - "visible"
+      - "visible_valid"
+      - "visible_uncertainty"
+      - "registration_used_valid" (points used by registration this frame;
+        green=confirmed/valid map points, red=tentative/invalid map points)
+      - "registration_correspondence" (draw source->target reprojection lines;
+        green=inlier, red=outlier)
     """
     display_frame = frame.rgb.copy()
     display_frame = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
@@ -455,6 +482,127 @@ def visualize_and_save_tracking_results(
                         display_frame,
                         track_2d_points[visible_mask],
                         uncertainty_color[visible_mask],
+                    )
+        elif points_vis_method in ("registration_used_valid", "reg_used_valid"):
+            # Plot only points used by registration for each object in this frame.
+            # Color by object-map validity:
+            #   green -> confirmed (obj.valid=True)
+            #   red   -> tentative / invalid (obj.valid=False or unmapped)
+            n_tracks = int(len(track_table.track_2d))
+            for obj in objects:
+                reg_idx = np.asarray(
+                    getattr(obj, "curr_frame_indices", np.array([], dtype=np.int64)),
+                    dtype=np.int64,
+                ).reshape(-1)
+                if reg_idx.size == 0:
+                    continue
+                reg_idx = reg_idx[(reg_idx >= 0) & (reg_idx < n_tracks)]
+                if reg_idx.size == 0:
+                    continue
+
+                pts = track_table.track_2d[reg_idx]
+                colors = np.full((reg_idx.shape[0], 3), (255, 0, 0), dtype=np.uint8)
+
+                # Prefer object validity for coloring.
+                obj_valid = np.asarray(getattr(obj, "valid", np.array([])), dtype=bool)
+                obj_rows = _map_track_ids_to_obj_rows(obj, reg_idx)
+                row_ok = (obj_rows >= 0) & (obj_rows < obj_valid.shape[0])
+                valid_mask = np.zeros(reg_idx.shape[0], dtype=bool)
+                if np.any(row_ok):
+                    valid_mask[row_ok] = obj_valid[obj_rows[row_ok]]
+                else:
+                    # Fallback: use track table depth-validity if object mapping is unavailable.
+                    valid_mask = np.asarray(track_table.valid[reg_idx], dtype=bool)
+
+                colors[valid_mask] = (0, 255, 0)
+                draw_points_on_image(display_frame, pts, colors)
+        elif points_vis_method in (
+            "registration_correspondence",
+            "reg_correspondence",
+        ):
+            # Draw source->target correspondence vectors for points used by registration.
+            # Source: projected map keypoint in current camera frame.
+            # Target: tracked 2D point in current frame.
+            # Color: green=inlier, red=outlier, yellow=unknown.
+            n_tracks = int(len(track_table.track_2d))
+            K = np.asarray(camera_intrinsics, dtype=float).reshape(3, 3)
+            for obj in objects:
+                reg_idx = np.asarray(
+                    getattr(obj, "curr_frame_indices", np.array([], dtype=np.int64)),
+                    dtype=np.int64,
+                ).reshape(-1)
+                if reg_idx.size == 0:
+                    continue
+
+                reg_idx = reg_idx[(reg_idx >= 0) & (reg_idx < n_tracks)]
+                if reg_idx.size == 0:
+                    continue
+
+                rows = _map_track_ids_to_obj_rows(obj, reg_idx)
+                rows_ok = (rows >= 0) & (rows < len(getattr(obj, "key_points", [])))
+                if not np.any(rows_ok):
+                    continue
+
+                reg_idx_ok = reg_idx[rows_ok]
+                rows_ok_idx = rows[rows_ok]
+                obs_uv = np.asarray(track_table.track_2d[reg_idx_ok], dtype=float)
+
+                src_obj = np.asarray(obj.key_points[rows_ok_idx], dtype=float)
+                src_h = np.hstack(
+                    [src_obj, np.ones((src_obj.shape[0], 1), dtype=float)]
+                )
+                src_cam = (np.asarray(obj.pose, dtype=float) @ src_h.T).T[:, :3]
+                z = src_cam[:, 2]
+                z_ok = np.isfinite(z) & (z > 1e-6)
+                if not np.any(z_ok):
+                    continue
+
+                src_cam = src_cam[z_ok]
+                obs_uv = obs_uv[z_ok]
+
+                proj = (K @ src_cam.T).T
+                pred_uv = proj[:, :2] / proj[:, 2:3]
+                finite = np.isfinite(pred_uv).all(axis=1) & np.isfinite(obs_uv).all(
+                    axis=1
+                )
+                if not np.any(finite):
+                    continue
+
+                pred_uv = pred_uv[finite]
+                obs_uv = obs_uv[finite]
+
+                inliers_full = np.asarray(
+                    getattr(obj, "inliers", np.array([], dtype=bool)),
+                    dtype=bool,
+                ).reshape(-1)
+                # Start unknown (yellow). Then override with inlier/outlier when available.
+                colors = np.full((pred_uv.shape[0], 3), (0, 255, 255), dtype=np.uint8)
+                if inliers_full.size == reg_idx.size:
+                    inl_rows_ok = inliers_full[rows_ok]
+                    inl = inl_rows_ok[z_ok][finite]
+                    colors[inl] = (0, 255, 0)
+                    colors[~inl] = (0, 0, 255)
+
+                # Draw vectors and endpoints.
+                for uv_pred, uv_obs, col in zip(pred_uv, obs_uv, colors):
+                    p0 = tuple(np.round(uv_pred).astype(int).tolist())
+                    p1 = tuple(np.round(uv_obs).astype(int).tolist())
+                    cv2.line(
+                        display_frame,
+                        p0,
+                        p1,
+                        color=tuple(int(x) for x in col),
+                        thickness=1,
+                    )
+                    cv2.circle(
+                        display_frame, p0, radius=2, color=(255, 255, 255), thickness=-1
+                    )
+                    cv2.circle(
+                        display_frame,
+                        p1,
+                        radius=3,
+                        color=tuple(int(x) for x in col),
+                        thickness=-1,
                     )
         # elif points_vis_method == "frame_id":
         #     # Color each point based on the frame id it was first seen (object.key_point_frames)
@@ -576,7 +724,9 @@ def visualize_and_save_tracking_results_with_gt(
         gt_pose: Ground truth pose (4x4 transformation matrix) in camera frame. If None, GT won't be drawn.
         frame_id: Frame identifier for saving images
         visualize_points: Whether to visualize tracked points
-        points_vis_method: Method for visualizing points ("uncertainty", "visible", "visible_uncertainty")
+        points_vis_method: Method for visualizing points
+            ("uncertainty", "visible", "visible_valid", "visible_uncertainty",
+             "registration_used_valid")
         save_images: Whether to save visualization images
         output_image_dir: Directory to save images
         camera_intrinsics: Camera intrinsic matrix (3x3)

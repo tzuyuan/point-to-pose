@@ -139,11 +139,16 @@ reconstructor:
 #     residual_thres: 0.007
     
 register:
+  # type: svd_residual_outlier
   type: svd_cluster_ransac
   params:
+
+
+    threshold_method: mad
+
     ransac_iters: 100
     sample_size: 4
-    inlier_thres: 0.004
+    inlier_thres: 0.006 #0.004
     min_inliers: 5
     max_clusters: 10
     use_uncertainty: true
@@ -415,7 +420,7 @@ global_optimizer:
 visualization:
   params:
     visualize_points: true
-    # uncertainty, visible, visible_uncertainty, frame_id
+    # uncertainty, visible, visible_valid, visible_uncertainty, registration_used_valid, registration_correspondence, frame_id
     points_vis_method: visible_uncertainty
     save_images: True
     output_image_dir: /home/justin/code/point-to-pose/debug/output_images

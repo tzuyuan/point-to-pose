@@ -60,12 +60,16 @@ class FrontEnd:
         self.max_rel_rotation_deg = float(
             self.pipeline_cfg.get("max_rel_rotation_deg", 20.0)
         )
-        self.max_rel_translation = float(self.pipeline_cfg.get("max_rel_translation", 0.05))
+        self.max_rel_translation = float(
+            self.pipeline_cfg.get("max_rel_translation", 0.05)
+        )
         self.pose_jump_guard_enable = bool(
             self.pipeline_cfg.get("pose_jump_guard_enable", True)
         )
         self.pose_jump_guard_trans_thres = float(
-            self.pipeline_cfg.get("pose_jump_guard_trans_thres", self.max_rel_translation)
+            self.pipeline_cfg.get(
+                "pose_jump_guard_trans_thres", self.max_rel_translation
+            )
         )
         self.pose_jump_guard_rot_deg_thres = float(
             self.pipeline_cfg.get(
@@ -74,7 +78,9 @@ class FrontEnd:
         )
         reg_min_inliers = int(self.cfg.register.params.get("min_inliers", 5))
         self.pose_jump_guard_min_inliers = int(
-            self.pipeline_cfg.get("pose_jump_guard_min_inliers", max(8, reg_min_inliers))
+            self.pipeline_cfg.get(
+                "pose_jump_guard_min_inliers", max(8, reg_min_inliers)
+            )
         )
         self.pose_jump_guard_min_inlier_ratio = float(
             self.pipeline_cfg.get("pose_jump_guard_min_inlier_ratio", 0.2)
@@ -757,6 +763,8 @@ class FrontEnd:
         tentative_pool_recent = _to_int(
             valid_stats.get("extract_tentative_pool_count_recent", None)
         )
+        tentative_used = _to_int(valid_stats.get("extract_tentative_used_count", None))
+        confirmed_used = _to_int(valid_stats.get("extract_confirmed_used_count", None))
 
         if confirmed is not None:
             stats["extract_confirmed_count"] = confirmed
@@ -768,6 +776,10 @@ class FrontEnd:
             stats["extract_tentative_pool_count_all"] = tentative_pool_all
         if tentative_pool_recent is not None:
             stats["extract_tentative_pool_count_recent"] = tentative_pool_recent
+        if tentative_used is not None:
+            stats["num_tentative_pts_used_for_registration"] = tentative_used
+        if confirmed_used is not None:
+            stats["num_confirmed_pts_used_for_registration"] = confirmed_used
 
         corr = stats.get("correspond_curr3d", np.empty((0, 3)))
         try:
@@ -785,6 +797,23 @@ class FrontEnd:
 
         stats["num_pts_used_for_registration"] = int(num_used)
         stats["effective_num_pts_for_sampling"] = int(effective_num_pts)
+
+        tentative_mask = np.asarray(
+            valid_stats.get("extract_selected_is_tentative_mask", np.array([])),
+            dtype=bool,
+        )
+        inliers = np.asarray(stats.get("inliers", np.array([])), dtype=bool)
+        if tentative_mask.size == num_used:
+            tentative_used_cnt = int(np.sum(tentative_mask))
+            confirmed_used_cnt = int(num_used - tentative_used_cnt)
+            stats["num_tentative_pts_used_for_registration"] = tentative_used_cnt
+            stats["num_confirmed_pts_used_for_registration"] = confirmed_used_cnt
+
+            if inliers.size == num_used:
+                tentative_inliers = int(np.sum(inliers & tentative_mask))
+                total_inliers = int(np.sum(inliers))
+                stats["num_tentative_inliers"] = tentative_inliers
+                stats["num_confirmed_inliers"] = int(total_inliers - tentative_inliers)
 
     def _compute_mean_residual(self, stats: dict):
         residuals = stats.get("residuals", np.array([]))
@@ -1198,6 +1227,7 @@ class FrontEnd:
         n_tentative_pool_all = 0
         n_tentative_pool_recent = 0
         tentative_pool_used_stale = False
+        tentative_selected_mask = np.zeros(obj_idx.shape[0], dtype=bool)
         if (
             self.tentative_fallback_min_valid_points > 0
             and n_confirmed < self.tentative_fallback_min_valid_points
@@ -1258,16 +1288,21 @@ class FrontEnd:
                     if take_n > 0:
                         chosen = local_idx[order[:take_n]]
                         both_mask[chosen] = True
+                        tentative_selected_mask[chosen] = True
                         n_tentative_added = int(take_n)
 
         idx = obj_idx[both_mask]
         rows = obj_rows[both_mask]
+        selected_is_tentative = tentative_selected_mask[both_mask]
         rows_ok = (rows >= 0) & (rows < len(obj.key_points))
         if not np.all(rows_ok):
             idx = idx[rows_ok]
             rows = rows[rows_ok]
+            selected_is_tentative = selected_is_tentative[rows_ok]
         key_points = obj.key_points[rows].copy()
         correspond_curr3d = cur_pts_3d[idx].copy()
+        n_tentative_used = int(np.sum(selected_is_tentative))
+        n_confirmed_used = int(selected_is_tentative.shape[0] - n_tentative_used)
 
         valid_stats = {
             "extract_vis_obj_mask": vis_obj,
@@ -1294,6 +1329,9 @@ class FrontEnd:
             "extract_tentative_added_count": n_tentative_added,
             "extract_tentative_fallback_used": bool(n_tentative_added > 0),
             "extract_tentative_pool_used_stale": bool(tentative_pool_used_stale),
+            "extract_selected_is_tentative_mask": selected_is_tentative,
+            "extract_tentative_used_count": n_tentative_used,
+            "extract_confirmed_used_count": n_confirmed_used,
         }
 
         return idx, key_points, correspond_curr3d, cur_visible, valid_stats

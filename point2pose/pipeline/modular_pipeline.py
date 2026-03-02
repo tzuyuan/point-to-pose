@@ -704,6 +704,18 @@ class ModularPipeline:
                 "reg_pose_jump_guard_num_clusters": int(
                     reg_stats.get("pose_jump_guard_info", {}).get("num_clusters", 0)
                 ),
+                "reg_num_tentative_pts_used_for_registration": int(
+                    reg_stats.get("num_tentative_pts_used_for_registration", 0)
+                ),
+                "reg_num_confirmed_pts_used_for_registration": int(
+                    reg_stats.get("num_confirmed_pts_used_for_registration", 0)
+                ),
+                "reg_num_tentative_inliers": int(
+                    reg_stats.get("num_tentative_inliers", 0)
+                ),
+                "reg_num_confirmed_inliers": int(
+                    reg_stats.get("num_confirmed_inliers", 0)
+                ),
                 "iter": reg_stats.get("iter", -1),
                 # Intermediate Poses
                 "pose_frontend": (

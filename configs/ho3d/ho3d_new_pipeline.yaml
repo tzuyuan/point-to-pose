@@ -145,7 +145,7 @@ optimizer:
 visualization:
   params:
     visualize_points: true
-    # uncertainty, visible, visible_uncertainty, frame_id
+    # uncertainty, visible, visible_valid, visible_uncertainty, registration_used_valid, registration_correspondence, frame_id
     points_vis_method: visible_uncertainty
     save_images: True
     output_image_dir: /home/justin/code/point-to-pose/debug/output_images
