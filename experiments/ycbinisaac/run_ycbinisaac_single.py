@@ -327,22 +327,41 @@ def run_ycbineoat_single(
         gt_bbox_minmax_by_object[obj_name] = gt_bbox_from_mesh(mesh, mode=bbox_fit_mode)
         mesh_vertices_by_index[obj_idx] = np.asarray(mesh.vertices, dtype=np.float64)
         mesh_faces_by_index[obj_idx] = np.asarray(mesh.faces, dtype=np.int64)
-        is_obj_in_image_labels_by_object[obj_name] = load_is_obj_in_image_labels(
-            reader=reader,
-            video_path=video_path,
-            obj_name=obj_name,
-            num_frames=len(reader),
-        )
-        is_mask_visible_labels_by_object[obj_name] = load_is_mask_visible_labels(
-            reader=reader,
-            video_path=video_path,
-            obj_name=obj_name,
-            num_frames=len(reader),
-        )
-        eval_labels_by_object[obj_name] = (
-            is_obj_in_image_labels_by_object[obj_name]
-            & is_mask_visible_labels_by_object[obj_name]
-        )
+        missing_label_files = []
+        try:
+            is_obj_in_image_labels_by_object[obj_name] = load_is_obj_in_image_labels(
+                reader=reader,
+                video_path=video_path,
+                obj_name=obj_name,
+                num_frames=len(reader),
+            )
+        except FileNotFoundError:
+            is_obj_in_image_labels_by_object[obj_name] = None
+            missing_label_files.append("is_obj_in_image_labels/is_obj_in_image.npy")
+
+        try:
+            is_mask_visible_labels_by_object[obj_name] = load_is_mask_visible_labels(
+                reader=reader,
+                video_path=video_path,
+                obj_name=obj_name,
+                num_frames=len(reader),
+            )
+        except FileNotFoundError:
+            is_mask_visible_labels_by_object[obj_name] = None
+            missing_label_files.append("is_mask_visible/is_mask_visible.npy")
+
+        eval_mask = np.ones((len(reader),), dtype=bool)
+        if is_obj_in_image_labels_by_object[obj_name] is not None:
+            eval_mask &= is_obj_in_image_labels_by_object[obj_name]
+        if is_mask_visible_labels_by_object[obj_name] is not None:
+            eval_mask &= is_mask_visible_labels_by_object[obj_name]
+        if len(missing_label_files) > 0:
+            print(
+                f"[{video_name}/{obj_name}] Missing visibility labels: "
+                f"{', '.join(missing_label_files)}. "
+                "Evaluating all GT poses for missing criteria."
+            )
+        eval_labels_by_object[obj_name] = eval_mask
 
     out_poses_by_object = {obj_name: [] for obj_name in object_names}
     gt_poses_by_object = {obj_name: [] for obj_name in object_names}
@@ -498,7 +517,7 @@ def run_ycbineoat_single(
         eval_ids = eval_ids_by_object[obj_name]
         if len(eval_ids) == 0:
             print(
-                f"[{obj_name}] No frames with both is_obj_in_image_labels and is_mask_visible true, skipping object evaluation."
+                f"[{obj_name}] No frames after applying available visibility filtering, skipping object evaluation."
             )
             continue
 

@@ -86,7 +86,8 @@ def _load_binary_labels(
     label_root: str,
     label_file_name: str,
     num_frames: int,
-) -> np.ndarray:
+    required: bool = True,
+) -> Optional[np.ndarray]:
     canonical_name = _canonical_object_name(reader, obj_name)
     candidates = [
         os.path.join(video_path, label_root, obj_name, label_file_name),
@@ -98,10 +99,12 @@ def _load_binary_labels(
             label_path = path
             break
     if label_path is None:
-        raise FileNotFoundError(
-            f"Could not find {label_root}/{label_file_name} for object {obj_name}. "
-            f"Checked: {candidates}"
-        )
+        if required:
+            raise FileNotFoundError(
+                f"Could not find {label_root}/{label_file_name} for object {obj_name}. "
+                f"Checked: {candidates}"
+            )
+        return None
 
     labels = np.asarray(np.load(label_path)).reshape(-1) > 0
     if labels.shape[0] < num_frames:
@@ -329,6 +332,7 @@ def evaluate_sequence_from_metadata(
             label_root="is_obj_in_image_labels",
             label_file_name="is_obj_in_image.npy",
             num_frames=len(reader),
+            required=False,
         )
         labels_mask_visible = _load_binary_labels(
             reader=reader,
@@ -337,8 +341,25 @@ def evaluate_sequence_from_metadata(
             label_root="is_mask_visible",
             label_file_name="is_mask_visible.npy",
             num_frames=len(reader),
+            required=False,
         )
-        eval_mask = labels_in_image & labels_mask_visible
+        eval_mask = np.ones((len(reader),), dtype=bool)
+        missing_label_files = []
+        if labels_in_image is not None:
+            eval_mask &= labels_in_image
+        else:
+            missing_label_files.append("is_obj_in_image_labels/is_obj_in_image.npy")
+        if labels_mask_visible is not None:
+            eval_mask &= labels_mask_visible
+        else:
+            missing_label_files.append("is_mask_visible/is_mask_visible.npy")
+
+        if len(missing_label_files) > 0:
+            print(
+                f"[{video_name}/{obj_name}] Missing visibility labels: "
+                f"{', '.join(missing_label_files)}. "
+                "Evaluating all GT poses for missing criteria."
+            )
 
         pred_eval = []
         gt_eval = []
@@ -358,7 +379,7 @@ def evaluate_sequence_from_metadata(
 
         if len(pred_eval) == 0:
             print(
-                f"[{video_name}/{obj_name}] No valid frames after is_obj_in_image_labels AND is_mask_visible filtering."
+                f"[{video_name}/{obj_name}] No valid frames after applying available visibility filtering."
             )
             continue
 
