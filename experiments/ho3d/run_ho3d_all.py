@@ -91,12 +91,18 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
     vis_folder = os.path.join(out_folder, "output_images")
     with_gt_folder = os.path.join(out_folder, "with_gt")
     mesh_folder = os.path.join(out_folder, "mesh")
+    vis_folder_reg_corr = os.path.join(out_folder, "registration_correspondence")
+    with_gt_folder_reg_corr = os.path.join(
+        out_folder, "with_gt_registration_correspondence"
+    )
 
     if os.path.exists(out_folder):
         shutil.rmtree(out_folder)
     os.makedirs(vis_folder, exist_ok=True)
     os.makedirs(with_gt_folder, exist_ok=True)
     os.makedirs(mesh_folder, exist_ok=True)
+    os.makedirs(vis_folder_reg_corr, exist_ok=True)
+    os.makedirs(with_gt_folder_reg_corr, exist_ok=True)
 
     cfg = OmegaConf.load(config_path)
     vis_cfg = cfg.visualization.params
@@ -183,6 +189,36 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
                     points_vis_method=vis_cfg.points_vis_method,
                     save_images=vis_cfg.save_images,
                     output_image_dir=with_gt_folder,
+                    camera_intrinsics=reader.K,
+                    bbox_min_max=gt_bbox_minmax,
+                    gt_bbox_min_max=gt_bbox_minmax,
+                    pred_pose_color=(0, 255, 0),
+                )
+
+                display_frame_reg_corr = visualize_and_save_tracking_results(
+                    frame=frame,
+                    objects=pipeline.objects,
+                    track_table=pipeline.track_table,
+                    frame_id=i,
+                    visualize_points=vis_cfg.visualize_points,
+                    points_vis_method="registration_correspondence",
+                    save_images=vis_cfg.save_images,
+                    output_image_dir=vis_folder_reg_corr,
+                    camera_intrinsics=reader.K,
+                    bbox_min_max=gt_bbox_minmax,
+                )
+
+                visualize_and_save_tracking_results_with_gt(
+                    frame=frame,
+                    objects=pipeline.objects,
+                    track_table=pipeline.track_table,
+                    est_result_frame=display_frame_reg_corr,
+                    gt_pose=gt_pose,
+                    frame_id=i,
+                    visualize_points=vis_cfg.visualize_points,
+                    points_vis_method="registration_correspondence",
+                    save_images=vis_cfg.save_images,
+                    output_image_dir=with_gt_folder_reg_corr,
                     camera_intrinsics=reader.K,
                     bbox_min_max=gt_bbox_minmax,
                     gt_bbox_min_max=gt_bbox_minmax,

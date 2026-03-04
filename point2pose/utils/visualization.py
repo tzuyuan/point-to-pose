@@ -170,6 +170,225 @@ def draw_posed_3d_box(K, img, ob_in_cam, bbox, line_color=(0, 255, 0), linewidth
     return img
 
 
+def _box_corners_from_min_max(min_xyz, max_xyz):
+    """Return 8 box corners with a stable edge-compatible ordering."""
+    xmin, ymin, zmin = np.asarray(min_xyz, dtype=float).reshape(3)
+    xmax, ymax, zmax = np.asarray(max_xyz, dtype=float).reshape(3)
+    return np.asarray(
+        [
+            [xmin, ymin, zmin],
+            [xmax, ymin, zmin],
+            [xmax, ymax, zmin],
+            [xmin, ymax, zmin],
+            [xmin, ymin, zmax],
+            [xmax, ymin, zmax],
+            [xmax, ymax, zmax],
+            [xmin, ymax, zmax],
+        ],
+        dtype=float,
+    )
+
+
+def _box_corners_from_center_extent(center, extent, rotation=None):
+    """Return 8 oriented box corners from center, extent, and optional 3x3 rotation."""
+    c = np.asarray(center, dtype=float).reshape(3)
+    e = np.asarray(extent, dtype=float).reshape(3)
+    half = 0.5 * e
+    local = np.asarray(
+        [
+            [-half[0], -half[1], -half[2]],
+            [half[0], -half[1], -half[2]],
+            [half[0], half[1], -half[2]],
+            [-half[0], half[1], -half[2]],
+            [-half[0], -half[1], half[2]],
+            [half[0], -half[1], half[2]],
+            [half[0], half[1], half[2]],
+            [-half[0], half[1], half[2]],
+        ],
+        dtype=float,
+    )
+    if rotation is None:
+        return local + c.reshape(1, 3)
+    R = np.asarray(rotation, dtype=float).reshape(3, 3)
+    return (R @ local.T).T + c.reshape(1, 3)
+
+
+def draw_oriented_3d_box(
+    K, img, ob_in_cam, box_corners, line_color=(0, 255, 0), linewidth=2
+):
+    """
+    Draw a 3D box from 8 corners expressed in the local object frame.
+    `ob_in_cam` maps those local corners to the camera frame.
+    """
+    corners = np.asarray(box_corners, dtype=float).reshape(-1, 3)
+    if corners.shape[0] != 8:
+        raise ValueError(f"box_corners must have shape (8,3), got {corners.shape}")
+
+    pts_cam = (ob_in_cam @ to_homo(corners).T).T[:, :3]
+    if not np.all(np.isfinite(pts_cam)):
+        return img
+
+    proj = (K @ pts_cam.T).T
+    denom = np.clip(proj[:, 2], 1e-6, None)
+    uv = np.round(proj[:, :2] / denom.reshape(-1, 1)).astype(int)
+
+    edges = (
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
+    )
+    for i0, i1 in edges:
+        img = cv2.line(
+            img,
+            uv[i0].tolist(),
+            uv[i1].tolist(),
+            color=line_color,
+            thickness=linewidth,
+            lineType=cv2.LINE_AA,
+        )
+    return img
+
+
+def _resolve_per_object_payload(payload, obj_idx):
+    """Resolve per-object payload from dict/list/singleton containers."""
+    if payload is None:
+        return None
+    if isinstance(payload, dict):
+        return payload.get(obj_idx, None)
+    try:
+        arr = np.asarray(payload, dtype=object)
+        if arr.ndim >= 1 and obj_idx < len(payload):
+            return payload[obj_idx]
+    except Exception:
+        pass
+    return payload
+
+
+def _resolve_mesh_geometry_for_object(
+    mesh_vertices_by_object, mesh_faces_by_object, obj_idx
+):
+    """
+    Return (vertices, faces) for one object index.
+    Supports:
+      - separate per-object vertices/faces containers (dict/list/singleton)
+      - mesh-like payload with `.vertices` and `.faces`
+    """
+    verts_src = _resolve_per_object_payload(mesh_vertices_by_object, obj_idx)
+    faces_src = _resolve_per_object_payload(mesh_faces_by_object, obj_idx)
+
+    if (
+        verts_src is not None
+        and hasattr(verts_src, "vertices")
+        and hasattr(verts_src, "faces")
+    ):
+        mesh_obj = verts_src
+        verts_src = getattr(mesh_obj, "vertices", None)
+        if faces_src is None:
+            faces_src = getattr(mesh_obj, "faces", None)
+
+    if verts_src is None or faces_src is None:
+        return None, None
+
+    try:
+        verts = np.asarray(verts_src, dtype=np.float64).reshape(-1, 3)
+        faces = np.asarray(faces_src, dtype=np.int64).reshape(-1, 3)
+    except Exception:
+        return None, None
+
+    if verts.shape[0] == 0 or faces.shape[0] == 0:
+        return None, None
+    return verts, faces
+
+
+def _rasterize_mesh_silhouette(vertices_obj, faces, ob_in_cam, K, image_h, image_w):
+    """Rasterize projected mesh silhouette mask for one object pose."""
+    mask = np.zeros((image_h, image_w), dtype=np.uint8)
+
+    verts_h = np.hstack(
+        [
+            vertices_obj.astype(np.float64),
+            np.ones((vertices_obj.shape[0], 1), dtype=np.float64),
+        ]
+    )
+    verts_cam = (ob_in_cam @ verts_h.T).T[:, :3]
+    z = verts_cam[:, 2]
+
+    proj = (K @ verts_cam.T).T
+    uv = proj[:, :2] / np.clip(proj[:, 2:3], 1e-12, None)
+
+    face_z = z[faces]
+    valid_faces = np.all(face_z > 1e-6, axis=1)
+    if not np.any(valid_faces):
+        return mask
+
+    tris = uv[faces[valid_faces]]
+    finite = np.isfinite(tris).all(axis=(1, 2))
+    tris = tris[finite]
+    if tris.shape[0] == 0:
+        return mask
+
+    tri_min = tris.min(axis=1)
+    tri_max = tris.max(axis=1)
+    intersects = ~(
+        (tri_max[:, 0] < 0)
+        | (tri_max[:, 1] < 0)
+        | (tri_min[:, 0] >= image_w)
+        | (tri_min[:, 1] >= image_h)
+    )
+    tris = tris[intersects]
+    if tris.shape[0] == 0:
+        return mask
+
+    tris_i32 = np.round(tris).astype(np.int32)
+    cv2.fillPoly(mask, tris_i32, 255)
+    return mask
+
+
+def draw_projected_mesh_contour(
+    K,
+    img,
+    ob_in_cam,
+    vertices_obj,
+    faces,
+    line_color=(0, 255, 255),
+    linewidth=2,
+):
+    """
+    Draw projected contour of a mesh at pose `ob_in_cam` onto `img`.
+    """
+    h, w = img.shape[:2]
+    silhouette = _rasterize_mesh_silhouette(
+        vertices_obj=vertices_obj,
+        faces=faces,
+        ob_in_cam=ob_in_cam,
+        K=np.asarray(K, dtype=np.float64).reshape(3, 3),
+        image_h=h,
+        image_w=w,
+    )
+    contours, _ = cv2.findContours(
+        silhouette, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if len(contours) > 0:
+        cv2.drawContours(
+            img,
+            contours,
+            -1,
+            color=tuple(int(x) for x in line_color),
+            thickness=int(linewidth),
+            lineType=cv2.LINE_AA,
+        )
+    return img
+
+
 def project_3d_to_2d(pt, K, ob_in_cam):
     pt = pt.reshape(4, 1)
     projected = K @ ((ob_in_cam @ pt)[:3, :])
@@ -258,11 +477,78 @@ def _make_translation(t_xyz):
 
 def _extract_bbox_info(bbox_like):
     """
-    Extract (min_bound, max_bound, center, extent) from a bbox-like object or a (2,3) array.
-    Returns a dict with keys: mn, mx, center, extent. Any entry may be None if unavailable.
+    Extract bbox attributes from a bbox-like object or a (2,3) array.
+    Returns keys: mn, mx, center, extent, rot. Any entry may be None if unavailable.
     """
     if bbox_like is None:
-        return {"mn": None, "mx": None, "center": None, "extent": None}
+        return {"mn": None, "mx": None, "center": None, "extent": None, "rot": None}
+
+    # Case 0: dictionary bbox metadata (e.g., {"center":..., "extent":..., "rot":...})
+    if isinstance(bbox_like, dict):
+        mn = mx = center = extent = rot = None
+
+        # Optional packed min/max array under common keys.
+        mm = bbox_like.get("bbox", None)
+        if mm is None:
+            mm = bbox_like.get("min_max", None)
+        if mm is None:
+            mm = bbox_like.get("bbox_min_max", None)
+        if mm is not None:
+            mm_arr = np.asarray(mm)
+            if mm_arr.ndim == 2 and mm_arr.shape == (2, 3):
+                mn = mm_arr.min(axis=0).astype(float)
+                mx = mm_arr.max(axis=0).astype(float)
+
+        # Direct min/max fields.
+        if mn is None:
+            for key in ("mn", "min_bound", "min_xyz", "min"):
+                if key in bbox_like:
+                    try:
+                        mn = np.asarray(bbox_like[key], dtype=float).reshape(3)
+                        break
+                    except Exception:
+                        mn = None
+        if mx is None:
+            for key in ("mx", "max_bound", "max_xyz", "max"):
+                if key in bbox_like:
+                    try:
+                        mx = np.asarray(bbox_like[key], dtype=float).reshape(3)
+                        break
+                    except Exception:
+                        mx = None
+
+        for key in ("center", "c"):
+            if key in bbox_like:
+                try:
+                    center = np.asarray(bbox_like[key], dtype=float).reshape(3)
+                    break
+                except Exception:
+                    center = None
+        for key in ("extent", "size", "dims"):
+            if key in bbox_like:
+                try:
+                    extent = np.asarray(bbox_like[key], dtype=float).reshape(3)
+                    break
+                except Exception:
+                    extent = None
+        for key in ("rot", "R", "rotation"):
+            if key in bbox_like:
+                try:
+                    rot = np.asarray(bbox_like[key], dtype=float).reshape(3, 3)
+                    break
+                except Exception:
+                    rot = None
+
+        if extent is None and (mn is not None) and (mx is not None):
+            extent = mx - mn
+        if center is None and (mn is not None) and (mx is not None):
+            center = 0.5 * (mn + mx)
+        if (mn is None or mx is None) and (center is not None) and (extent is not None):
+            half = 0.5 * extent
+            mn = center - half
+            mx = center + half
+
+        return {"mn": mn, "mx": mx, "center": center, "extent": extent, "rot": rot}
 
     # Case 1: numeric (2,3) min/max
     arr = np.asarray(bbox_like)
@@ -271,10 +557,10 @@ def _extract_bbox_info(bbox_like):
         mx = arr.max(axis=0).astype(float)
         center = 0.5 * (mn + mx)
         extent = mx - mn
-        return {"mn": mn, "mx": mx, "center": center, "extent": extent}
+        return {"mn": mn, "mx": mx, "center": center, "extent": extent, "rot": None}
 
     # Case 2: Open3D-like bbox object
-    mn = mx = center = extent = None
+    mn = mx = center = extent = rot = None
 
     if hasattr(bbox_like, "get_min_bound") and hasattr(bbox_like, "get_max_bound"):
         try:
@@ -318,6 +604,18 @@ def _extract_bbox_info(bbox_like):
         except Exception:
             extent = None
 
+    # OBB orientation (if available)
+    if hasattr(bbox_like, "R"):
+        try:
+            rot = np.asarray(bbox_like.R, dtype=float).reshape(3, 3)
+        except Exception:
+            rot = None
+    if rot is None and hasattr(bbox_like, "rotation"):
+        try:
+            rot = np.asarray(bbox_like.rotation, dtype=float).reshape(3, 3)
+        except Exception:
+            rot = None
+
     # Fill missing pieces from others when possible
     if extent is None and (mn is not None) and (mx is not None):
         extent = mx - mn
@@ -330,10 +628,15 @@ def _extract_bbox_info(bbox_like):
         mn = center - half
         mx = center + half
 
-    return {"mn": mn, "mx": mx, "center": center, "extent": extent}
+    return {"mn": mn, "mx": mx, "center": center, "extent": extent, "rot": rot}
 
 
-def _resolve_pose_and_bbox(pose_in_cam, bbox_source, bbox_frame="center"):
+def _resolve_pose_and_bbox(
+    pose_in_cam,
+    bbox_source,
+    bbox_frame="center",
+    assume_pose_is_bbox_center=False,
+):
     """
     Interprets pose_in_cam as either:
       - 'mesh'  : T_cam_mesh, bbox corners in mesh coords [mn,mx]
@@ -341,24 +644,45 @@ def _resolve_pose_and_bbox(pose_in_cam, bbox_source, bbox_frame="center"):
     This makes the toggle visibly different (useful for debugging frame mismatch).
     """
     info = _extract_bbox_info(bbox_source)
-    mn, mx, center, extent = info["mn"], info["mx"], info["center"], info["extent"]
+    mn = info["mn"]
+    mx = info["mx"]
+    center = info["center"]
+    extent = info["extent"]
+    rot = info["rot"]
 
     if bbox_frame not in ("mesh", "center"):
         raise ValueError(f"bbox_frame must be 'mesh' or 'center', got {bbox_frame}")
 
-    if extent is None:
-        return pose_in_cam, None
-
     if bbox_frame == "mesh":
+        if assume_pose_is_bbox_center:
+            if extent is None and (mn is not None) and (mx is not None):
+                extent = mx - mn
+            if extent is None:
+                return pose_in_cam, None, None
+            half = 0.5 * extent
+            return pose_in_cam, np.vstack([-half, +half]), None
+
+        if (rot is not None) and (center is not None) and (extent is not None):
+            corners = _box_corners_from_center_extent(
+                center=center, extent=extent, rotation=rot
+            )
+            return pose_in_cam, None, corners
+
         if mn is None or mx is None:
             # fallback to centered if bounds unavailable
+            if extent is None:
+                return pose_in_cam, None, None
             half = 0.5 * extent
-            return pose_in_cam, np.vstack([-half, +half])
-        return pose_in_cam, np.vstack([mn, mx])
+            return pose_in_cam, np.vstack([-half, +half]), None
+        return pose_in_cam, np.vstack([mn, mx]), None
 
     # bbox_frame == "center"
+    if extent is None and (mn is not None) and (mx is not None):
+        extent = mx - mn
+    if extent is None:
+        return pose_in_cam, None, None
     half = 0.5 * extent
-    return pose_in_cam, np.vstack([-half, +half])
+    return pose_in_cam, np.vstack([-half, +half]), None
 
 
 def visualize_and_save_tracking_results(
@@ -372,6 +696,11 @@ def visualize_and_save_tracking_results(
     output_image_dir=None,
     camera_intrinsics=np.eye(3),
     bbox_min_max=None,
+    mesh_vertices_by_object=None,
+    mesh_faces_by_object=None,
+    project_mesh_contour=False,
+    mesh_contour_line_color=(0, 255, 255),
+    mesh_contour_linewidth=2,
     vis_mask=False,
     bbox_frame="mesh",
 ):
@@ -647,6 +976,23 @@ def visualize_and_save_tracking_results(
         if obj.pose is not None:
             pose_mesh_in_cam = obj.pose @ obj.init_pose
 
+            if project_mesh_contour:
+                verts_obj, faces = _resolve_mesh_geometry_for_object(
+                    mesh_vertices_by_object=mesh_vertices_by_object,
+                    mesh_faces_by_object=mesh_faces_by_object,
+                    obj_idx=i,
+                )
+                if verts_obj is not None and faces is not None:
+                    display_frame = draw_projected_mesh_contour(
+                        K=camera_intrinsics,
+                        img=display_frame,
+                        ob_in_cam=pose_mesh_in_cam,
+                        vertices_obj=verts_obj,
+                        faces=faces,
+                        line_color=mesh_contour_line_color,
+                        linewidth=mesh_contour_linewidth,
+                    )
+
             # Resolve per-object bbox override (if provided).
             bbox_src = None
             if bbox_min_max is not None:
@@ -660,16 +1006,26 @@ def visualize_and_save_tracking_results(
                         bbox_src = bbox_min_max
 
             # Otherwise, fall back to obj.bbox (Open3D-like AABB/OBB) if available.
+            bbox_from_object = False
             if bbox_src is None:
                 bbox_src = getattr(obj, "bbox", None)
+                bbox_from_object = True
 
-            pose_use, bbox_min_max_use = _resolve_pose_and_bbox(
+            pose_use, bbox_min_max_use, bbox_corners_use = _resolve_pose_and_bbox(
                 pose_in_cam=pose_mesh_in_cam,
                 bbox_source=bbox_src,
                 bbox_frame=bbox_frame,
+                assume_pose_is_bbox_center=bbox_from_object,
             )
 
-            if bbox_min_max_use is not None:
+            if bbox_corners_use is not None:
+                display_frame = draw_oriented_3d_box(
+                    camera_intrinsics,
+                    display_frame,
+                    pose_use,
+                    bbox_corners_use,
+                )
+            elif bbox_min_max_use is not None:
                 display_frame = draw_posed_3d_box(
                     camera_intrinsics,
                     display_frame,
@@ -705,6 +1061,11 @@ def visualize_and_save_tracking_results_with_gt(
     output_image_dir=None,
     camera_intrinsics=np.eye(3),
     bbox_min_max=None,
+    mesh_vertices_by_object=None,
+    mesh_faces_by_object=None,
+    project_mesh_contour=False,
+    mesh_contour_line_color=(0, 255, 255),
+    mesh_contour_linewidth=2,
     gt_bbox_min_max=None,
     gt_bbox_min_max_by_object=None,
     bbox_frame="mesh",
@@ -753,6 +1114,11 @@ def visualize_and_save_tracking_results_with_gt(
             output_image_dir=None,
             camera_intrinsics=camera_intrinsics,
             bbox_min_max=bbox_min_max,
+            mesh_vertices_by_object=mesh_vertices_by_object,
+            mesh_faces_by_object=mesh_faces_by_object,
+            project_mesh_contour=project_mesh_contour,
+            mesh_contour_line_color=mesh_contour_line_color,
+            mesh_contour_linewidth=mesh_contour_linewidth,
             bbox_frame=bbox_frame,
         )
 
@@ -774,6 +1140,23 @@ def visualize_and_save_tracking_results_with_gt(
 
     # Overlay GT pose and bounding box for each available object
     for obj_idx, obj_gt_pose in gt_items:
+        if project_mesh_contour:
+            verts_obj, faces = _resolve_mesh_geometry_for_object(
+                mesh_vertices_by_object=mesh_vertices_by_object,
+                mesh_faces_by_object=mesh_faces_by_object,
+                obj_idx=obj_idx,
+            )
+            if verts_obj is not None and faces is not None:
+                display_frame = draw_projected_mesh_contour(
+                    K=camera_intrinsics,
+                    img=display_frame,
+                    ob_in_cam=obj_gt_pose,
+                    vertices_obj=verts_obj,
+                    faces=faces,
+                    line_color=gt_pose_color,
+                    linewidth=mesh_contour_linewidth,
+                )
+
         # Select bbox for current GT object.
         gt_bbox_min_max_local = None
 
@@ -800,13 +1183,23 @@ def visualize_and_save_tracking_results_with_gt(
         if gt_bbox_min_max_local is None and 0 <= obj_idx < len(objects):
             gt_bbox_min_max_local = getattr(objects[obj_idx], "bbox", None)
 
-        pose_use, bbox_min_max_use = _resolve_pose_and_bbox(
+        pose_use, bbox_min_max_use, bbox_corners_use = _resolve_pose_and_bbox(
             pose_in_cam=obj_gt_pose,
             bbox_source=gt_bbox_min_max_local,
             bbox_frame=bbox_frame,
         )
 
-        if bbox_min_max_use is not None:
+        if bbox_corners_use is not None:
+            # Draw GT oriented bounding box.
+            display_frame = draw_oriented_3d_box(
+                camera_intrinsics,
+                display_frame,
+                pose_use,
+                bbox_corners_use,
+                line_color=gt_pose_color,
+                linewidth=2,
+            )
+        elif bbox_min_max_use is not None:
             # Draw GT bounding box
             display_frame = draw_posed_3d_box(
                 camera_intrinsics,

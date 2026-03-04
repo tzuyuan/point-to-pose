@@ -4,13 +4,7 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from experiments.ycbinisaac.benchmark_ycbinisaac_all import (
-    benchmark_ycbinisaac_all,
-    get_all_video_names,
-    run_ycbinisaac_all,
-)
-
-__all__ = ["benchmark_ycbinisaac_all", "get_all_video_names", "run_ycbinisaac_all"]
+from experiments.ycbinisaac.benchmark_ycbinisaac_all import benchmark_ycbinisaac_single
 
 
 if __name__ == "__main__":
@@ -19,15 +13,24 @@ if __name__ == "__main__":
         "--data_path", type=str, default="/home/justin/data/YCBMultiTrack_new"
     )
     parser.add_argument(
+        "--video_name",
+        "-v",
+        type=str,
+        required=True,
+        help="Sequence folder name under --data_path.",
+    )
+    parser.add_argument(
         "--out_dir",
         type=str,
-        default="/home/justin/code/point-to-pose/results/ycbinisaac_all",
+        default="/home/justin/code/point-to-pose/results/ycbmultitrackreal",
+        help="Root results directory containing <video_name>/meta_data/meta_data.npz.",
     )
     parser.add_argument(
         "--config_path",
         "-c",
         type=str,
         default="/home/justin/code/point-to-pose/configs/ycbinisaac/ycbinisaac_single.yaml",
+        help="Unused in metadata-only benchmarking; kept for CLI compatibility.",
     )
     parser.add_argument(
         "--model_path",
@@ -40,7 +43,7 @@ if __name__ == "__main__":
         "--summary_dir",
         type=str,
         default=None,
-        help="Directory for benchmark tables/plots (default: <out_dir>/benchmark_summary).",
+        help="Directory for benchmark tables/plots (default: <out_dir>/<video_name>/benchmark_summary).",
     )
     parser.add_argument(
         "--pose_key",
@@ -50,8 +53,9 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    benchmark_ycbinisaac_all(
+    benchmark_ycbinisaac_single(
         data_path=args.data_path,
+        video_name=args.video_name,
         out_dir=args.out_dir,
         config_path=args.config_path,
         model_path=args.model_path,

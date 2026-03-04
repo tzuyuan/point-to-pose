@@ -324,6 +324,13 @@ class PipelineSingleProcess:
 
         # Logger
         if self.save_meta_data:
+            all_obj_init_pose = np.stack(
+                [np.asarray(obj.init_pose, dtype=np.float64) for obj in self.objects],
+                axis=0,
+            )
+            all_obj_pose = np.stack(
+                [np.asarray(obj.pose, dtype=np.float64) for obj in self.objects], axis=0
+            )
             self.data_logger.log(
                 {
                     "timestamp": frame.timestamp,
@@ -336,6 +343,8 @@ class PipelineSingleProcess:
                     "valid_depth": frame.depth,
                     "obj_init_pose": self.objects[0].init_pose,
                     "obj_pose": self.objects[0].pose,
+                    "obj_init_pose_all": all_obj_init_pose,
+                    "obj_pose_all": all_obj_pose,
                     "obj_key_point_frames": self.objects[0].key_point_frames,
                     "obj_key_points": self.objects[0].key_points,
                     "obj_uncertainties": self.objects[0].uncertainties,
@@ -1044,6 +1053,13 @@ class PipelineSingleProcess:
         if self.save_meta_data:
             print("obj_id: 0---------------------------")
             print(self.objects[0].pose)
+            all_obj_init_pose = np.stack(
+                [np.asarray(obj.init_pose, dtype=np.float64) for obj in self.objects],
+                axis=0,
+            )
+            all_obj_pose = np.stack(
+                [np.asarray(obj.pose, dtype=np.float64) for obj in self.objects], axis=0
+            )
             # Get key frame status for object 0 (set during sampling above)
             is_key_frame_obj0 = self.is_key_frame.get(0, False)
 
@@ -1059,6 +1075,8 @@ class PipelineSingleProcess:
                     "valid_depth": track_valid,
                     "obj_init_pose": self.objects[0].init_pose,
                     "obj_pose": self.objects[0].pose,
+                    "obj_init_pose_all": all_obj_init_pose,
+                    "obj_pose_all": all_obj_pose,
                     "obj_key_points": self.objects[0].key_points,
                     "obj_uncertainties": self.objects[0].uncertainties,
                     "obj_valid": self.objects[0].valid,

@@ -285,7 +285,6 @@ class FrontEnd:
         ##########################################################
         ##                      register                        ##
         ##########################################################
-
         result = FrontEndResult(frame_id=frame.id)
         result.tracks = tracks
         result.uncertainties = uncertainties
@@ -410,8 +409,6 @@ class FrontEnd:
                 # solve frame to map registration
                 if key_points.shape[0] >= 3 and correspond_curr3d.shape[0] >= 3:
                     t_start = time.time()
-                    if frame.id == 100:
-                        print("frame id 100")
 
                     T_c2w_est, stats_reg = self.register.register(
                         src_pcd=key_points,
@@ -433,6 +430,7 @@ class FrontEnd:
                         T_candidate=T_c2w_est,
                         T_prev=prev_pose,
                         stats=stats_reg,
+                        obj=obj,
                     )
                     stats_reg["pose_jump_guard_info"] = jump_info
                     if jump_rejected:
@@ -849,6 +847,7 @@ class FrontEnd:
         T_candidate: np.ndarray,
         T_prev: np.ndarray,
         stats: dict,
+        obj,
     ):
         info = {
             "enabled": bool(self.pose_jump_guard_enable),
@@ -886,9 +885,14 @@ class FrontEnd:
             }
         )
 
-        big_jump = (dt > self.pose_jump_guard_trans_thres) or (
-            ddeg > self.pose_jump_guard_rot_deg_thres
-        )
+        if obj.lost:
+            big_jump = (dt > self.pose_jump_guard_trans_thres) or (
+                ddeg > self.pose_jump_guard_rot_deg_thres
+            )
+        else:
+            big_jump = (dt > self.pose_jump_guard_trans_thres) or (
+                ddeg > self.pose_jump_guard_rot_deg_thres
+            )
         weak_support = (ninliers < self.pose_jump_guard_min_inliers) or (
             inlier_ratio < self.pose_jump_guard_min_inlier_ratio
         )

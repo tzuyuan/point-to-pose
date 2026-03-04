@@ -57,23 +57,37 @@ class YCBInIsaacReader:
         self.object_names = self._discover_object_names()
         self.mask_files_by_object = {}
         self.gt_pose_files_by_object = {}
+        self.mask_file_by_id_by_object = {}
+        self.gt_pose_file_by_id_by_object = {}
 
         if len(self.object_names) > 0:
             for obj_name in self.object_names:
-                self.mask_files_by_object[obj_name] = sorted(
+                mask_files = sorted(
                     glob.glob(os.path.join(self.masks_root, obj_name, "*"))
                 )
-                self.gt_pose_files_by_object[obj_name] = sorted(
+                pose_files = sorted(
                     glob.glob(os.path.join(self.poses_root, obj_name, "*"))
+                )
+                self.mask_files_by_object[obj_name] = mask_files
+                self.gt_pose_files_by_object[obj_name] = pose_files
+                self.mask_file_by_id_by_object[obj_name] = self._build_id_to_file_map(
+                    mask_files
+                )
+                self.gt_pose_file_by_id_by_object[obj_name] = (
+                    self._build_id_to_file_map(pose_files)
                 )
         else:
             # Backward compatibility: flat single-object layout.
             self.object_names = ["object_0"]
-            self.mask_files_by_object["object_0"] = sorted(
-                glob.glob(os.path.join(self.masks_root, "*"))
+            mask_files = sorted(glob.glob(os.path.join(self.masks_root, "*")))
+            pose_files = sorted(glob.glob(os.path.join(self.poses_root, "*")))
+            self.mask_files_by_object["object_0"] = mask_files
+            self.gt_pose_files_by_object["object_0"] = pose_files
+            self.mask_file_by_id_by_object["object_0"] = self._build_id_to_file_map(
+                mask_files
             )
-            self.gt_pose_files_by_object["object_0"] = sorted(
-                glob.glob(os.path.join(self.poses_root, "*"))
+            self.gt_pose_file_by_id_by_object["object_0"] = self._build_id_to_file_map(
+                pose_files
             )
 
         # Keep legacy member for callers expecting single-object pose files.
@@ -103,6 +117,16 @@ class YCBInIsaacReader:
         ]
         return object_names
 
+    def _build_id_to_file_map(self, file_paths):
+        """
+        Build a filename-stem to file-path lookup (e.g. '000123' -> '/.../000123.txt').
+        """
+        id_to_file = {}
+        for path in file_paths:
+            stem = os.path.splitext(os.path.basename(path))[0]
+            id_to_file[stem] = path
+        return id_to_file
+
     @property
     def num_objects(self):
         return len(self.object_names)
@@ -126,8 +150,11 @@ class YCBInIsaacReader:
             return None
 
         idx = min(i, len(pose_files) - 1)
+        target_id = self.id_strs[min(i, len(self.id_strs) - 1)]
+        id_map = self.gt_pose_file_by_id_by_object.get(obj_name, {})
+        pose_path = id_map.get(target_id, pose_files[idx])
         try:
-            pose = np.loadtxt(pose_files[idx]).reshape(4, 4)
+            pose = np.loadtxt(pose_path).reshape(4, 4)
             return pose
         except Exception:
             logging.info(
@@ -177,7 +204,10 @@ class YCBInIsaacReader:
         if len(obj_mask_files) == 0:
             return np.zeros((self.H, self.W), dtype=np.uint8)
         idx = min(i, len(obj_mask_files) - 1)
-        mask = self._read_and_resize_mask(obj_mask_files[idx])
+        target_id = self.id_strs[min(i, len(self.id_strs) - 1)]
+        id_map = self.mask_file_by_id_by_object.get(obj_name, {})
+        mask_path = id_map.get(target_id, obj_mask_files[idx])
+        mask = self._read_and_resize_mask(mask_path)
         return mask
 
     def get_masks(self, i, use_init_mask=False):

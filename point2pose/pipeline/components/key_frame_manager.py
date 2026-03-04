@@ -106,11 +106,14 @@ class KeyFrameManager:
         self.pending_stable_trans = self.pipeline_cfg.get(
             "pending_stable_trans", 0.01
         )  # meters
-
+        self.pending_use_geom_check = self.pipeline_cfg.get(
+            "pending_use_geom_check", False
+        )
         # Optional: if True, require point's UV to lie inside current mask to count as "good"
         self.pending_require_inside_mask = self.pipeline_cfg.get(
             "pending_require_inside_mask", True
         )
+        self.pending_reset_on_bad = self.pipeline_cfg.get("pending_reset_on_bad", False)
 
         # Optional SDF gate for keyframe/keypoint initialization
         self.sdf_kf_gate = self.pipeline_cfg.get("sdf_kf_gate", False)
@@ -1246,10 +1249,10 @@ class KeyFrameManager:
     def _pending_try_promote(self, key: Tuple[int, int], meta: dict, obj) -> bool:
         if int(meta.get("good", 0)) < int(self.pending_promote_streak):
             return False
-
-        geom_ok, _ = self._pending_obs_geom_ok(meta)
-        if not geom_ok:
-            return False
+        if self.pending_use_geom_check:
+            geom_ok, _ = self._pending_obs_geom_ok(meta)
+            if not geom_ok:
+                return False
 
         obj_idx = int(meta.get("obj_idx", -1))
         if 0 <= obj_idx < len(obj.key_points):
@@ -1412,7 +1415,8 @@ class KeyFrameManager:
                 ):
                     self._pending_mark_good(meta)
                 else:
-                    self._pending_mark_bad(meta)
+                    if self.pending_reset_on_bad == True:
+                        self._pending_mark_bad(meta)
             # else: freeze pending updates when explicitly disabled.
 
             if self._pending_try_promote(key=key, meta=meta, obj=obj):

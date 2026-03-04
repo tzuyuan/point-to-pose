@@ -78,6 +78,30 @@ class SVDClusterRANSACRegister(Register):
         self._select_dense_map_close_margin = float(
             config.get("select_dense_map_close_margin", 1e-3)
         )
+        self._select_dense_map_tie_break_prefer_inliers = bool(
+            config.get("select_dense_map_tie_break_prefer_inliers", False)
+        )
+        self._select_dense_map_tie_break_inlier_margin = int(
+            config.get("select_dense_map_tie_break_inlier_margin", 0)
+        )
+        self._select_dense_map_uninformative_enable = bool(
+            config.get("select_dense_map_uninformative_enable", False)
+        )
+        self._select_dense_map_uninformative_score = float(
+            config.get("select_dense_map_uninformative_score", 1.0)
+        )
+        self._select_dense_map_uninformative_eps = float(
+            config.get("select_dense_map_uninformative_eps", 1e-6)
+        )
+        self._select_dense_map_uninformative_min_clusters = int(
+            config.get("select_dense_map_uninformative_min_clusters", 2)
+        )
+        self._select_dense_map_uninformative_fallback = str(
+            config.get(
+                "select_dense_map_uninformative_fallback",
+                "inlier_count_then_residual",
+            )
+        ).lower()
         self._select_dense_map_hybrid_robust_percentile = float(
             config.get("select_dense_map_hybrid_robust_percentile", 90.0)
         )
@@ -360,22 +384,175 @@ class SVDClusterRANSACRegister(Register):
             ranked_idx = np.argsort(np.asarray(dist_errors, dtype=float))
             best_cluster_idx = int(ranked_idx[0])
 
-            # Tie-break close top-2 SDF scores with a motion prior to previous estimate.
-            if ranked_idx.size >= 2:
-                second_idx = int(ranked_idx[1])
-                best_score = float(dist_errors[best_cluster_idx])
-                second_score = float(dist_errors[second_idx])
-                if (second_score - best_score) <= self._select_dense_map_close_margin:
-                    ref_T = prev_T if prev_T is not None else init_pose
-                    if ref_T is not None:
-                        d0 = self._pose_dist(candidates[best_cluster_idx]["T"], ref_T)
-                        d1 = self._pose_dist(candidates[second_idx]["T"], ref_T)
-                        candidates[best_cluster_idx]["dense_map_prev_pose_dist"] = (
-                            float(d0)
-                        )
-                        candidates[second_idx]["dense_map_prev_pose_dist"] = float(d1)
-                        if d1 < d0:
-                            best_cluster_idx = second_idx
+        # elif self._select_method == "3d_dist_dense_map":
+        #     dist_errors = []
+        #     trg_pcd_full = extract_cropped_point_cloud(
+        #         cur_frame,
+        #         obj_id,
+        #         min_depth=self._select_3d_dist_min_depth,
+        #         max_depth=self._select_3d_dist_max_depth,
+        #         fill_missing_depth=self._select_3d_dist_fill_missing_depth,
+        #         window_size=self._select_3d_dist_window_size,
+        #         min_neighbors=self._select_3d_dist_min_neighbors,
+        #     )
+
+        #     for c in candidates:
+        #         T_map2cur = c["T"]
+        #         T_cur2obj = inverse_SE3(T_map2cur)
+
+        #         sdf_raw, support_ratio, inlier_ratio = self._sdf_residual_stats(
+        #             trg_pcd_full,
+        #             T_cur2obj,
+        #             obj,
+        #             robust_percentile=self._select_dense_map_hybrid_robust_percentile,
+        #             tau=self._select_dense_map_hybrid_sdf_tau,
+        #         )
+
+        #         c["dense_map_sdf_raw"] = (
+        #             float(sdf_raw) if np.isfinite(sdf_raw) else -1.0
+        #         )
+        #         c["dense_map_sdf_support"] = float(support_ratio)
+        #         c["dense_map_sdf_inlier_ratio"] = float(inlier_ratio)
+
+        #         if np.isfinite(sdf_raw):
+        #             score = float(sdf_raw)
+        #             score += 0.03 * (1.0 - support_ratio)
+        #             score += 0.03 * (1.0 - inlier_ratio)
+
+        #             # add small correspondence prior using GLOBAL stats
+        #             score += 0.02 * float(
+        #                 c.get("p80_res_full", c.get("mean_res_full", np.inf))
+        #             )
+        #             score += 0.02 * (1.0 / max(1.0, float(c.get("ninliers_full", 1))))
+        #             c["3d_dist"] = score
+        #         else:
+        #             score = np.inf
+        #             c["3d_dist"] = -1.0
+
+        #         dist_errors.append(score)
+
+        #     best_cluster_idx = int(np.argmin(np.asarray(dist_errors, dtype=float)))
+        # # Optional fallback when SDF scores are uninformative (e.g., all ~1.0).
+        # dense_map_uninformative_applied = False
+        # if (
+        #     self._select_dense_map_uninformative_enable
+        #     and ranked_idx.size >= max(2, self._select_dense_map_uninformative_min_clusters)
+        # ):
+        #     dist_arr = np.asarray(dist_errors, dtype=float)
+        #     finite_idx = np.flatnonzero(np.isfinite(dist_arr))
+        #     if finite_idx.size >= max(
+        #         2, int(self._select_dense_map_uninformative_min_clusters)
+        #     ):
+        #         finite_vals = dist_arr[finite_idx]
+        #         spread = float(np.max(finite_vals) - np.min(finite_vals))
+        #         all_near_fixed = bool(
+        #             np.all(
+        #                 np.abs(finite_vals - float(self._select_dense_map_uninformative_score))
+        #                 <= float(self._select_dense_map_uninformative_eps)
+        #             )
+        #         )
+        #         almost_flat = spread <= float(self._select_dense_map_uninformative_eps)
+        #         if all_near_fixed or almost_flat:
+        #             fallback = str(self._select_dense_map_uninformative_fallback)
+        #             pool = np.asarray(finite_idx, dtype=int)
+
+        #             if fallback in ("inlier_count_then_residual", "inlier_count"):
+        #                 nin = np.asarray(
+        #                     [float(candidates[j].get("ninliers", 0)) for j in pool],
+        #                     dtype=float,
+        #                 )
+        #                 mean_r = np.asarray(
+        #                     [float(candidates[j].get("mean_res", np.inf)) for j in pool],
+        #                     dtype=float,
+        #                 )
+        #                 order = np.lexsort((mean_r, -nin))
+        #                 best_cluster_idx = int(pool[int(order[0])])
+        #             elif fallback in ("mean_residual", "residual"):
+        #                 mean_r = np.asarray(
+        #                     [float(candidates[j].get("mean_res", np.inf)) for j in pool],
+        #                     dtype=float,
+        #                 )
+        #                 best_cluster_idx = int(pool[int(np.argmin(mean_r))])
+        #             elif fallback in ("dist_to_prev", "motion_prior"):
+        #                 ref_T = prev_T if prev_T is not None else init_pose
+        #                 if ref_T is not None:
+        #                     d_pose = np.asarray(
+        #                         [
+        #                             self._pose_dist(candidates[j]["T"], ref_T)
+        #                             for j in pool
+        #                         ],
+        #                         dtype=float,
+        #                     )
+        #                     best_cluster_idx = int(pool[int(np.argmin(d_pose))])
+        #                 else:
+        #                     nin = np.asarray(
+        #                         [float(candidates[j].get("ninliers", 0)) for j in pool],
+        #                         dtype=float,
+        #                     )
+        #                     best_cluster_idx = int(pool[int(np.argmax(nin))])
+        #             else:
+        #                 nin = np.asarray(
+        #                     [float(candidates[j].get("ninliers", 0)) for j in pool],
+        #                     dtype=float,
+        #                 )
+        #                 mean_r = np.asarray(
+        #                     [float(candidates[j].get("mean_res", np.inf)) for j in pool],
+        #                     dtype=float,
+        #                 )
+        #                 order = np.lexsort((mean_r, -nin))
+        #                 best_cluster_idx = int(pool[int(order[0])])
+
+        #             dense_map_uninformative_applied = True
+        #             for j in pool:
+        #                 candidates[int(j)]["dense_map_uninformative"] = True
+        #                 candidates[int(j)]["dense_map_uninformative_spread"] = float(
+        #                     spread
+        #                 )
+        #                 candidates[int(j)][
+        #                     "dense_map_uninformative_fallback"
+        #                 ] = fallback
+        #             candidates[int(best_cluster_idx)][
+        #                 "dense_map_uninformative_selected"
+        #             ] = True
+
+        # # Tie-break close top-2 SDF scores with a motion prior to previous estimate.
+        # if (not dense_map_uninformative_applied) and ranked_idx.size >= 2:
+        #     second_idx = int(ranked_idx[1])
+        #     best_score = float(dist_errors[best_cluster_idx])
+        #     second_score = float(dist_errors[second_idx])
+        #     if (second_score - best_score) <= self._select_dense_map_close_margin:
+        #         # Optional tie-break by support before motion prior.
+        #         used_inlier_tie = False
+        #         if self._select_dense_map_tie_break_prefer_inliers:
+        #             n0 = int(candidates[best_cluster_idx].get("ninliers", 0))
+        #             n1 = int(candidates[second_idx].get("ninliers", 0))
+        #             margin = max(
+        #                 0, int(self._select_dense_map_tie_break_inlier_margin)
+        #             )
+        #             if n1 >= (n0 + margin):
+        #                 best_cluster_idx = second_idx
+        #                 used_inlier_tie = True
+        #             elif n0 >= (n1 + margin):
+        #                 used_inlier_tie = True
+
+        #             candidates[best_cluster_idx]["dense_map_tie_break"] = (
+        #                 "inlier_count"
+        #             )
+        #             candidates[best_cluster_idx][
+        #                 "dense_map_tie_break_ninliers_best"
+        #             ] = int(max(n0, n1))
+
+        #         if not used_inlier_tie:
+        #             ref_T = prev_T if prev_T is not None else init_pose
+        #             if ref_T is not None:
+        #                 d0 = self._pose_dist(candidates[best_cluster_idx]["T"], ref_T)
+        #                 d1 = self._pose_dist(candidates[second_idx]["T"], ref_T)
+        #                 candidates[best_cluster_idx]["dense_map_prev_pose_dist"] = (
+        #                     float(d0)
+        #                 )
+        #                 candidates[second_idx]["dense_map_prev_pose_dist"] = float(d1)
+        #                 if d1 < d0:
+        #                     best_cluster_idx = second_idx
 
         elif self._select_method == "3d_dist_dense_map_hybrid":
             trg_pcd_full = extract_cropped_point_cloud(
@@ -579,7 +756,7 @@ class SVDClusterRANSACRegister(Register):
         selected_T = np.asarray(candidates[best_cluster_idx]["T"], dtype=np.float64)
         sdf_refine_info = {"enabled": bool(self._enable_sdf_refine), "applied": False}
         if self._enable_sdf_refine:
-            selected_T, sdf_refine_info = self._maybe_refine_with_sdf(
+            refined_T, sdf_refine_info = self._maybe_refine_with_sdf(
                 T_seed=selected_T,
                 src_corr=src_pcd,
                 tgt_corr=tgt_pcd,
@@ -587,11 +764,11 @@ class SVDClusterRANSACRegister(Register):
                 obj_id=obj_id,
                 obj=obj,
             )
-            candidates[best_cluster_idx]["T"] = selected_T
+            candidates[best_cluster_idx]["T"] = refined_T
             candidates[best_cluster_idx]["sdf_refine"] = sdf_refine_info
 
         # Recompute residuals / inliers from final selected pose (after optional SDF refine).
-        residuals = np.linalg.norm(transform_pts(selected_T, src_pcd) - tgt_pcd, axis=1)
+        residuals = np.linalg.norm(transform_pts(refined_T, src_pcd) - tgt_pcd, axis=1)
         inliers = residuals <= self._inlier_thres
         selected_ninliers = int(np.count_nonzero(inliers))
         candidates[best_cluster_idx]["ninliers"] = selected_ninliers
@@ -610,7 +787,10 @@ class SVDClusterRANSACRegister(Register):
             "fallback_ninliers": int(selected_ninliers),
         }
         if selected_ninliers < int(self._min_inliers):
-            if init_pose is not None:
+            if selected_T is not None:
+                fallback_T = np.asarray(selected_T, dtype=np.float64)
+                final_inlier_gate["fallback_to"] = "cluster_selected_T"
+            elif init_pose is not None:
                 fallback_T = np.asarray(init_pose, dtype=np.float64)
                 final_inlier_gate["fallback_to"] = "init_pose"
             else:
@@ -664,6 +844,15 @@ class SVDClusterRANSACRegister(Register):
             # sample a subset of the remaining pool
             samp = np.random.choice(idx, self._sample_size, replace=False)
             # fit a rigid transformation to the sampled points
+
+            # prevent degenerate samples for SVD (e.g., colinear or coplanar points) which can cause LinAlgError or bad fits
+            pa = p0[samp]
+            qa = tgt_pcd[samp]
+            if self._sample_size >= 3 and self._is_degenerate_sample(pa):
+                continue
+            if self._sample_size >= 3 and self._is_degenerate_sample(qa):
+                continue
+
             try:
                 Tk = (
                     self._weighted_svd_fit(p0[samp], tgt_pcd[samp], w[samp])
@@ -1821,3 +2010,10 @@ class SVDClusterRANSACRegister(Register):
     #         )
 
     #     return np.inf
+
+    def _is_degenerate_sample(self, pts, eps_area=1e-6):
+        if pts.shape[0] < 3:
+            return True
+        a, b, c = pts[:3]
+        area2 = np.linalg.norm(np.cross(b - a, c - a))
+        return area2 < eps_area

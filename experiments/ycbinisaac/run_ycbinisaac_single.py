@@ -54,7 +54,7 @@ def load_ycb_mesh(reader, model_root, obj_name):
     # or {model_root}/models/{ob_name}/textured_simple.obj
 
     candidates = [
-        os.path.join(model_root, ob_name, "textured_simple.obj"),
+        os.path.join(model_root, ob_name, "textured.obj"),
         os.path.join(model_root, "models", ob_name, "textured_simple.obj"),
         os.path.join(
             model_root, ob_name, "google_16k", "textured.obj"
@@ -76,46 +76,140 @@ def load_ycb_mesh(reader, model_root, obj_name):
     return trimesh.load(mesh_path)
 
 
-def gt_bbox_minmax_from_mesh(mesh):
+def gt_bbox_from_mesh(mesh, mode="aabb"):
+    """
+    Build a bbox representation for visualization.
+    mode:
+      - 'aabb'    : mesh-axis aligned min/max in mesh frame (legacy behavior)
+      - 'obb_fit' : fitted oriented bbox (PCA) from mesh geometry
+    """
+    mode = str(mode).strip().lower()
+    if mode in ("obb_fit", "obb", "oriented", "fit_oriented"):
+        try:
+            verts = np.asarray(mesh.vertices, dtype=float).reshape(-1, 3)
+            if verts.shape[0] < 3:
+                raise ValueError("not enough vertices to fit OBB")
+
+            # PCA frame in mesh coordinates.
+            mean = verts.mean(axis=0)
+            centered = verts - mean.reshape(1, 3)
+            cov = np.cov(centered.T)
+            eigvals, eigvecs = np.linalg.eigh(cov)
+            order = np.argsort(eigvals)[::-1]
+            R = np.asarray(eigvecs[:, order], dtype=float).reshape(3, 3)
+            if np.linalg.det(R) < 0:
+                R[:, 2] *= -1.0
+
+            # Tight bounds in PCA frame.
+            verts_local = (R.T @ centered.T).T
+            mn_local = verts_local.min(axis=0)
+            mx_local = verts_local.max(axis=0)
+            extent = (mx_local - mn_local).astype(float)
+            center_local = 0.5 * (mn_local + mx_local)
+            center = (mean + R @ center_local).astype(float)
+
+            return {
+                "center": center,
+                "extent": extent,
+                "rot": R.astype(float),
+            }
+        except Exception as e:
+            print(
+                f"[Visualization] Failed to fit oriented bbox from mesh ({e}), "
+                "falling back to axis-aligned mesh bbox."
+            )
+
     bmin, bmax = mesh.bounds  # shape (3,), (3,)
     return np.vstack([bmin.astype(float), bmax.astype(float)])  # (2,3)
+
+
+def _as_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y", "on")
+    return bool(value)
+
+
+def _parse_bgr_color(value, default=(0, 255, 255)):
+    try:
+        arr = np.asarray(value, dtype=float).reshape(-1)
+        if arr.shape[0] != 3:
+            raise ValueError("color must have 3 components")
+        arr = np.clip(np.round(arr), 0, 255).astype(np.uint8)
+        return tuple(int(x) for x in arr.tolist())
+    except Exception:
+        return tuple(int(x) for x in default)
 
 
 def load_is_obj_in_image_labels(reader, video_path, obj_name, num_frames):
     """
     Load per-frame object visibility labels for evaluation filtering.
     """
+    labels = _load_binary_labels(
+        reader=reader,
+        video_path=video_path,
+        obj_name=obj_name,
+        label_root="is_obj_in_image_labels",
+        label_file_name="is_obj_in_image.npy",
+    )
+    if labels.shape[0] != num_frames:
+        print(
+            f"[{obj_name}] Visibility label length mismatch: "
+            f"{labels.shape[0]} vs num_frames={num_frames}. Adjusting to frame count."
+        )
+        if labels.shape[0] < num_frames:
+            padded = np.zeros((num_frames,), dtype=bool)
+            padded[: labels.shape[0]] = labels
+            labels = padded
+        else:
+            labels = labels[:num_frames]
+    return labels
+
+
+def _load_binary_labels(
+    reader,
+    video_path,
+    obj_name,
+    label_root,
+    label_file_name,
+):
     canonical_name = _canonical_object_name(reader, obj_name)
     candidates = [
-        os.path.join(
-            video_path,
-            "is_obj_in_image_labels",
-            obj_name,
-            "is_obj_in_image.npy",
-        ),
-        os.path.join(
-            video_path,
-            "is_obj_in_image_labels",
-            canonical_name,
-            "is_obj_in_image.npy",
-        ),
+        os.path.join(video_path, label_root, obj_name, label_file_name),
+        os.path.join(video_path, label_root, canonical_name, label_file_name),
     ]
-
     label_path = None
     for path in candidates:
         if os.path.exists(path):
             label_path = path
             break
-
     if label_path is None:
         raise FileNotFoundError(
-            f"Could not find visibility labels for object {obj_name}. Checked: {candidates}"
+            f"Could not find {label_root}/{label_file_name} for object {obj_name}. "
+            f"Checked: {candidates}"
         )
+    return np.asarray(np.load(label_path)).reshape(-1) > 0
 
-    labels = np.asarray(np.load(label_path)).reshape(-1) > 0
+
+def load_is_mask_visible_labels(reader, video_path, obj_name, num_frames):
+    """
+    Load per-frame mask-visibility labels for evaluation filtering.
+    """
+    labels = _load_binary_labels(
+        reader=reader,
+        video_path=video_path,
+        obj_name=obj_name,
+        label_root="is_mask_visible",
+        label_file_name="is_mask_visible.npy",
+    )
     if labels.shape[0] != num_frames:
         print(
-            f"[{obj_name}] Visibility label length mismatch: "
+            f"[{obj_name}] Mask-visibility label length mismatch: "
             f"{labels.shape[0]} vs num_frames={num_frames}. Adjusting to frame count."
         )
         if labels.shape[0] < num_frames:
@@ -146,15 +240,54 @@ def run_ycbineoat_single(
     vis_folder = os.path.join(out_folder, "output_images")
     with_gt_folder = os.path.join(out_folder, "with_gt")
     mesh_folder = os.path.join(out_folder, "mesh")
+    vis_folder_reg_corr = os.path.join(out_folder, "registration_correspondence")
+    with_gt_folder_reg_corr = os.path.join(
+        out_folder, "with_gt_registration_correspondence"
+    )
 
     if os.path.exists(out_folder):
         shutil.rmtree(out_folder)
     os.makedirs(vis_folder, exist_ok=True)
     os.makedirs(with_gt_folder, exist_ok=True)
     os.makedirs(mesh_folder, exist_ok=True)
+    os.makedirs(vis_folder_reg_corr, exist_ok=True)
+    os.makedirs(with_gt_folder_reg_corr, exist_ok=True)
 
     cfg = OmegaConf.load(config_path)
     vis_cfg = cfg.visualization.params
+    bbox_frame = str(vis_cfg.get("bbox_frame", "mesh")).strip().lower()
+    if bbox_frame not in ("mesh", "center"):
+        print(
+            f"[Visualization] Unsupported bbox_frame='{bbox_frame}', defaulting to 'mesh'. "
+            "Supported: ['mesh', 'center']."
+        )
+        bbox_frame = "mesh"
+
+    bbox_fit_mode = str(vis_cfg.get("bbox_fit_mode", "aabb")).strip().lower()
+    if bbox_fit_mode in ("obb", "oriented", "fit_oriented"):
+        bbox_fit_mode = "obb_fit"
+    if bbox_fit_mode not in ("aabb", "obb_fit"):
+        print(
+            f"[Visualization] Unsupported bbox_fit_mode='{bbox_fit_mode}', defaulting to 'aabb'. "
+            "Supported: ['aabb', 'obb_fit']."
+        )
+        bbox_fit_mode = "aabb"
+
+    project_mesh_contour = _as_bool(
+        vis_cfg.get(
+            "project_mesh_contour",
+            vis_cfg.get("visualize_mesh_contour", False),
+        ),
+        default=False,
+    )
+    mesh_contour_linewidth = int(vis_cfg.get("mesh_contour_linewidth", 2))
+    if mesh_contour_linewidth < 1:
+        mesh_contour_linewidth = 1
+    mesh_contour_line_color = _parse_bgr_color(
+        vis_cfg.get("mesh_contour_line_color", [0, 255, 255]),
+        default=(0, 255, 255),
+    )
+
     cfg.pipeline.params.sdf_mesh_save_dir = mesh_folder
     cfg.pipeline.params.sdf_mesh_save_every = 1
     object_names = reader.get_object_names()
@@ -183,23 +316,33 @@ def run_ycbineoat_single(
     # Load mesh and bbox for each object.
     meshes = {}
     gt_bbox_minmax_by_object = {}
+    mesh_vertices_by_index = {}
+    mesh_faces_by_index = {}
     is_obj_in_image_labels_by_object = {}
-    for obj_name in object_names:
+    is_mask_visible_labels_by_object = {}
+    eval_labels_by_object = {}
+    for obj_idx, obj_name in enumerate(object_names):
         mesh = load_ycb_mesh(reader, model_path, obj_name)
         meshes[obj_name] = mesh
-        gt_bbox_minmax_by_object[obj_name] = gt_bbox_minmax_from_mesh(mesh)
-        try:
-            is_obj_in_image_labels_by_object[obj_name] = load_is_obj_in_image_labels(
-                reader=reader,
-                video_path=video_path,
-                obj_name=obj_name,
-                num_frames=len(reader),
-            )
-        except Exception as e:
-            print(f"Error loading is_obj_in_image_labels for {obj_name}: {e}")
-            is_obj_in_image_labels_by_object[obj_name] = np.ones(
-                len(reader), dtype=bool
-            )
+        gt_bbox_minmax_by_object[obj_name] = gt_bbox_from_mesh(mesh, mode=bbox_fit_mode)
+        mesh_vertices_by_index[obj_idx] = np.asarray(mesh.vertices, dtype=np.float64)
+        mesh_faces_by_index[obj_idx] = np.asarray(mesh.faces, dtype=np.int64)
+        is_obj_in_image_labels_by_object[obj_name] = load_is_obj_in_image_labels(
+            reader=reader,
+            video_path=video_path,
+            obj_name=obj_name,
+            num_frames=len(reader),
+        )
+        is_mask_visible_labels_by_object[obj_name] = load_is_mask_visible_labels(
+            reader=reader,
+            video_path=video_path,
+            obj_name=obj_name,
+            num_frames=len(reader),
+        )
+        eval_labels_by_object[obj_name] = (
+            is_obj_in_image_labels_by_object[obj_name]
+            & is_mask_visible_labels_by_object[obj_name]
+        )
 
     out_poses_by_object = {obj_name: [] for obj_name in object_names}
     gt_poses_by_object = {obj_name: [] for obj_name in object_names}
@@ -237,7 +380,7 @@ def run_ycbineoat_single(
             out_poses_by_object[obj_name].append(pred_pose)
             gt_pose = gt_pose_map.get(obj_name, None)
             gt_poses_by_object[obj_name].append(gt_pose)
-            if is_obj_in_image_labels_by_object[obj_name][i]:
+            if eval_labels_by_object[obj_name][i]:
                 eval_ids_by_object[obj_name].append(i)
             if i == 0 and gt_pose is not None and obj_idx < len(pipeline.objects):
                 pipeline.objects[obj_idx].init_pose = gt_pose
@@ -264,7 +407,12 @@ def run_ycbineoat_single(
             output_image_dir=vis_folder,
             camera_intrinsics=reader.K,
             bbox_min_max=gt_bbox_by_index,
-            bbox_frame="mesh",
+            mesh_vertices_by_object=mesh_vertices_by_index,
+            mesh_faces_by_object=mesh_faces_by_index,
+            project_mesh_contour=project_mesh_contour,
+            mesh_contour_line_color=mesh_contour_line_color,
+            mesh_contour_linewidth=mesh_contour_linewidth,
+            bbox_frame=bbox_frame,
         )
 
         gt_overlay_frame = visualize_and_save_tracking_results_with_gt(
@@ -281,23 +429,76 @@ def run_ycbineoat_single(
             output_image_dir=with_gt_folder,
             camera_intrinsics=reader.K,
             bbox_min_max=gt_bbox_by_index,
+            mesh_vertices_by_object=mesh_vertices_by_index,
+            mesh_faces_by_object=mesh_faces_by_index,
+            project_mesh_contour=project_mesh_contour,
+            mesh_contour_line_color=mesh_contour_line_color,
+            mesh_contour_linewidth=mesh_contour_linewidth,
             gt_bbox_min_max_by_object=gt_bbox_by_index,
             pred_pose_color=(0, 255, 0),
-            bbox_frame="mesh",
+            bbox_frame=bbox_frame,
         )
 
         if vis_cfg.save_images:
             out_path = os.path.join(with_gt_folder, f"frame_{i:06d}.png")
             cv2.imwrite(out_path, gt_overlay_frame)
 
+        display_frame_reg_corr = visualize_and_save_tracking_results(
+            frame=frame,
+            objects=pipeline.objects,
+            track_table=pipeline.track_table,
+            frame_id=i,
+            visualize_points=vis_cfg.visualize_points,
+            points_vis_method="registration_correspondence",
+            save_images=vis_cfg.save_images,
+            output_image_dir=vis_folder_reg_corr,
+            camera_intrinsics=reader.K,
+            bbox_min_max=gt_bbox_by_index,
+            mesh_vertices_by_object=mesh_vertices_by_index,
+            mesh_faces_by_object=mesh_faces_by_index,
+            project_mesh_contour=project_mesh_contour,
+            mesh_contour_line_color=mesh_contour_line_color,
+            mesh_contour_linewidth=mesh_contour_linewidth,
+            bbox_frame=bbox_frame,
+        )
+
+        gt_overlay_frame_reg_corr = visualize_and_save_tracking_results_with_gt(
+            frame=frame,
+            objects=pipeline.objects,
+            track_table=pipeline.track_table,
+            est_result_frame=display_frame_reg_corr,
+            gt_poses=gt_poses,
+            gt_object_indices=gt_indices,
+            frame_id=i,
+            visualize_points=vis_cfg.visualize_points,
+            points_vis_method="registration_correspondence",
+            save_images=vis_cfg.save_images,
+            output_image_dir=with_gt_folder_reg_corr,
+            camera_intrinsics=reader.K,
+            bbox_min_max=gt_bbox_by_index,
+            mesh_vertices_by_object=mesh_vertices_by_index,
+            mesh_faces_by_object=mesh_faces_by_index,
+            project_mesh_contour=project_mesh_contour,
+            mesh_contour_line_color=mesh_contour_line_color,
+            mesh_contour_linewidth=mesh_contour_linewidth,
+            gt_bbox_min_max_by_object=gt_bbox_by_index,
+            pred_pose_color=(0, 255, 0),
+            bbox_frame=bbox_frame,
+        )
+
+        if vis_cfg.save_images:
+            out_path = os.path.join(with_gt_folder_reg_corr, f"frame_{i:06d}.png")
+            cv2.imwrite(out_path, gt_overlay_frame_reg_corr)
+
     per_object_results = {}
     all_adi_errs = []
     all_add_errs = []
+    total_eval_frames = 0
     for obj_name in object_names:
         eval_ids = eval_ids_by_object[obj_name]
         if len(eval_ids) == 0:
             print(
-                f"[{obj_name}] No visible frames from visibility labels, skipping object evaluation."
+                f"[{obj_name}] No frames with both is_obj_in_image_labels and is_mask_visible true, skipping object evaluation."
             )
             continue
 
@@ -333,6 +534,7 @@ def run_ycbineoat_single(
         add_errs = np.array(add_errs)
         adds_auc = compute_auc(adi_errs) * 100
         add_auc = compute_auc(add_errs) * 100
+        total_eval_frames += len(pred_poses)
 
         per_object_results[obj_name] = {
             "pred_poses": pred_poses,
@@ -342,6 +544,7 @@ def run_ycbineoat_single(
             "add_errs": add_errs,
             "adds_auc": adds_auc,
             "add_auc": add_auc,
+            "num_eval_frames": int(len(pred_poses)),
         }
         all_adi_errs.append(adi_errs)
         all_add_errs.append(add_errs)
@@ -455,6 +658,8 @@ def run_ycbineoat_single(
         "add_s_auc": float(compute_auc(agg_adi) * 100) if agg_adi is not None else 0.0,
         "add_auc": float(compute_auc(agg_add) * 100) if agg_add is not None else 0.0,
         "mesh_cd_cm": avg_mesh_cd,
+        "num_eval_objects": int(len(per_object_results)),
+        "num_eval_frames": int(total_eval_frames),
     }
 
 

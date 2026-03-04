@@ -77,6 +77,8 @@ pipeline:
     pending_sdf_gate_thres: 0.02
     pending_sdf_gate_percentile: 100.0
     pending_sdf_min_support: 1.0
+    pending_use_geom_check: true
+    pending_reset_on_bad: true
 
     # newly promoted point warmup trust
     promoted_warmup_frames: 4
@@ -299,8 +301,8 @@ segmenter:
 tracker:
   type: tapir
   params:
-    resize_height: 480
-    resize_width: 480
+    resize_height: 320
+    resize_width: 320
     visible_threshold: 0.5
     device: cuda
     checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt

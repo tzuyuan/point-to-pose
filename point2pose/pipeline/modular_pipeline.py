@@ -253,6 +253,13 @@ class ModularPipeline:
 
         # Log initial state
         if self.save_meta_data:
+            all_obj_init_pose = np.stack(
+                [np.asarray(obj.init_pose, dtype=np.float64) for obj in self.objects],
+                axis=0,
+            )
+            all_obj_pose = np.stack(
+                [np.asarray(obj.pose, dtype=np.float64) for obj in self.objects], axis=0
+            )
             # Get keyframe camera frame keypoints if available
             kf_kp_3d_camera_init = np.array([])
             if len(self.kf_manager.keyframes.get(0, [])) > 0:
@@ -272,6 +279,8 @@ class ModularPipeline:
                     "valid_depth": frame.depth,
                     "obj_init_pose": self.objects[0].init_pose,
                     "obj_pose": self.objects[0].pose,
+                    "obj_init_pose_all": all_obj_init_pose,
+                    "obj_pose_all": all_obj_pose,
                     "obj_key_point_frames": self.objects[0].key_point_frames,
                     "obj_key_points": self.objects[0].key_points,
                     "obj_uncertainties": self.objects[0].uncertainties,
@@ -619,6 +628,13 @@ class ModularPipeline:
             # Assuming logging for obj_id=0 as in pipeline_single_process.py
             # TODO: Extend to support multi-object logging if needed
             obj_id = 0
+            all_obj_init_pose = np.stack(
+                [np.asarray(obj.init_pose, dtype=np.float64) for obj in self.objects],
+                axis=0,
+            )
+            all_obj_pose = np.stack(
+                [np.asarray(obj.pose, dtype=np.float64) for obj in self.objects], axis=0
+            )
 
             reg_stats = fe_result.reg_stats.get(obj_id, {})
             valid_stats = fe_result.valid_stats.get(obj_id, {})
@@ -660,6 +676,8 @@ class ModularPipeline:
                 "valid_depth": fe_result.track_valid,  # Assuming this meant track_valid in single_process
                 "obj_init_pose": self.objects[obj_id].init_pose,
                 "obj_pose": self.objects[obj_id].pose,
+                "obj_init_pose_all": all_obj_init_pose,
+                "obj_pose_all": all_obj_pose,
                 "obj_key_points": self.objects[obj_id].key_points,
                 "obj_uncertainties": self.objects[obj_id].uncertainties,
                 "obj_valid": self.objects[obj_id].valid,
