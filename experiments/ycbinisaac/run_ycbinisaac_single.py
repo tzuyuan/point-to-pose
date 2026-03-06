@@ -509,6 +509,10 @@ def run_ycbineoat_single(
             out_path = os.path.join(with_gt_folder_reg_corr, f"frame_{i:06d}.png")
             cv2.imwrite(out_path, gt_overlay_frame_reg_corr)
 
+    if getattr(pipeline, "save_meta_data", False) and hasattr(pipeline, "data_logger"):
+        npz_path, _ = pipeline.data_logger.save_now()
+        print(f"[{video_name}] Saved metadata: {npz_path}")
+
     per_object_results = {}
     all_adi_errs = []
     all_add_errs = []

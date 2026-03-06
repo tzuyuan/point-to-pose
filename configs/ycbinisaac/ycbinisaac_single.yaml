@@ -299,8 +299,8 @@ segmenter:
 tracker:
   type: tapir
   params:
-    resize_height: 384
-    resize_width: 384
+    resize_height: 280
+    resize_width: 280
     visible_threshold: 0.5
     device: cuda
     checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
@@ -322,7 +322,7 @@ tracker:
 sampler: 
   type: super_point_balanced
   params:
-    num_points: 25
+    num_points: 20
     density_per_kpx: -1
     fps_oversample_factor: 2
 
@@ -373,7 +373,7 @@ criterion:
 
     # uncertainty criterion
     uncer_thres: 0.4
-    min_num_pts: 20
+    min_num_pts: 10
 
     # rotation threshold and min num criterion
     # if it's smaller than this it will not trigger sampling
@@ -383,7 +383,7 @@ criterion:
     discretization_angle: 60
 
     # rotation threshold criterion
-    max_angle_deg: 10
+    max_angle_deg: 15
 
     # mask area criterion
     fit_mode: convex

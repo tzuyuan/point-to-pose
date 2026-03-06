@@ -304,7 +304,7 @@ class TapirTracker(Tracker):
             feature_grids=feature_grids,
             query_features=query_features,
             query_points_in_video=None,
-            query_chunk_size=64,
+            query_chunk_size=16,
             causal_context=causal_context,
             get_causal_context=True,
         )

@@ -64,7 +64,7 @@ def _load_ycb_mesh(reader, model_root: str, obj_name: str):
     """
     ob_name = _canonical_object_name(reader, obj_name)
     candidates = [
-        os.path.join(model_root, ob_name, "textured.obj"),
+        # os.path.join(model_root, ob_name, "textured.obj"),
         os.path.join(model_root, ob_name, "textured_simple.obj"),
         os.path.join(model_root, "models", ob_name, "textured_simple.obj"),
         os.path.join(model_root, ob_name, "google_16k", "textured.obj"),
@@ -279,14 +279,18 @@ def evaluate_sequence_from_metadata(
     out_dir: str,
     model_path: str,
     pose_key: str = "auto",
+    require_all_objects: bool = True,
+    skip_mesh_cd: bool = False,
 ):
     from point2pose.io.sources.dataset.datareader import YCBInIsaacReader
     from point2pose.utils.evaluation import add_err, adi_err, compute_auc
-    from point2pose.utils.mesh_eval import (
-        evaluate_reconstructed_mesh,
-        find_gt_visible_mesh_path,
-    )
     from point2pose.utils.transform import inverse_SE3
+
+    if not skip_mesh_cd:
+        from point2pose.utils.mesh_eval import (
+            evaluate_reconstructed_mesh,
+            find_gt_visible_mesh_path,
+        )
 
     video_path = os.path.join(data_path, video_name)
     result_dir = os.path.join(out_dir, video_name)
@@ -303,11 +307,13 @@ def evaluate_sequence_from_metadata(
     if len(object_names) == 0:
         raise RuntimeError(f"No objects found for sequence: {video_name}")
 
+    expected_num_objects = len(object_names)
     per_object_results = {}
     all_adi_errs = []
     all_add_errs = []
     mesh_cd_by_object = {}
     total_eval_frames = 0
+    skipped_objects = []
 
     for obj_idx, obj_name in enumerate(object_names):
         try:
@@ -318,10 +324,19 @@ def evaluate_sequence_from_metadata(
             )
         except KeyError as exc:
             print(f"[{video_name}/{obj_name}] {exc}")
+            skipped_objects.append(
+                {"object_name": obj_name, "reason": f"pose series missing: {exc}"}
+            )
             continue
         if len(pred_poses_raw) == 0:
             print(
                 f"[{video_name}/{obj_name}] No predicted poses in metadata for obj_idx={obj_idx}, skipping."
+            )
+            skipped_objects.append(
+                {
+                    "object_name": obj_name,
+                    "reason": f"empty predicted pose series for obj_idx={obj_idx}",
+                }
             )
             continue
 
@@ -381,6 +396,12 @@ def evaluate_sequence_from_metadata(
             print(
                 f"[{video_name}/{obj_name}] No valid frames after applying available visibility filtering."
             )
+            skipped_objects.append(
+                {
+                    "object_name": obj_name,
+                    "reason": "no valid eval frames after filtering",
+                }
+            )
             continue
 
         pred_eval = np.asarray(pred_eval, dtype=np.float64)
@@ -410,46 +431,58 @@ def evaluate_sequence_from_metadata(
         add_auc = float(compute_auc(add_errs) * 100.0)
         total_eval_frames += len(gt_eval)
 
-        pred_mesh_path = os.path.join(mesh_dir, f"pred_mesh_obj_{obj_idx}.ply")
-        if not os.path.exists(pred_mesh_path):
-            pred_mesh_path = None
-        gt_visible_mesh_path = find_gt_visible_mesh_path(
-            reader.video_dir, obj_name=obj_name
-        )
-        mesh_cd_cm = evaluate_reconstructed_mesh(
-            pred_mesh_path=pred_mesh_path,
-            gt_visible_mesh_path=gt_visible_mesh_path,
-            output_dir=mesh_dir,
-            mesh_prefix=f"{video_name}_{obj_name}",
-            pred_pose_first=pred_eval_raw[0],
-            gt_pose_first=gt_eval[0],
-        )
+        if skip_mesh_cd:
+            mesh_cd_cm = np.inf
+        else:
+            pred_mesh_path = os.path.join(mesh_dir, f"pred_mesh_obj_{obj_idx}.ply")
+            if not os.path.exists(pred_mesh_path):
+                pred_mesh_path = None
+            gt_visible_mesh_path = find_gt_visible_mesh_path(
+                reader.video_dir, obj_name=obj_name
+            )
+            mesh_cd_cm = evaluate_reconstructed_mesh(
+                pred_mesh_path=pred_mesh_path,
+                gt_visible_mesh_path=gt_visible_mesh_path,
+                output_dir=mesh_dir,
+                mesh_prefix=f"{video_name}_{obj_name}",
+                pred_pose_first=pred_eval_raw[0],
+                gt_pose_first=gt_eval[0],
+            )
 
         per_object_results[obj_name] = {
-            "adi_errs": adi_errs,
-            "add_errs": add_errs,
-            "adds_auc": adds_auc,
-            "add_auc": add_auc,
-            "mesh_cd_cm": mesh_cd_cm,
+            "add_s_err_cm": float(adi_errs.mean() * 100.0),
+            "add_err_cm": float(add_errs.mean() * 100.0),
+            "add_s_auc": float(adds_auc),
+            "add_auc": float(add_auc),
+            "mesh_cd_cm": float(mesh_cd_cm),
             "num_eval_frames": int(len(gt_eval)),
         }
         all_adi_errs.append(adi_errs)
         all_add_errs.append(add_errs)
         mesh_cd_by_object[obj_name] = mesh_cd_cm
 
+        mesh_cd_str = (
+            f"{mesh_cd_cm:.3f}[cm]" if np.isfinite(mesh_cd_cm) else "skipped"
+        )
         print(
             f"{video_name}, obj {obj_name}, "
             f"ADD-S_err: {adi_errs.mean()*100:.2f}[cm], "
             f"ADD_err: {add_errs.mean()*100:.2f}[cm], "
             f"ADD-S_AUC: {adds_auc:.2f}, ADD_AUC: {add_auc:.2f}, "
-            f"mesh_CD: {mesh_cd_cm:.3f}[cm]"
-            if np.isfinite(mesh_cd_cm)
-            else f"{video_name}, obj {obj_name}, mesh_CD: skipped"
+            f"mesh_CD: {mesh_cd_str}"
         )
 
     if len(per_object_results) == 0:
         raise RuntimeError(
             f"No evaluable objects found in metadata for sequence {video_name}."
+        )
+    if require_all_objects and len(per_object_results) != expected_num_objects:
+        skipped_summary = ", ".join(
+            f"{item['object_name']} ({item['reason']})" for item in skipped_objects
+        )
+        raise RuntimeError(
+            f"Sequence {video_name}: benchmarked {len(per_object_results)}/"
+            f"{expected_num_objects} objects. Missing objects: {skipped_summary}"
         )
 
     agg_adi = np.concatenate(all_adi_errs)
@@ -466,6 +499,7 @@ def evaluate_sequence_from_metadata(
         "mesh_cd_cm": avg_mesh_cd,
         "num_eval_objects": int(len(per_object_results)),
         "num_eval_frames": int(total_eval_frames),
+        "per_object_metrics": per_object_results,
     }
 
 
@@ -539,6 +573,85 @@ def _save_tables(results, failures, summary_dir):
         json.dump(failures, f, indent=2)
 
     return per_sequence_csv, summary_csv, failures_json
+
+
+def _save_per_object_table(results, summary_dir):
+    os.makedirs(summary_dir, exist_ok=True)
+    per_object_csv = os.path.join(summary_dir, "per_object_metrics.csv")
+
+    rows = sorted(results, key=lambda x: x["video_name"])
+    flat_rows = []
+    for row in rows:
+        video_name = row["video_name"]
+        per_object = row.get("per_object_metrics", {})
+        if not isinstance(per_object, dict):
+            continue
+        for obj_name, metrics in sorted(per_object.items(), key=lambda x: str(x[0])):
+            if not isinstance(metrics, dict):
+                continue
+            flat_rows.append(
+                {
+                    "video_name": video_name,
+                    "object_name": str(obj_name),
+                    "add_s_err_cm": float(metrics.get("add_s_err_cm", np.nan)),
+                    "add_err_cm": float(metrics.get("add_err_cm", np.nan)),
+                    "add_s_auc": float(metrics.get("add_s_auc", np.nan)),
+                    "add_auc": float(metrics.get("add_auc", np.nan)),
+                    "mesh_cd_cm": float(metrics.get("mesh_cd_cm", np.nan)),
+                    "num_eval_frames": int(metrics.get("num_eval_frames", 0)),
+                }
+            )
+
+    with open(per_object_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "video_name",
+                "object_name",
+                "add_s_err_cm",
+                "add_err_cm",
+                "add_s_auc",
+                "add_auc",
+                "mesh_cd_cm",
+                "num_eval_frames",
+            ],
+        )
+        writer.writeheader()
+        for row in flat_rows:
+            writer.writerow(
+                {
+                    "video_name": row["video_name"],
+                    "object_name": row["object_name"],
+                    "add_s_err_cm": (
+                        f"{row['add_s_err_cm']:.6f}"
+                        if np.isfinite(row["add_s_err_cm"])
+                        else "nan"
+                    ),
+                    "add_err_cm": (
+                        f"{row['add_err_cm']:.6f}"
+                        if np.isfinite(row["add_err_cm"])
+                        else "nan"
+                    ),
+                    "add_s_auc": (
+                        f"{row['add_s_auc']:.6f}"
+                        if np.isfinite(row["add_s_auc"])
+                        else "nan"
+                    ),
+                    "add_auc": (
+                        f"{row['add_auc']:.6f}"
+                        if np.isfinite(row["add_auc"])
+                        else "nan"
+                    ),
+                    "mesh_cd_cm": (
+                        f"{row['mesh_cd_cm']:.6f}"
+                        if np.isfinite(row["mesh_cd_cm"])
+                        else "inf"
+                    ),
+                    "num_eval_frames": int(row["num_eval_frames"]),
+                }
+            )
+
+    return per_object_csv
 
 
 def _plot_sequence_metrics(rows, summary_dir):
@@ -665,6 +778,8 @@ def benchmark_ycbinisaac_all(
     model_path: str,
     summary_dir: str | None = None,
     pose_key: str = "auto",
+    require_all_objects: bool = True,
+    skip_mesh_cd: bool = False,
 ):
     video_names = get_all_video_names(data_path)
     print(f"Found {len(video_names)} videos to process: {video_names}")
@@ -685,6 +800,8 @@ def benchmark_ycbinisaac_all(
                 out_dir=out_dir,
                 model_path=model_path,
                 pose_key=pose_key,
+                require_all_objects=require_all_objects,
+                skip_mesh_cd=skip_mesh_cd,
             )
             if result is not None:
                 results.append(result)
@@ -703,6 +820,7 @@ def benchmark_ycbinisaac_all(
     per_sequence_csv, summary_csv, failures_json = _save_tables(
         rows, failures, summary_dir
     )
+    per_object_csv = _save_per_object_table(rows, summary_dir)
     plot_paths = [
         _plot_sequence_metrics(rows, summary_dir),
         _plot_metric_distributions(rows, summary_dir),
@@ -732,6 +850,7 @@ def benchmark_ycbinisaac_all(
 
     print("-" * 80)
     print(f"Per-sequence table: {per_sequence_csv}")
+    print(f"Per-object table:   {per_object_csv}")
     print(f"Summary table: {summary_csv}")
     print(f"Failures log: {failures_json}")
     if len(plot_paths) > 0:
@@ -744,6 +863,7 @@ def benchmark_ycbinisaac_all(
         "results": rows,
         "failures": failures,
         "per_sequence_csv": per_sequence_csv,
+        "per_object_csv": per_object_csv,
         "summary_csv": summary_csv,
         "failures_json": failures_json,
         "plot_paths": plot_paths,
@@ -758,6 +878,8 @@ def benchmark_ycbinisaac_single(
     model_path: str,
     summary_dir: str | None = None,
     pose_key: str = "auto",
+    require_all_objects: bool = True,
+    skip_mesh_cd: bool = False,
 ):
     """
     Benchmark one YCBInIsaac sequence from saved metadata.
@@ -777,6 +899,8 @@ def benchmark_ycbinisaac_single(
             out_dir=out_dir,
             model_path=model_path,
             pose_key=pose_key,
+            require_all_objects=require_all_objects,
+            skip_mesh_cd=skip_mesh_cd,
         )
         results.append(result)
     except Exception as exc:
@@ -790,6 +914,7 @@ def benchmark_ycbinisaac_single(
     per_sequence_csv, summary_csv, failures_json = _save_tables(
         rows, failures, summary_dir
     )
+    per_object_csv = _save_per_object_table(rows, summary_dir)
     plot_paths = [
         _plot_sequence_metrics(rows, summary_dir),
         _plot_metric_distributions(rows, summary_dir),
@@ -802,21 +927,25 @@ def benchmark_ycbinisaac_single(
     print("=" * 80)
     if len(rows) == 1:
         row = rows[0]
+        mesh_cd_str = (
+            f"{row['mesh_cd_cm']:.3f}[cm]"
+            if np.isfinite(row["mesh_cd_cm"])
+            else "skipped"
+        )
         print(
             f"{row['video_name']}, "
             f"ADD-S_err: {row['add_s_err_mean']:.2f}[cm], "
             f"ADD_err: {row['add_err_mean']:.2f}[cm], "
             f"ADD-S_AUC: {row['add_s_auc']:.2f}, "
             f"ADD_AUC: {row['add_auc']:.2f}, "
-            f"mesh_CD: {row['mesh_cd_cm']:.3f}[cm]"
-            if np.isfinite(row["mesh_cd_cm"])
-            else f"{row['video_name']}, mesh_CD: skipped"
+            f"mesh_CD: {mesh_cd_str}"
         )
     else:
         print("No successful result for this sequence.")
 
     print("-" * 80)
     print(f"Per-sequence table: {per_sequence_csv}")
+    print(f"Per-object table:   {per_object_csv}")
     print(f"Summary table: {summary_csv}")
     print(f"Failures log: {failures_json}")
     if len(plot_paths) > 0:
@@ -829,6 +958,7 @@ def benchmark_ycbinisaac_single(
         "results": rows,
         "failures": failures,
         "per_sequence_csv": per_sequence_csv,
+        "per_object_csv": per_object_csv,
         "summary_csv": summary_csv,
         "failures_json": failures_json,
         "plot_paths": plot_paths,
@@ -842,6 +972,8 @@ def run_ycbinisaac_all(
     model_path: str,
     summary_dir: str | None = None,
     pose_key: str = "auto",
+    require_all_objects: bool = True,
+    skip_mesh_cd: bool = False,
 ):
     """
     Backward-compatible alias.
@@ -853,6 +985,8 @@ def run_ycbinisaac_all(
         model_path=model_path,
         summary_dir=summary_dir,
         pose_key=pose_key,
+        require_all_objects=require_all_objects,
+        skip_mesh_cd=skip_mesh_cd,
     )
 
 
@@ -892,6 +1026,19 @@ if __name__ == "__main__":
         default="auto",
         help="Pose key in metadata to use: auto, obj_pose_all, obj_pose, pose_local, pose_frontend.",
     )
+    parser.add_argument(
+        "--allow_partial_objects",
+        action="store_true",
+        help=(
+            "Allow sequences where only a subset of objects can be evaluated. "
+            "By default, the benchmark requires all objects in a sequence to be benchmarked."
+        ),
+    )
+    parser.add_argument(
+        "--skip_mesh_cd",
+        action="store_true",
+        help="Skip mesh Chamfer-distance evaluation for faster benchmarking.",
+    )
     args = parser.parse_args()
 
     benchmark_ycbinisaac_all(
@@ -901,4 +1048,6 @@ if __name__ == "__main__":
         model_path=args.model_path,
         summary_dir=args.summary_dir,
         pose_key=args.pose_key,
+        require_all_objects=not args.allow_partial_objects,
+        skip_mesh_cd=args.skip_mesh_cd,
     )

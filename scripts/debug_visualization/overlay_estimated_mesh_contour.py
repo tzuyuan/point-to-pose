@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 Overlay projected object-mesh contour on dataset images using estimated poses
-saved in a finished point-to-pose sequence.
+saved in a finished point-to-pose sequence, and export an additional video
+with projected 3D bounding boxes.
 
 Supported datasets:
   - ho3d
   - ycbineoat
-  - ycbinisaac
+  - ycbinisaac (auto-renders all objects in multi-object sequences)
 
 Example:
   python3 scripts/debug_visualization/overlay_estimated_mesh_contour.py \
@@ -491,6 +492,92 @@ def _rasterize_silhouette(
     return mask
 
 
+def _compute_bbox_corners_from_vertices(vertices_obj: np.ndarray) -> np.ndarray:
+    verts = np.asarray(vertices_obj, dtype=np.float64)
+    if verts.ndim != 2 or verts.shape[1] != 3 or verts.shape[0] == 0:
+        raise ValueError(
+            "Expected non-empty vertices array with shape (N, 3) for 3D bbox corners."
+        )
+
+    xyz_min = verts.min(axis=0)
+    xyz_max = verts.max(axis=0)
+    x0, y0, z0 = xyz_min
+    x1, y1, z1 = xyz_max
+    return np.asarray(
+        [
+            [x0, y0, z0],
+            [x1, y0, z0],
+            [x1, y1, z0],
+            [x0, y1, z0],
+            [x0, y0, z1],
+            [x1, y0, z1],
+            [x1, y1, z1],
+            [x0, y1, z1],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _draw_projected_3d_bbox(
+    image: np.ndarray,
+    bbox_corners_obj: np.ndarray,
+    T_obj_in_cam: np.ndarray,
+    K: np.ndarray,
+    color_bgr: Tuple[int, int, int],
+    thickness: int,
+) -> bool:
+    if bbox_corners_obj.shape != (8, 3):
+        return False
+
+    corners_h = np.hstack(
+        [bbox_corners_obj.astype(np.float64), np.ones((8, 1), dtype=np.float64)]
+    )
+    corners_cam = (T_obj_in_cam @ corners_h.T).T[:, :3]
+    z = corners_cam[:, 2]
+
+    proj = (K @ corners_cam.T).T
+    valid = z > 1e-6
+    uv = np.full((8, 2), np.nan, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        uv[valid] = proj[valid, :2] / proj[valid, 2:3]
+
+    edges = (
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
+    )
+    drew_any = False
+    for idx0, idx1 in edges:
+        if not valid[idx0] or not valid[idx1]:
+            continue
+        p0 = uv[idx0]
+        p1 = uv[idx1]
+        if not np.isfinite(p0).all() or not np.isfinite(p1).all():
+            continue
+
+        p0_i = tuple(np.round(np.clip(p0, -1e7, 1e7)).astype(np.int32))
+        p1_i = tuple(np.round(np.clip(p1, -1e7, 1e7)).astype(np.int32))
+        cv2.line(
+            image,
+            p0_i,
+            p1_i,
+            color=color_bgr,
+            thickness=thickness,
+            lineType=cv2.LINE_AA,
+        )
+        drew_any = True
+    return drew_any
+
+
 def _try_parse_int(value) -> Optional[int]:
     try:
         return int(str(value))
@@ -580,6 +667,50 @@ def _compose_object_pose(pose_obj: np.ndarray, init_pose: np.ndarray, mode: str)
     return pose_obj @ init_pose
 
 
+def _normalize_pose_series_length(
+    pose_series: List[Optional[np.ndarray]], n_rows: int
+) -> List[Optional[np.ndarray]]:
+    if len(pose_series) == n_rows:
+        return pose_series
+
+    out: List[Optional[np.ndarray]] = []
+    for i in range(n_rows):
+        if i < len(pose_series):
+            out.append(pose_series[i])
+        else:
+            out.append(None)
+    return out
+
+
+def _create_video_writer(
+    video_path: str,
+    frame_size: Tuple[int, int],
+    fps: float,
+) -> Tuple[Optional[cv2.VideoWriter], Optional[str]]:
+    parent = os.path.dirname(video_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    width, height = int(frame_size[0]), int(frame_size[1])
+    if width <= 0 or height <= 0:
+        return None, None
+
+    # Try common codecs in order. mp4v is broadly supported in OpenCV builds.
+    codec_candidates = ["mp4v", "avc1", "H264", "XVID", "MJPG"]
+    for codec in codec_candidates:
+        writer = cv2.VideoWriter(
+            video_path,
+            cv2.VideoWriter_fourcc(*codec),
+            float(fps),
+            (width, height),
+        )
+        if writer is not None and writer.isOpened():
+            return writer, codec
+        if writer is not None:
+            writer.release()
+    return None, None
+
+
 def run(args):
     run_dir = os.path.abspath(args.run_dir)
     video_name = args.video_name if args.video_name else os.path.basename(run_dir.rstrip("/"))
@@ -592,67 +723,146 @@ def run(args):
         raise FileNotFoundError(f"Metadata file not found: {meta_data_path}")
 
     reader = _load_reader(args.dataset, os.path.abspath(args.data_root), video_name)
-    resolved_object_idx, resolved_object_name = _resolve_object_selection(
-        dataset=args.dataset,
-        reader=reader,
-        object_idx=int(args.object_idx),
-        object_name=args.object_name,
-    )
+    render_all_ycbinisaac_objects = False
+    if args.dataset == "ycbinisaac":
+        available_names = reader.get_object_names()
+        if len(available_names) > 1 and args.object_name is None and int(args.object_idx) == 0:
+            render_all_ycbinisaac_objects = True
+            selected_objects = [(idx, name) for idx, name in enumerate(available_names)]
+        else:
+            resolved_object_idx, resolved_object_name = _resolve_object_selection(
+                dataset=args.dataset,
+                reader=reader,
+                object_idx=int(args.object_idx),
+                object_name=args.object_name,
+            )
+            selected_objects = [(resolved_object_idx, resolved_object_name)]
+    else:
+        resolved_object_idx, resolved_object_name = _resolve_object_selection(
+            dataset=args.dataset,
+            reader=reader,
+            object_idx=int(args.object_idx),
+            object_name=args.object_name,
+        )
+        selected_objects = [(resolved_object_idx, resolved_object_name)]
 
     with np.load(meta_data_path, allow_pickle=True) as npz_data:
-        pose_key, pose_series = _select_pose_key(
-            npz_data=npz_data,
-            dataset=args.dataset,
-            pose_key=args.pose_key,
-            object_idx=resolved_object_idx,
-        )
-        n_rows = len(pose_series)
-        if n_rows == 0:
+        pose_payloads = []
+        max_pose_rows = 0
+        for object_idx, object_name in selected_objects:
+            pose_key, pose_series = _select_pose_key(
+                npz_data=npz_data,
+                dataset=args.dataset,
+                pose_key=args.pose_key,
+                object_idx=object_idx,
+            )
+            pose_payloads.append(
+                {
+                    "object_idx": object_idx,
+                    "object_name": object_name,
+                    "pose_key": pose_key,
+                    "pose_series_raw": pose_series,
+                }
+            )
+            max_pose_rows = max(max_pose_rows, len(pose_series))
+
+        if "frame_id" in npz_data:
+            n_rows = int(np.asarray(npz_data["frame_id"]).reshape(-1).shape[0])
+        else:
+            n_rows = int(max_pose_rows)
+        if n_rows <= 0:
+            object_indices = [item["object_idx"] for item in pose_payloads]
             raise RuntimeError(
-                f"No pose rows found for key='{pose_key}' and object_idx={resolved_object_idx}."
+                f"No pose rows found for selected objects {object_indices}."
             )
         frame_ids = _extract_frame_ids(npz_data, n_rows)
-        init_pose_series, init_pose_key = _extract_init_pose_series(
-            npz_data=npz_data,
-            n_rows=n_rows,
-            object_idx=resolved_object_idx,
-            prefer_multi_object_key=pose_key.endswith("_all"),
-        )
+        object_states = []
+        for payload in pose_payloads:
+            object_idx = int(payload["object_idx"])
+            object_name = payload["object_name"]
+            pose_key = str(payload["pose_key"])
+            pose_series = _normalize_pose_series_length(
+                payload["pose_series_raw"], n_rows=n_rows
+            )
+            init_pose_series, init_pose_key = _extract_init_pose_series(
+                npz_data=npz_data,
+                n_rows=n_rows,
+                object_idx=object_idx,
+                prefer_multi_object_key=pose_key.endswith("_all"),
+            )
+            valid_pose_count = int(sum(p is not None for p in pose_series))
+            if valid_pose_count == 0:
+                print(
+                    f"[Warn] Skipping object_idx={object_idx} name={object_name}: "
+                    f"no valid poses in key '{pose_key}'."
+                )
+                continue
+            object_states.append(
+                {
+                    "object_idx": object_idx,
+                    "object_name": object_name,
+                    "label": (
+                        f"{object_idx}:{object_name}"
+                        if object_name is not None
+                        else str(object_idx)
+                    ),
+                    "pose_key": pose_key,
+                    "pose_series": pose_series,
+                    "init_pose_key": init_pose_key,
+                    "init_pose_series": init_pose_series,
+                    "valid_pose_count": valid_pose_count,
+                }
+            )
+
+    if len(object_states) == 0:
+        raise RuntimeError("No selected objects contain valid poses.")
 
     K = np.asarray(reader.K, dtype=np.float64).reshape(3, 3)
 
     mesh_source = "dataset" if args.use_gt_mesh else args.mesh_source
-    mesh_source_used = "explicit"
-    mesh_path = None
-    if args.mesh_path:
-        mesh_path = os.path.abspath(args.mesh_path)
-        if not os.path.exists(mesh_path):
-            raise FileNotFoundError(f"--mesh_path does not exist: {mesh_path}")
-    else:
-        if mesh_source in ("auto", "run"):
-            mesh_path = _resolve_run_mesh_path(run_dir, resolved_object_idx)
-            if mesh_path is not None:
-                mesh_source_used = "run"
+    model_root_abs = os.path.abspath(args.model_root) if args.model_root else None
+    explicit_mesh_path = os.path.abspath(args.mesh_path) if args.mesh_path else None
+    if explicit_mesh_path is not None and not os.path.exists(explicit_mesh_path):
+        raise FileNotFoundError(f"--mesh_path does not exist: {explicit_mesh_path}")
+    if explicit_mesh_path is not None and len(object_states) > 1:
+        raise ValueError(
+            "--mesh_path supports single-object overlay only. "
+            "For multi-object ycbinisaac overlays, omit --mesh_path so per-object meshes are resolved automatically."
+        )
 
-        if mesh_source == "run" and mesh_path is None:
-            raise FileNotFoundError(
-                f"Run mesh for object_idx={resolved_object_idx} not found under "
-                f"{os.path.join(run_dir, 'mesh')}"
-            )
-
+    for state in object_states:
+        object_idx = int(state["object_idx"])
+        object_name = state["object_name"]
+        mesh_source_used = "explicit"
+        mesh_path = explicit_mesh_path
         if mesh_path is None:
-            mesh_path = _resolve_dataset_mesh_path(
-                dataset=args.dataset,
-                reader=reader,
-                model_root=(os.path.abspath(args.model_root) if args.model_root else None),
-                object_idx=resolved_object_idx,
-                object_name=resolved_object_name,
-            )
-            mesh_source_used = "dataset"
+            if mesh_source in ("auto", "run"):
+                mesh_path = _resolve_run_mesh_path(run_dir, object_idx)
+                if mesh_path is not None:
+                    mesh_source_used = "run"
 
-    mesh = _load_mesh(mesh_path)
-    vertices_obj = np.asarray(mesh.vertices, dtype=np.float64)
-    faces = np.asarray(mesh.faces, dtype=np.int64)
+            if mesh_source == "run" and mesh_path is None:
+                raise FileNotFoundError(
+                    f"Run mesh for object_idx={object_idx} not found under "
+                    f"{os.path.join(run_dir, 'mesh')}"
+                )
+
+            if mesh_path is None:
+                mesh_path = _resolve_dataset_mesh_path(
+                    dataset=args.dataset,
+                    reader=reader,
+                    model_root=model_root_abs,
+                    object_idx=object_idx,
+                    object_name=object_name,
+                )
+                mesh_source_used = "dataset"
+
+        mesh = _load_mesh(mesh_path)
+        state["vertices_obj"] = np.asarray(mesh.vertices, dtype=np.float64)
+        state["faces"] = np.asarray(mesh.faces, dtype=np.int64)
+        state["bbox_corners_obj"] = _compute_bbox_corners_from_vertices(state["vertices_obj"])
+        state["mesh_path"] = mesh_path
+        state["mesh_source_used"] = mesh_source_used
 
     if args.output_dir:
         output_dir = os.path.abspath(args.output_dir)
@@ -666,32 +876,66 @@ def run(args):
         int(args.line_color[2]),
     )
     thickness = int(args.line_thickness)
+    save_contour_video = not bool(args.no_video)
+    save_bbox_video = not bool(args.no_video)
+    video_fps = float(args.video_fps)
+    if video_fps <= 0:
+        raise ValueError("--video_fps must be > 0")
+    if args.video_path:
+        video_path = os.path.abspath(args.video_path)
+    else:
+        video_path = os.path.join(output_dir, f"{video_name}_contour_overlay.mp4")
+    if args.bbox_video_path:
+        bbox_video_path = os.path.abspath(args.bbox_video_path)
+    else:
+        bbox_video_path = os.path.join(output_dir, f"{video_name}_bbox_overlay.mp4")
 
-    total_rows = len(pose_series)
+    total_rows = n_rows
     num_written = 0
+    num_contour_video_written = 0
+    num_bbox_video_written = 0
     num_skipped = 0
     num_no_contour = 0
+    num_no_bbox = 0
     num_missing_pose = 0
     num_invalid_frame_id = 0
     num_duplicate_frame = 0
+    missing_pose_by_object = {state["label"]: 0 for state in object_states}
+    no_contour_by_object = {state["label"]: 0 for state in object_states}
+    no_bbox_by_object = {state["label"]: 0 for state in object_states}
 
     frame_id_to_reader_idx = _build_frame_id_to_reader_index(reader)
     seen_frame_ids = set()
+    contour_video_writer: Optional[cv2.VideoWriter] = None
+    contour_video_codec: Optional[str] = None
+    contour_video_frame_size: Optional[Tuple[int, int]] = None
+    bbox_video_writer: Optional[cv2.VideoWriter] = None
+    bbox_video_codec: Optional[str] = None
+    bbox_video_frame_size: Optional[Tuple[int, int]] = None
 
     print(f"[Info] Dataset: {args.dataset}")
     print(f"[Info] Sequence: {video_name}")
     print(f"[Info] Metadata: {meta_data_path}")
-    if args.dataset == "ycbinisaac":
-        print(f"[Info] Object: idx={resolved_object_idx}, name={resolved_object_name}")
-    print(f"[Info] Pose key: {pose_key}")
-    print(
-        f"[Info] Init pose key: {init_pose_key if init_pose_key is not None else 'identity'}"
-    )
+    if render_all_ycbinisaac_objects:
+        print(
+            f"[Info] ycbinisaac multi-object mode: rendering all {len(object_states)} objects"
+        )
+    for state in object_states:
+        print(
+            f"[Info] Object: idx={state['object_idx']}, name={state['object_name']}, "
+            f"pose_key={state['pose_key']}, "
+            f"init_pose_key={state['init_pose_key'] if state['init_pose_key'] is not None else 'identity'}, "
+            f"mesh_source={state['mesh_source_used']}, mesh={state['mesh_path']}"
+        )
     print(f"[Info] Pose compose mode: {args.pose_compose_mode}")
-    print(f"[Info] Mesh: {mesh_path}")
-    print(f"[Info] Mesh source: {mesh_source_used}")
     print(f"[Info] Output: {output_dir}")
     print(f"[Info] Frames in reader: {len(reader)}, metadata rows: {total_rows}")
+    if save_contour_video:
+        print(f"[Info] Video output: {video_path} @ {video_fps:.3f} fps")
+    if save_bbox_video:
+        print(f"[Info] 3D bbox video output: {bbox_video_path} @ {video_fps:.3f} fps")
+    if not save_contour_video and not save_bbox_video:
+        print("[Info] Video output: disabled (--no_video)")
 
     for row_idx in range(0, total_rows, max(1, int(args.stride))):
         frame_id = int(frame_ids[row_idx])
@@ -718,48 +962,74 @@ def run(args):
             num_skipped += 1
             continue
 
-        pose_obj = pose_series[row_idx]
-        if pose_obj is None:
+        frame_bgr = _load_frame_bgr(reader, args.dataset, reader_frame_idx)
+        overlay = frame_bgr.copy()
+        bbox_overlay = frame_bgr.copy()
+        image_h, image_w = frame_bgr.shape[:2]
+        row_has_any_pose = False
+        row_has_any_contour = False
+        row_has_any_bbox = False
+
+        for state in object_states:
+            pose_obj = state["pose_series"][row_idx]
+            if pose_obj is None:
+                missing_pose_by_object[state["label"]] += 1
+                continue
+
+            row_has_any_pose = True
+            init_pose = state["init_pose_series"][row_idx]
+            T_obj_in_cam = _compose_object_pose(
+                pose_obj=pose_obj,
+                init_pose=init_pose,
+                mode=args.pose_compose_mode,
+            )
+            silhouette = _rasterize_silhouette(
+                vertices_obj=state["vertices_obj"],
+                faces=state["faces"],
+                T_obj_in_cam=T_obj_in_cam,
+                K=K,
+                image_h=image_h,
+                image_w=image_w,
+            )
+
+            contours, _ = cv2.findContours(
+                silhouette, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            if len(contours) == 0:
+                no_contour_by_object[state["label"]] += 1
+            else:
+                row_has_any_contour = True
+                cv2.drawContours(
+                    overlay,
+                    contours,
+                    -1,
+                    color=color_bgr,
+                    thickness=thickness,
+                    lineType=cv2.LINE_AA,
+                )
+
+            drew_bbox = _draw_projected_3d_bbox(
+                image=bbox_overlay,
+                bbox_corners_obj=state["bbox_corners_obj"],
+                T_obj_in_cam=T_obj_in_cam,
+                K=K,
+                color_bgr=color_bgr,
+                thickness=thickness,
+            )
+            if drew_bbox:
+                row_has_any_bbox = True
+            else:
+                no_bbox_by_object[state["label"]] += 1
+
+        if not row_has_any_pose:
             num_missing_pose += 1
             num_skipped += 1
             continue
-
         seen_frame_ids.add(frame_id)
-
-        init_pose = init_pose_series[row_idx]
-        T_obj_in_cam = _compose_object_pose(
-            pose_obj=pose_obj,
-            init_pose=init_pose,
-            mode=args.pose_compose_mode,
-        )
-
-        frame_bgr = _load_frame_bgr(reader, args.dataset, reader_frame_idx)
-        image_h, image_w = frame_bgr.shape[:2]
-        silhouette = _rasterize_silhouette(
-            vertices_obj=vertices_obj,
-            faces=faces,
-            T_obj_in_cam=T_obj_in_cam,
-            K=K,
-            image_h=image_h,
-            image_w=image_w,
-        )
-
-        contours, _ = cv2.findContours(
-            silhouette, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        if len(contours) == 0:
+        if not row_has_any_contour:
             num_no_contour += 1
-
-        overlay = frame_bgr.copy()
-        if len(contours) > 0:
-            cv2.drawContours(
-                overlay,
-                contours,
-                -1,
-                color=color_bgr,
-                thickness=thickness,
-                lineType=cv2.LINE_AA,
-            )
+        if not row_has_any_bbox:
+            num_no_bbox += 1
 
         if args.allow_duplicate_frame_ids:
             out_name = f"frame_{frame_id:06d}_row_{row_idx:06d}.png"
@@ -772,25 +1042,116 @@ def run(args):
         else:
             num_skipped += 1
 
+        if save_contour_video:
+            if contour_video_writer is None:
+                h, w = overlay.shape[:2]
+                contour_video_frame_size = (int(w), int(h))
+                contour_video_writer, contour_video_codec = _create_video_writer(
+                    video_path=video_path,
+                    frame_size=contour_video_frame_size,
+                    fps=video_fps,
+                )
+                if contour_video_writer is None:
+                    print(
+                        f"[Warn] Failed to initialize video writer for {video_path}. "
+                        "Skipping mp4 export."
+                    )
+                    save_contour_video = False
+                else:
+                    print(f"[Info] Video codec: {contour_video_codec}")
+
+            if save_contour_video and contour_video_writer is not None:
+                if (
+                    contour_video_frame_size is not None
+                    and (overlay.shape[1], overlay.shape[0]) != contour_video_frame_size
+                ):
+                    overlay_to_write = cv2.resize(
+                        overlay,
+                        contour_video_frame_size,
+                        interpolation=cv2.INTER_LINEAR,
+                    )
+                else:
+                    overlay_to_write = overlay
+                contour_video_writer.write(overlay_to_write)
+                num_contour_video_written += 1
+
+        if save_bbox_video:
+            if bbox_video_writer is None:
+                h, w = bbox_overlay.shape[:2]
+                bbox_video_frame_size = (int(w), int(h))
+                bbox_video_writer, bbox_video_codec = _create_video_writer(
+                    video_path=bbox_video_path,
+                    frame_size=bbox_video_frame_size,
+                    fps=video_fps,
+                )
+                if bbox_video_writer is None:
+                    print(
+                        f"[Warn] Failed to initialize 3D bbox video writer for {bbox_video_path}. "
+                        "Skipping 3D bbox mp4 export."
+                    )
+                    save_bbox_video = False
+                else:
+                    print(f"[Info] 3D bbox video codec: {bbox_video_codec}")
+
+            if save_bbox_video and bbox_video_writer is not None:
+                if (
+                    bbox_video_frame_size is not None
+                    and (bbox_overlay.shape[1], bbox_overlay.shape[0]) != bbox_video_frame_size
+                ):
+                    bbox_to_write = cv2.resize(
+                        bbox_overlay,
+                        bbox_video_frame_size,
+                        interpolation=cv2.INTER_LINEAR,
+                    )
+                else:
+                    bbox_to_write = bbox_overlay
+                bbox_video_writer.write(bbox_to_write)
+                num_bbox_video_written += 1
+
+    if contour_video_writer is not None:
+        contour_video_writer.release()
+    if bbox_video_writer is not None:
+        bbox_video_writer.release()
+
     print(
         "[Done] wrote={} skipped={} no_contour={} missing_pose={} "
-        "invalid_frame_id={} duplicate_frame={} output_dir={}".format(
+        "no_bbox={} invalid_frame_id={} duplicate_frame={} output_dir={} contour_video_frames={} "
+        "bbox_video_frames={}".format(
             num_written,
             num_skipped,
             num_no_contour,
             num_missing_pose,
+            num_no_bbox,
             num_invalid_frame_id,
             num_duplicate_frame,
             output_dir,
+            num_contour_video_written,
+            num_bbox_video_written,
         )
     )
+    if save_contour_video and num_contour_video_written > 0:
+        print(f"[Info] Saved video: {video_path}")
+    elif not args.no_video:
+        print("[Warn] Contour video was requested but no frames were written to mp4.")
+
+    if save_bbox_video and num_bbox_video_written > 0:
+        print(f"[Info] Saved 3D bbox video: {bbox_video_path}")
+    elif not args.no_video:
+        print("[Warn] 3D bbox video was requested but no frames were written to mp4.")
+    for state in object_states:
+        label = state["label"]
+        print(
+            f"[Info] Object stats [{label}]: missing_pose_rows={missing_pose_by_object[label]}, "
+            f"no_contour_rows={no_contour_by_object[label]}, "
+            f"no_bbox_rows={no_bbox_by_object[label]}"
+        )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Load a finished sequence (meta_data + mesh) and overlay mesh contour on "
-            "dataset images using estimated poses."
+            "dataset images using estimated poses. Also exports a 3D bbox visualization mp4."
         )
     )
     parser.add_argument(
@@ -838,7 +1199,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Explicit mesh path. If omitted, use run mesh pred_mesh_obj_<object_idx>* "
-            "then dataset mesh fallback."
+            "then dataset mesh fallback. "
+            "Only supported for single-object overlay."
         ),
     )
     parser.add_argument(
@@ -866,13 +1228,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--object_idx",
         type=int,
         default=0,
-        help="Object index for run mesh and ycbinisaac object selection.",
+        help=(
+            "Object index for run mesh and ycbinisaac object selection. "
+            "For ycbinisaac multi-object sequences, default object_idx=0 with no "
+            "--object_name renders all sequence objects."
+        ),
     )
     parser.add_argument(
         "--object_name",
         type=str,
         default=None,
-        help="ycbinisaac object folder name override (optional).",
+        help="ycbinisaac object folder name override (optional, forces single-object mode).",
     )
     parser.add_argument(
         "--output_dir",
@@ -908,9 +1274,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=[0, 255, 0],
         metavar=("B", "G", "R"),
-        help="Contour color in BGR.",
+        help="Contour/3D-bbox color in BGR.",
     )
     parser.add_argument("--line_thickness", type=int, default=2)
+    parser.add_argument(
+        "--no_video",
+        action="store_true",
+        help="Disable mp4 export (contour and 3D bbox videos).",
+    )
+    parser.add_argument(
+        "--video_fps",
+        type=float,
+        default=30.0,
+        help="FPS for output mp4 video.",
+    )
+    parser.add_argument(
+        "--video_path",
+        type=str,
+        default=None,
+        help="Explicit output mp4 path. Default: <output_dir>/<video_name>_contour_overlay.mp4",
+    )
+    parser.add_argument(
+        "--bbox_video_path",
+        type=str,
+        default=None,
+        help="Explicit output mp4 path for 3D bbox visualization. Default: <output_dir>/<video_name>_bbox_overlay.mp4",
+    )
     return parser
 
 

@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -30,7 +31,17 @@ def run_ycbinisaac_all(
     print("-" * 80)
 
     run_failures = []
+    skipped_sequences = []
     for idx, video_name in enumerate(video_names, 1):
+        seq_out_dir = os.path.join(out_dir, video_name)
+        if os.path.isdir(seq_out_dir):
+            print(
+                f"\n[{idx}/{len(video_names)}] Skipping sequence {video_name}: "
+                f"output folder already exists at {seq_out_dir}"
+            )
+            skipped_sequences.append(video_name)
+            continue
+
         print(f"\n[{idx}/{len(video_names)}] Running sequence: {video_name}")
         try:
             run_ycbinisaac_single(
@@ -52,6 +63,10 @@ def run_ycbinisaac_all(
             "Proceeding to benchmark stage."
         )
         print("=" * 80)
+    if len(skipped_sequences) > 0:
+        print(
+            f"Skipped {len(skipped_sequences)} sequence(s) because output folders already exist."
+        )
 
     benchmark_result = benchmark_ycbinisaac_all(
         data_path=data_path,
@@ -62,6 +77,7 @@ def run_ycbinisaac_all(
         pose_key=pose_key,
     )
     benchmark_result["run_failures"] = run_failures
+    benchmark_result["skipped_sequences"] = skipped_sequences
     return benchmark_result
 
 

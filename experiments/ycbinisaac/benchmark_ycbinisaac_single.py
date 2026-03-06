@@ -51,6 +51,11 @@ if __name__ == "__main__":
         default="auto",
         help="Pose key in metadata to use: auto, obj_pose_all, obj_pose, pose_local, pose_frontend.",
     )
+    parser.add_argument(
+        "--skip_mesh_cd",
+        action="store_true",
+        help="Skip mesh Chamfer-distance evaluation for faster benchmarking.",
+    )
     args = parser.parse_args()
 
     benchmark_ycbinisaac_single(
@@ -61,4 +66,5 @@ if __name__ == "__main__":
         model_path=args.model_path,
         summary_dir=args.summary_dir,
         pose_key=args.pose_key,
+        skip_mesh_cd=args.skip_mesh_cd,
     )
