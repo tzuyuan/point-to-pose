@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RESULTS_ROOT="${1:-/home/justin/results/eccv_point2pose/final_results/ycb_multi_track_final}"
-DATA_ROOT="${2:-/home/justin/data/YCBMultiTrack_new}"
+RESULTS_ROOT="${1:-/home/justin/results/eccv_point2pose/final_results/ycbineoat_all_final}"
+DATA_ROOT="${2:-/home/justin/data/YCBInEOAT}"
 MODEL_ROOT="${3:-/home/justin/data/HO3D_V3/models}"
 EXTRA_ARGS=("${@:4}")
 
@@ -21,13 +21,13 @@ if [[ ! -f "${RUN_ALL_SCRIPT}" ]]; then
 fi
 
 python3 "${RUN_ALL_SCRIPT}" \
-    --dataset ycbinisaac \
+    --dataset ycbineoat \
     --run_root "${RESULTS_ROOT}" \
     --data_root "${DATA_ROOT}" \
     --model_root "${MODEL_ROOT}" \
     --mesh_source dataset \
     --show_axis \
     --axis_scale 0.08 \
-    --axis_thickness 4 \
-    --line_thickness 4 \
+    --axis_thickness 5 \
+    --line_thickness 5 \
     "${EXTRA_ARGS[@]}"

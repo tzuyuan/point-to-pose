@@ -23,8 +23,8 @@ pipeline:
     max_rel_rotation_deg: 1000
     max_rel_translation: 3
     pose_jump_guard_enable: true
-    pose_jump_guard_trans_thres: 0.1
-    pose_jump_guard_rot_deg_thres: 30.0
+    pose_jump_guard_trans_thres: 0.03
+    pose_jump_guard_rot_deg_thres: 15.0
     pose_jump_guard_min_inliers: 6
     pose_jump_guard_min_inlier_ratio: 0.05
     pose_jump_guard_single_cluster_min_inliers: 8
@@ -110,8 +110,8 @@ reconstructor:
     sdf_use_gpu: true
     sdf_backend: python_tsdf
     sdf_voxel_size: 0.005
-    sdf_bounds_padding: 0.05
-    sdf_max_voxels: 20000
+    sdf_bounds_padding: 0.2
+    sdf_max_voxels: 20000000
     sdf_max_extent_m: 1.0
     sdf_min_points: 300
     sdf_filter_max_radius: 0.25
@@ -148,7 +148,7 @@ register:
 
     ransac_iters: 100
     sample_size: 4
-    inlier_thres: 0.004 #0.004
+    inlier_thres: 0.005 #0.004
     min_inliers: 5
     max_clusters: 10
     use_uncertainty: true
@@ -322,7 +322,7 @@ tracker:
 sampler: 
   type: super_point_balanced
   params:
-    num_points: 30
+    num_points: 25
     density_per_kpx: -1
     fps_oversample_factor: 2
 
@@ -340,8 +340,8 @@ sampler:
 
     super_point_max_num_keypoints: 512
 
-    score_weight: 0.3
-    separation_penalty_weight: 0.5
+    score_weight: 0.1
+    separation_penalty_weight: 0.8
     min_separation_px: 5
 
     sample_filter_enable: true
@@ -373,7 +373,7 @@ criterion:
 
     # uncertainty criterion
     uncer_thres: 0.4
-    min_num_pts: 10
+    min_num_pts: 15
 
     # rotation threshold and min num criterion
     # if it's smaller than this it will not trigger sampling
@@ -383,7 +383,7 @@ criterion:
     discretization_angle: 60
 
     # rotation threshold criterion
-    max_angle_deg: 15
+    max_angle_deg: 10
 
     # mask area criterion
     fit_mode: convex

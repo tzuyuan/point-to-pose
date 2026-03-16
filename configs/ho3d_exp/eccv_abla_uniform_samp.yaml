@@ -6,7 +6,7 @@ pipeline:
     max_num_obj: 1
     estimate_init_pose: false
 
-    use_segmenter: false
+    use_segmenter: true
 
     # depth related
     fill_missing_depth: true
@@ -20,14 +20,14 @@ pipeline:
     device: cuda
     depth_encoder: vitl
 
-    max_rel_rotation_deg: 1000
-    max_rel_translation: 3
+    max_rel_rotation_deg: 15
+    max_rel_translation: 0.03
     pose_jump_guard_enable: true
-    pose_jump_guard_trans_thres: 0.1
-    pose_jump_guard_rot_deg_thres: 30.0
-    pose_jump_guard_min_inliers: 6
-    pose_jump_guard_min_inlier_ratio: 0.05
-    pose_jump_guard_single_cluster_min_inliers: 8
+    pose_jump_guard_trans_thres: 0.08
+    pose_jump_guard_rot_deg_thres: 25.0
+    pose_jump_guard_min_inliers: 10
+    pose_jump_guard_min_inlier_ratio: 0.15
+    pose_jump_guard_single_cluster_min_inliers: 12
 
     kf_gating: false
     anchor_rot_deg: 15.0
@@ -58,15 +58,15 @@ pipeline:
     tentative_fallback_uncer_scale: 1.5
 
     # pending promotion geometry consistency
-    pending_obs_min_count: 3
+    pending_obs_min_count: 4
     pending_obs_max_keep: 8
     pending_obj_spread_thres: 0.008          # meters
-    pending_use_view_diversity: false
+    pending_use_view_diversity: true
     pending_min_view_angle_deg: 5.0
     pending_kf_min_promoted_ratio: 0.3
     pending_kf_min_promoted_count: 8
     pending_kf_ttl: 30
-    pending_kf_ttl_on_growth_frames: false
+    pending_kf_ttl_on_growth_frames: true
     pending_kf_require_reg_quality: true
     pending_kf_require_pose_stable: true
     pending_kf_sdf_gate: false
@@ -77,9 +77,11 @@ pipeline:
     pending_sdf_gate_thres: 0.02
     pending_sdf_gate_percentile: 100.0
     pending_sdf_min_support: 1.0
+    pending_use_geom_check: true
+    pending_reset_on_bad: true
 
     # newly promoted point warmup trust
-    promoted_warmup_frames: 0
+    promoted_warmup_frames: 4
     promoted_init_uncer: 0.2
     promoted_min_uncer: 0.1
     promoted_spread_to_uncer: 0.00
@@ -110,8 +112,8 @@ reconstructor:
     sdf_use_gpu: true
     sdf_backend: python_tsdf
     sdf_voxel_size: 0.005
-    sdf_bounds_padding: 0.05
-    sdf_max_voxels: 20000
+    sdf_bounds_padding: 0.2
+    sdf_max_voxels: 20000000
     sdf_max_extent_m: 1.0
     sdf_min_points: 300
     sdf_filter_max_radius: 0.25
@@ -148,7 +150,7 @@ register:
 
     ransac_iters: 100
     sample_size: 4
-    inlier_thres: 0.004 #0.004
+    inlier_thres: 0.006 #0.004
     min_inliers: 5
     max_clusters: 10
     use_uncertainty: true
@@ -199,8 +201,8 @@ register:
 
     # front end
     remove_outside_mask: true
-    uncer_thres: 0.4
-    residual_thres: 0.01
+    uncer_thres: 0.3
+    residual_thres: 0.007
 
 # register:
 #   type: svd_residual_outlier
@@ -320,7 +322,7 @@ tracker:
 #     debug: false
 
 sampler: 
-  type: super_point_balanced
+  type: uniform_fps
   params:
     num_points: 30
     density_per_kpx: -1
@@ -339,10 +341,6 @@ sampler:
     crop_pad_px: 0
 
     super_point_max_num_keypoints: 512
-
-    score_weight: 0.3
-    separation_penalty_weight: 0.5
-    min_separation_px: 5
 
     sample_filter_enable: true
     sample_require_depth_valid: true
@@ -372,8 +370,8 @@ criterion:
     residual_thres: 0.02
 
     # uncertainty criterion
-    uncer_thres: 0.4
-    min_num_pts: 10
+    uncer_thres: 0.3
+    min_num_pts: 20
 
     # rotation threshold and min num criterion
     # if it's smaller than this it will not trigger sampling
@@ -383,7 +381,7 @@ criterion:
     discretization_angle: 60
 
     # rotation threshold criterion
-    max_angle_deg: 15
+    max_angle_deg: 10
 
     # mask area criterion
     fit_mode: convex
@@ -414,7 +412,7 @@ global_optimizer:
     relative_error_tol: 1e-5
     absolute_error_tol: 1e-5
     prior_noise_param: [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000]
-    uncertainty_thres: 0.4
+    uncertainty_thres: 0.3
     uncertainty_min: 1e-2
     use_between_factor: true
     landmark_sigma_scale_by: residual

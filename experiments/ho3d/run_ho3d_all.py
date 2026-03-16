@@ -350,8 +350,12 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
         _cleanup_cuda_memory()
 
 
-def run_ho3d_all(data_path: str, out_dir: str, config_path: str):
+def run_ho3d_all(
+    data_path: str, out_dir: str, config_path: str, rerun_existing: bool = True
+):
     """Process all HO3D videos and generate a summary."""
+    os.makedirs(out_dir, exist_ok=True)
+
     # Get all video names
     video_names = get_all_video_names(data_path)
     print(f"Found {len(video_names)} videos to process: {video_names}")
@@ -359,7 +363,17 @@ def run_ho3d_all(data_path: str, out_dir: str, config_path: str):
 
     # Process each video
     results = []
+    skipped_count = 0
     for idx, video_name in enumerate(video_names, 1):
+        video_out_dir = os.path.join(out_dir, video_name)
+        if os.path.isdir(video_out_dir) and not rerun_existing:
+            print(
+                f"\n[{idx}/{len(video_names)}] Skipping video: {video_name} "
+                f"(existing output found at {video_out_dir})"
+            )
+            skipped_count += 1
+            continue
+
         print(f"\n[{idx}/{len(video_names)}] Processing video: {video_name}")
         try:
             result = run_ho3d_single(data_path, video_name, out_dir, config_path)
@@ -381,28 +395,25 @@ def run_ho3d_all(data_path: str, out_dir: str, config_path: str):
             _cleanup_cuda_memory()
             continue
 
-    # Print summary
-    print("\n" + "=" * 80)
-    print("SUMMARY OF RESULTS")
-    print("=" * 80)
+    summary_lines = ["", "=" * 80, "SUMMARY OF RESULTS", "=" * 80]
+    summary_lines.append(f"Processed videos: {len(results)}")
+    summary_lines.append(f"Skipped videos: {skipped_count}")
 
     if len(results) == 0:
-        print("No results to display.")
-        return
+        summary_lines.append("No results to display.")
+    else:
+        # Sort results by video name for consistent output
+        results.sort(key=lambda x: x["video_name"])
 
-    # Sort results by video name for consistent output
-    results.sort(key=lambda x: x["video_name"])
+        for result in results:
+            summary_lines.append(
+                f"{result['video_name']}, ADD-S_err: {result['add_s_err_mean']:.2f}[cm], "
+                f"ADD_errs: {result['add_err_mean']:.2f}[cm], "
+                f"ADD-S_AUC: {result['add_s_auc']:.2f}, ADD_AUC: {result['add_auc']:.2f}, "
+                f"mesh_CD: {result['mesh_cd_cm']:.3f}[cm]"
+            )
 
-    for result in results:
-        print(
-            f"{result['video_name']}, ADD-S_err: {result['add_s_err_mean']:.2f}[cm], "
-            f"ADD_errs: {result['add_err_mean']:.2f}[cm], "
-            f"ADD-S_AUC: {result['add_s_auc']:.2f}, ADD_AUC: {result['add_auc']:.2f}, "
-            f"mesh_CD: {result['mesh_cd_cm']:.3f}[cm]"
-        )
-
-    # Compute averages
-    if len(results) > 0:
+        # Compute averages
         avg_add_s_err = np.mean([r["add_s_err_mean"] for r in results])
         avg_add_err = np.mean([r["add_err_mean"] for r in results])
         avg_add_s_auc = np.mean([r["add_s_auc"] for r in results])
@@ -410,14 +421,22 @@ def run_ho3d_all(data_path: str, out_dir: str, config_path: str):
         valid_mesh = [r["mesh_cd_cm"] for r in results if np.isfinite(r["mesh_cd_cm"])]
         avg_mesh_cd = float(np.mean(valid_mesh)) if len(valid_mesh) > 0 else np.inf
 
-        print("-" * 80)
-        print(
+        summary_lines.append("-" * 80)
+        summary_lines.append(
             f"Average, ADD-S_err: {avg_add_s_err:.2f}[cm], "
             f"ADD_errs: {avg_add_err:.2f}[cm], "
             f"ADD-S_AUC: {avg_add_s_auc:.2f}, ADD_AUC: {avg_add_auc:.2f}, "
             f"mesh_CD: {avg_mesh_cd:.3f}[cm]"
         )
-        print("=" * 80)
+    summary_lines.append("=" * 80)
+
+    for line in summary_lines:
+        print(line)
+
+    summary_path = os.path.join(out_dir, "summary_results.txt")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(summary_lines) + "\n")
+    print(f"Saved summary to: {summary_path}")
 
 
 if __name__ == "__main__":
@@ -434,7 +453,25 @@ if __name__ == "__main__":
         type=str,
         default="/home/justin/code/point-to-pose/configs/ho3d/ho3d_single.yaml",
     )
+    parser.add_argument(
+        "--rerun_existing",
+        dest="rerun_existing",
+        action="store_true",
+        help="Rerun a sequence even if its output directory already exists.",
+    )
+    parser.add_argument(
+        "--skip_existing",
+        dest="rerun_existing",
+        action="store_false",
+        help="Skip a sequence if its output directory already exists.",
+    )
+    parser.set_defaults(rerun_existing=True)
 
     args = parser.parse_args()
 
-    run_ho3d_all(args.data_path, args.out_dir, args.config_path)
+    run_ho3d_all(
+        args.data_path,
+        args.out_dir,
+        args.config_path,
+        rerun_existing=bool(args.rerun_existing),
+    )

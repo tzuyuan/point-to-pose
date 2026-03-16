@@ -578,6 +578,61 @@ def _draw_projected_3d_bbox(
     return drew_any
 
 
+def _draw_projected_xyz_axis(
+    image: np.ndarray,
+    T_obj_in_cam: np.ndarray,
+    K: np.ndarray,
+    axis_scale: float,
+    thickness: int,
+) -> bool:
+    if axis_scale <= 0:
+        return False
+
+    axis_points_obj = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [axis_scale, 0.0, 0.0],  # +X
+            [0.0, axis_scale, 0.0],  # +Y
+            [0.0, 0.0, axis_scale],  # +Z
+        ],
+        dtype=np.float64,
+    )
+    points_h = np.hstack([axis_points_obj, np.ones((4, 1), dtype=np.float64)])
+    points_cam = (T_obj_in_cam @ points_h.T).T[:, :3]
+    z = points_cam[:, 2]
+    proj = (K @ points_cam.T).T
+
+    valid = z > 1e-6
+    uv = np.full((4, 2), np.nan, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        uv[valid] = proj[valid, :2] / proj[valid, 2:3]
+
+    if not valid[0] or not np.isfinite(uv[0]).all():
+        return False
+
+    origin = tuple(np.round(np.clip(uv[0], -1e7, 1e7)).astype(np.int32))
+    axis_colors_bgr = (
+        (0, 0, 255),  # X axis: red
+        (0, 255, 0),  # Y axis: green
+        (255, 0, 0),  # Z axis: blue
+    )
+    drew_any = False
+    for axis_idx, color_bgr in enumerate(axis_colors_bgr, start=1):
+        if not valid[axis_idx] or not np.isfinite(uv[axis_idx]).all():
+            continue
+        end_pt = tuple(np.round(np.clip(uv[axis_idx], -1e7, 1e7)).astype(np.int32))
+        cv2.line(
+            image,
+            origin,
+            end_pt,
+            color=color_bgr,
+            thickness=thickness,
+            lineType=cv2.LINE_AA,
+        )
+        drew_any = True
+    return drew_any
+
+
 def _try_parse_int(value) -> Optional[int]:
     try:
         return int(str(value))
@@ -711,6 +766,74 @@ def _create_video_writer(
     return None, None
 
 
+def _lookup_gt_pose(
+    reader,
+    dataset: str,
+    frame_id: int,
+    reader_frame_idx: int,
+    object_name: Optional[str],
+    strict_frame_id_match: bool = False,
+) -> Optional[np.ndarray]:
+    if strict_frame_id_match:
+        if dataset == "ycbinisaac":
+            if object_name is None:
+                return None
+            id_strs = getattr(reader, "id_strs", None)
+            if id_strs is None or reader_frame_idx < 0 or reader_frame_idx >= len(id_strs):
+                return None
+            target_id = str(id_strs[reader_frame_idx])
+            pose_by_id = getattr(reader, "gt_pose_file_by_id_by_object", {}).get(
+                object_name, {}
+            )
+            pose_path = pose_by_id.get(target_id, None)
+            if pose_path is None or not os.path.exists(pose_path):
+                return None
+            try:
+                return _to_pose_matrix(np.loadtxt(pose_path).reshape(4, 4))
+            except Exception:
+                return None
+
+        if dataset == "ycbineoat":
+            id_strs = getattr(reader, "id_strs", None)
+            if id_strs is None or reader_frame_idx < 0 or reader_frame_idx >= len(id_strs):
+                return None
+            target_id = str(id_strs[reader_frame_idx])
+            if not hasattr(reader, "_gt_pose_file_by_id"):
+                pose_files = getattr(reader, "gt_pose_files", [])
+                pose_map = {}
+                for p in pose_files:
+                    stem = os.path.splitext(os.path.basename(str(p)))[0]
+                    pose_map[stem] = p
+                reader._gt_pose_file_by_id = pose_map
+            pose_path = reader._gt_pose_file_by_id.get(target_id, None)
+            if pose_path is None or not os.path.exists(pose_path):
+                return None
+            try:
+                return _to_pose_matrix(np.loadtxt(pose_path).reshape(4, 4))
+            except Exception:
+                return None
+
+        if dataset == "ho3d":
+            id_strs = getattr(reader, "id_strs", None)
+            if id_strs is not None and 0 <= reader_frame_idx < len(id_strs):
+                fid = _try_parse_int(id_strs[reader_frame_idx])
+                if fid is not None and fid != int(frame_id):
+                    return None
+            try:
+                return _to_pose_matrix(reader.get_gt_pose(reader_frame_idx))
+            except Exception:
+                return None
+
+    try:
+        if dataset == "ycbinisaac":
+            pose = reader.get_gt_pose(reader_frame_idx, obj_name=object_name)
+        else:
+            pose = reader.get_gt_pose(reader_frame_idx)
+    except Exception:
+        return None
+    return _to_pose_matrix(pose)
+
+
 def run(args):
     run_dir = os.path.abspath(args.run_dir)
     video_name = args.video_name if args.video_name else os.path.basename(run_dir.rstrip("/"))
@@ -747,56 +870,66 @@ def run(args):
         selected_objects = [(resolved_object_idx, resolved_object_name)]
 
     with np.load(meta_data_path, allow_pickle=True) as npz_data:
-        pose_payloads = []
-        max_pose_rows = 0
-        for object_idx, object_name in selected_objects:
-            pose_key, pose_series = _select_pose_key(
-                npz_data=npz_data,
-                dataset=args.dataset,
-                pose_key=args.pose_key,
-                object_idx=object_idx,
-            )
-            pose_payloads.append(
-                {
-                    "object_idx": object_idx,
-                    "object_name": object_name,
-                    "pose_key": pose_key,
-                    "pose_series_raw": pose_series,
-                }
-            )
-            max_pose_rows = max(max_pose_rows, len(pose_series))
-
         if "frame_id" in npz_data:
             n_rows = int(np.asarray(npz_data["frame_id"]).reshape(-1).shape[0])
+        elif args.gt_pose_only:
+            n_rows = int(len(reader))
         else:
-            n_rows = int(max_pose_rows)
-        if n_rows <= 0:
-            object_indices = [item["object_idx"] for item in pose_payloads]
-            raise RuntimeError(
-                f"No pose rows found for selected objects {object_indices}."
-            )
-        frame_ids = _extract_frame_ids(npz_data, n_rows)
-        object_states = []
-        for payload in pose_payloads:
-            object_idx = int(payload["object_idx"])
-            object_name = payload["object_name"]
-            pose_key = str(payload["pose_key"])
-            pose_series = _normalize_pose_series_length(
-                payload["pose_series_raw"], n_rows=n_rows
-            )
-            init_pose_series, init_pose_key = _extract_init_pose_series(
-                npz_data=npz_data,
-                n_rows=n_rows,
-                object_idx=object_idx,
-                prefer_multi_object_key=pose_key.endswith("_all"),
-            )
-            valid_pose_count = int(sum(p is not None for p in pose_series))
-            if valid_pose_count == 0:
-                print(
-                    f"[Warn] Skipping object_idx={object_idx} name={object_name}: "
-                    f"no valid poses in key '{pose_key}'."
+            # Need estimated pose series to infer row count when frame_id is missing.
+            max_pose_rows = 0
+            for object_idx, _ in selected_objects:
+                _, pose_series = _select_pose_key(
+                    npz_data=npz_data,
+                    dataset=args.dataset,
+                    pose_key=args.pose_key,
+                    object_idx=object_idx,
                 )
-                continue
+                max_pose_rows = max(max_pose_rows, len(pose_series))
+            n_rows = int(max_pose_rows)
+
+        if n_rows <= 0:
+            object_indices = [item[0] for item in selected_objects]
+            raise RuntimeError(
+                f"No usable rows found for selected objects {object_indices}."
+            )
+
+        if "frame_id" in npz_data:
+            frame_ids = _extract_frame_ids(npz_data, n_rows)
+        else:
+            frame_ids = np.arange(n_rows, dtype=int)
+
+        object_states = []
+        for object_idx, object_name in selected_objects:
+            if args.gt_pose_only:
+                pose_key = "gt_pose"
+                pose_series = [None for _ in range(n_rows)]
+                init_pose_series = [np.eye(4, dtype=float) for _ in range(n_rows)]
+                init_pose_key = None
+                valid_pose_count = n_rows
+            else:
+                pose_key, pose_series_raw = _select_pose_key(
+                    npz_data=npz_data,
+                    dataset=args.dataset,
+                    pose_key=args.pose_key,
+                    object_idx=object_idx,
+                )
+                pose_series = _normalize_pose_series_length(
+                    pose_series_raw, n_rows=n_rows
+                )
+                init_pose_series, init_pose_key = _extract_init_pose_series(
+                    npz_data=npz_data,
+                    n_rows=n_rows,
+                    object_idx=object_idx,
+                    prefer_multi_object_key=pose_key.endswith("_all"),
+                )
+                valid_pose_count = int(sum(p is not None for p in pose_series))
+                if valid_pose_count == 0:
+                    print(
+                        f"[Warn] Skipping object_idx={object_idx} name={object_name}: "
+                        f"no valid poses in key '{pose_key}'."
+                    )
+                    continue
+
             object_states.append(
                 {
                     "object_idx": object_idx,
@@ -881,6 +1014,12 @@ def run(args):
     video_fps = float(args.video_fps)
     if video_fps <= 0:
         raise ValueError("--video_fps must be > 0")
+    axis_scale = float(args.axis_scale)
+    if axis_scale <= 0:
+        raise ValueError("--axis_scale must be > 0")
+    axis_thickness = int(args.axis_thickness)
+    if axis_thickness <= 0:
+        raise ValueError("--axis_thickness must be > 0")
     if args.video_path:
         video_path = os.path.abspath(args.video_path)
     else:
@@ -916,6 +1055,8 @@ def run(args):
     print(f"[Info] Dataset: {args.dataset}")
     print(f"[Info] Sequence: {video_name}")
     print(f"[Info] Metadata: {meta_data_path}")
+    if args.gt_pose_only and args.strict_gt_frame_id_match:
+        print("[Info] GT frame-ID mode: strict (no index fallback)")
     if render_all_ycbinisaac_objects:
         print(
             f"[Info] ycbinisaac multi-object mode: rendering all {len(object_states)} objects"
@@ -927,9 +1068,18 @@ def run(args):
             f"init_pose_key={state['init_pose_key'] if state['init_pose_key'] is not None else 'identity'}, "
             f"mesh_source={state['mesh_source_used']}, mesh={state['mesh_path']}"
         )
-    print(f"[Info] Pose compose mode: {args.pose_compose_mode}")
+    if args.gt_pose_only:
+        print("[Info] Pose source: dataset GT pose (--gt_pose_only)")
+    else:
+        print(f"[Info] Pose source: metadata key + compose mode ({args.pose_compose_mode})")
     print(f"[Info] Output: {output_dir}")
     print(f"[Info] Frames in reader: {len(reader)}, metadata rows: {total_rows}")
+    if args.show_axis:
+        print(
+            f"[Info] Axis overlay: enabled (scale={axis_scale}, thickness={axis_thickness})"
+        )
+    else:
+        print("[Info] Axis overlay: disabled")
     if save_contour_video:
         print(f"[Info] Video output: {video_path} @ {video_fps:.3f} fps")
     if save_bbox_video:
@@ -971,18 +1121,31 @@ def run(args):
         row_has_any_bbox = False
 
         for state in object_states:
-            pose_obj = state["pose_series"][row_idx]
-            if pose_obj is None:
-                missing_pose_by_object[state["label"]] += 1
-                continue
+            if args.gt_pose_only:
+                T_obj_in_cam = _lookup_gt_pose(
+                    reader=reader,
+                    dataset=args.dataset,
+                    frame_id=frame_id,
+                    reader_frame_idx=reader_frame_idx,
+                    object_name=state["object_name"],
+                    strict_frame_id_match=bool(args.strict_gt_frame_id_match),
+                )
+                if T_obj_in_cam is None:
+                    missing_pose_by_object[state["label"]] += 1
+                    continue
+            else:
+                pose_obj = state["pose_series"][row_idx]
+                if pose_obj is None:
+                    missing_pose_by_object[state["label"]] += 1
+                    continue
+                init_pose = state["init_pose_series"][row_idx]
+                T_obj_in_cam = _compose_object_pose(
+                    pose_obj=pose_obj,
+                    init_pose=init_pose,
+                    mode=args.pose_compose_mode,
+                )
 
             row_has_any_pose = True
-            init_pose = state["init_pose_series"][row_idx]
-            T_obj_in_cam = _compose_object_pose(
-                pose_obj=pose_obj,
-                init_pose=init_pose,
-                mode=args.pose_compose_mode,
-            )
             silhouette = _rasterize_silhouette(
                 vertices_obj=state["vertices_obj"],
                 faces=state["faces"],
@@ -1020,6 +1183,22 @@ def run(args):
                 row_has_any_bbox = True
             else:
                 no_bbox_by_object[state["label"]] += 1
+
+            if args.show_axis:
+                _draw_projected_xyz_axis(
+                    image=overlay,
+                    T_obj_in_cam=T_obj_in_cam,
+                    K=K,
+                    axis_scale=axis_scale,
+                    thickness=axis_thickness,
+                )
+                _draw_projected_xyz_axis(
+                    image=bbox_overlay,
+                    T_obj_in_cam=T_obj_in_cam,
+                    K=K,
+                    axis_scale=axis_scale,
+                    thickness=axis_thickness,
+                )
 
         if not row_has_any_pose:
             num_missing_pose += 1
@@ -1194,6 +1373,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--gt_pose_only",
+        action="store_true",
+        help=(
+            "Use dataset GT pose only for overlay (ignores metadata estimated pose "
+            "selection/composition)."
+        ),
+    )
+    parser.add_argument(
+        "--strict_gt_frame_id_match",
+        action="store_true",
+        help=(
+            "When used with --gt_pose_only, require exact frame-id match for GT pose files "
+            "(skip frame on mismatch; no index fallback)."
+        ),
+    )
+    parser.add_argument(
         "--mesh_path",
         type=str,
         default=None,
@@ -1277,6 +1472,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Contour/3D-bbox color in BGR.",
     )
     parser.add_argument("--line_thickness", type=int, default=2)
+    parser.add_argument(
+        "--show_axis",
+        action="store_true",
+        help="Overlay projected XYZ object axis on both contour and 3D-bbox outputs.",
+    )
+    parser.add_argument(
+        "--axis_scale",
+        type=float,
+        default=0.08,
+        help="Length of each axis in object coordinates (same unit as mesh).",
+    )
+    parser.add_argument(
+        "--axis_thickness",
+        type=int,
+        default=2,
+        help="Projected XYZ-axis line thickness in pixels.",
+    )
     parser.add_argument(
         "--no_video",
         action="store_true",

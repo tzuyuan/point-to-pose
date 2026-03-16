@@ -30,12 +30,13 @@ class ModularPipeline:
     def __init__(self, cfg):
         self.cfg = cfg
         self.pipeline_cfg = cfg.pipeline.params
+        self.use_key_frame_graph = self.pipeline_cfg.get("use_key_frame_graph", True)
 
         # Components
         self.frontend = FrontEnd(cfg)
         self.kf_manager = KeyFrameManager(cfg)
         self.local_optimizer = LocalOptimizer(cfg)
-        self.kf_graph = KeyFrameGraph(cfg)
+        self.kf_graph = KeyFrameGraph(cfg) if self.use_key_frame_graph else None
         self.recovery_manager = RecoveryManager(cfg)
         self.sdf_builder = SDFBuilder(cfg.reconstructor.params)
 
@@ -203,7 +204,8 @@ class ModularPipeline:
             frame, self.track_table, self.objects, self.frontend.tracker
         )
 
-        self.kf_graph.update(new_kfs)
+        if self.use_key_frame_graph and self.kf_graph is not None:
+            self.kf_graph.update(new_kfs)
 
         for kf in new_kfs:
             obj = self.objects[kf.obj_id]
@@ -531,7 +533,9 @@ class ModularPipeline:
         #################################################################
         # perform global optimization of key frames only
         t0 = time.time()
-        if new_keyframes:
+        updated_global_poses = {}
+        updated_landmarks = {}
+        if self.use_key_frame_graph and new_keyframes and self.kf_graph is not None:
             updated_global_poses, updated_landmarks = self.kf_graph.update(
                 new_keyframes
             )
@@ -539,7 +543,7 @@ class ModularPipeline:
         for kf in new_keyframes:
             obj = self.objects[kf.obj_id]
             key = (kf.obj_id, kf.kf_idx)
-            if key in updated_global_poses:
+            if self.use_key_frame_graph and key in updated_global_poses:
                 global_pose = updated_global_poses[key]
 
                 dt, ddeg = self._se3_delta(global_pose, obj.pose)
@@ -557,7 +561,7 @@ class ModularPipeline:
                     lm_ok = (lm_idx >= 0) & (lm_idx < len(obj.key_points))
                     if np.any(lm_ok):
                         obj.key_points[lm_idx[lm_ok]] = lm_pts[lm_ok].copy()
-            else:
+            elif self.use_key_frame_graph:
                 print(
                     f"Frame {frame.id}: No optimized global pose for obj {kf.obj_id} kf {kf.kf_idx}; using keyframe pose for SDF fusion."
                 )

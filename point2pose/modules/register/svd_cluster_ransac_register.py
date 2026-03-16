@@ -767,8 +767,14 @@ class SVDClusterRANSACRegister(Register):
             candidates[best_cluster_idx]["T"] = refined_T
             candidates[best_cluster_idx]["sdf_refine"] = sdf_refine_info
 
-        # Recompute residuals / inliers from final selected pose (after optional SDF refine).
-        residuals = np.linalg.norm(transform_pts(refined_T, src_pcd) - tgt_pcd, axis=1)
+            # Recompute residuals / inliers from final selected pose (after optional SDF refine).
+            residuals = np.linalg.norm(
+                transform_pts(refined_T, src_pcd) - tgt_pcd, axis=1
+            )
+        else:
+            residuals = np.linalg.norm(
+                transform_pts(selected_T, src_pcd) - tgt_pcd, axis=1
+            )
         inliers = residuals <= self._inlier_thres
         selected_ninliers = int(np.count_nonzero(inliers))
         candidates[best_cluster_idx]["ninliers"] = selected_ninliers
