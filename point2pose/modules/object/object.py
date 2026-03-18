@@ -22,7 +22,7 @@ class Object:
         self.track_idx_2_obj_idx = np.full((0,), -1, dtype=np.int32)
 
         self.uncertainties = np.empty((0,))
-        self.valid = np.empty((0,))  # M, bool
+        self.valid = np.empty((0,), dtype=bool)  # M, bool
         self.num_keyframes = 0
         self.key_point_frames = np.empty(
             (0,), dtype=int

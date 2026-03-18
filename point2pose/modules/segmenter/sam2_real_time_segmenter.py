@@ -1,3 +1,4 @@
+import inspect
 import numpy as np
 import torch
 
@@ -21,19 +22,56 @@ class Sam2RealTimeSegmenter(Segmenter):
         super().__init__(config)
         self.name = "sam2_real_time"
         self.device = config.get("device", "cpu")
+        legacy_vos_optimized = config.get("vos_optimized", None)
+        self.vos_inference = bool(
+            config.get(
+                "vos_inference",
+                legacy_vos_optimized if legacy_vos_optimized is not None else False,
+            )
+        )
+        self.apply_postprocessing = config.get("apply_postprocessing", True)
 
         model_cfg = config.get("model_cfg", "configs/sam2.1/sam2.1_hiera_l.yaml")
         checkpoint = config.get(
             "checkpoint", "checkpoints/sam2.1/sam2.1_hiera_large.pt"
         )
 
+        hydra_overrides_extra = []
+        compile_flags = {
+            "compile_memory_encoder": config.get("compile_memory_encoder", False),
+            "compile_memory_attention": config.get("compile_memory_attention", False),
+            "compile_prompt_encoder": config.get("compile_prompt_encoder", False),
+            "compile_mask_decoder": config.get("compile_mask_decoder", False),
+        }
+        for key, enabled in compile_flags.items():
+            if enabled:
+                hydra_overrides_extra.append(f"++model.{key}=true")
+
+        build_kwargs = {
+            "device": self.device,
+            "hydra_overrides_extra": hydra_overrides_extra,
+            "apply_postprocessing": self.apply_postprocessing,
+        }
+
+        # Point2Pose exposes a single config knob, `vos_inference`.
+        # If the local SAM2 builder still uses the older `vos_optimized` argument,
+        # map the same value over for backward compatibility.
+        sig = inspect.signature(build_sam2_camera_predictor)
+        if "vos_inference" in sig.parameters:
+            build_kwargs["vos_inference"] = self.vos_inference
+        elif "vos_optimized" in sig.parameters:
+            build_kwargs["vos_optimized"] = self.vos_inference
+
         self.predictor = build_sam2_camera_predictor(
             model_cfg,
             checkpoint,
+            **build_kwargs,
         )
 
         self.input_points = []
         self.input_labels = []
+        self.input_point_groups = []
+        self.input_label_groups = []
         self.num_obj = 0
         self.tracking_started = False
         self.frame_count = 0
@@ -46,8 +84,19 @@ class Sam2RealTimeSegmenter(Segmenter):
             labels (List[int]): List of labels, each defined by 1 or 0.
                                 1 means positive point, 0 means negative point.
         """
+        if points is None or labels is None:
+            return
+
+        if self._has_grouped_prompt_format(points, labels):
+            for point_group, label_group in zip(points, labels):
+                self.input_points.extend(point_group)
+                self.input_labels.extend(label_group)
+                self._append_prompt_group(point_group, label_group)
+            return
+
         self.input_points.extend(points)
         self.input_labels.extend(labels)
+        self._append_flat_points_as_prompt_groups(points, labels)
 
     def initialize(self, image, mask=None):
         """
@@ -99,7 +148,7 @@ class Sam2RealTimeSegmenter(Segmenter):
 
         # Add points to predictor if any exist
         # Return True if at least one object is added.
-        if len(self.input_points) > 0:
+        if len(self.input_points) > 0 or len(self.input_point_groups) > 0:
             self.tracking_started = self._add_all_points_to_predictor()
         else:
             self.tracking_started = self.num_obj > 0
@@ -179,33 +228,25 @@ class Sam2RealTimeSegmenter(Segmenter):
         Add all points to SAM2 predictor.
         Return True if at least one object is added.
         """
-        # Add points for each object (grouping points by consecutive positive labels)
         obj_id = self.num_obj
         start_obj_id = obj_id
-        current_points = []
-        current_labels = []
+        total_points = 0
+        prompt_groups = list(zip(self.input_point_groups, self.input_label_groups))
 
-        for point, label in zip(self.input_points, self.input_labels):
-            if label == 1:  # Positive point: start new object
-                if current_points:  # Save previous object if exists
-                    self.predictor.add_new_prompt(
-                        frame_idx=0,
-                        obj_id=obj_id,
-                        points=np.array(current_points, dtype=np.float32),
-                        labels=np.array(current_labels, dtype=np.int32),
-                    )
-                    obj_id += 1
-                    current_points = []
-                    current_labels = []
+        if not prompt_groups and len(self.input_points) > 0:
+            self._append_flat_points_as_prompt_groups(self.input_points, self.input_labels)
+            prompt_groups = list(zip(self.input_point_groups, self.input_label_groups))
 
-                current_points.append(point)
-                current_labels.append(label)
-            else:  # Negative point: add to current object
-                current_points.append(point)
-                current_labels.append(label)
+        for current_points, current_labels in prompt_groups:
+            if len(current_points) == 0:
+                continue
+            if not np.any(np.asarray(current_labels, dtype=np.int32) == 1):
+                print(
+                    "[SAM2] Skipping a prompt group without a positive point. "
+                    "Each object needs at least one positive click."
+                )
+                continue
 
-        # Add the last object
-        if current_points:
             self.predictor.add_new_prompt(
                 frame_idx=0,
                 obj_id=obj_id,
@@ -213,12 +254,13 @@ class Sam2RealTimeSegmenter(Segmenter):
                 labels=np.array(current_labels, dtype=np.int32),
             )
             obj_id += 1
+            total_points += len(current_points)
 
         added_obj = obj_id - start_obj_id
         self.num_obj += added_obj
         if self.num_obj > 0:
             print(
-                f"[SAM2] Added {added_obj} object(s) with {len(self.input_points)} points; total objects: {self.num_obj}"
+                f"[SAM2] Added {added_obj} object(s) with {total_points} points; total objects: {self.num_obj}"
             )
             return True
         else:
@@ -226,3 +268,53 @@ class Sam2RealTimeSegmenter(Segmenter):
                 "[SAM2] No objects added. Please call add_input_points() to add prompt points before calling initialize()"
             )
             return False
+
+    def _has_grouped_prompt_format(self, points, labels) -> bool:
+        if not isinstance(points, (list, tuple)) or not isinstance(labels, (list, tuple)):
+            return False
+        if len(points) == 0 or len(labels) == 0:
+            return False
+
+        first_points = points[0]
+        first_labels = labels[0]
+
+        if isinstance(first_points, np.ndarray):
+            points_grouped = first_points.ndim == 2
+        elif isinstance(first_points, (list, tuple)):
+            points_grouped = len(first_points) == 0 or isinstance(
+                first_points[0], (list, tuple, np.ndarray)
+            )
+        else:
+            points_grouped = False
+
+        labels_grouped = isinstance(first_labels, (list, tuple, np.ndarray))
+        return points_grouped and labels_grouped
+
+    def _append_flat_points_as_prompt_groups(self, points, labels):
+        current_points = []
+        current_labels = []
+
+        for point, label in zip(points, labels):
+            label = int(label)
+            if label == 1 and current_points:
+                self._append_prompt_group(current_points, current_labels)
+                current_points = []
+                current_labels = []
+
+            current_points.append(point)
+            current_labels.append(label)
+
+        if current_points:
+            self._append_prompt_group(current_points, current_labels)
+
+    def _append_prompt_group(self, point_group, label_group):
+        if len(point_group) != len(label_group):
+            raise ValueError("Prompt points and labels must have the same length.")
+        if len(point_group) == 0:
+            return
+
+        normalized_points = np.asarray(point_group, dtype=np.float32).reshape(-1, 2)
+        normalized_labels = np.asarray(label_group, dtype=np.int32).reshape(-1)
+
+        self.input_point_groups.append(normalized_points.tolist())
+        self.input_label_groups.append(normalized_labels.tolist())

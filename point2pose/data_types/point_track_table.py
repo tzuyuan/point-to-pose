@@ -114,6 +114,32 @@ class PointTrackTable:
         self.visible = np.concatenate([self.visible, visibles])
         self.uncertainty = np.concatenate([self.uncertainty, uncertainties])
 
+    def deactivate_tracks(self, track_ids: np.ndarray):
+        track_ids = np.asarray(track_ids, dtype=np.int64).reshape(-1)
+        if track_ids.size == 0:
+            return
+
+        track_ids = track_ids[(track_ids >= 0) & (track_ids < len(self))]
+        if track_ids.size == 0:
+            return
+
+        track_ids = np.unique(track_ids)
+        self.visible[track_ids] = False
+        self.valid[track_ids] = False
+        if self.uncertainty.shape[0] == len(self):
+            self.uncertainty[track_ids] = 1.0
+
+        remove_set = set(int(t) for t in track_ids.tolist())
+        for tid in remove_set:
+            self.track2obj_map.pop(tid, None)
+
+        for obj_id, obj_track_ids in list(self.obj2track_map.items()):
+            obj_track_ids = np.asarray(obj_track_ids, dtype=np.int64).reshape(-1)
+            if obj_track_ids.size == 0:
+                continue
+            keep = np.array([int(t) not in remove_set for t in obj_track_ids], dtype=bool)
+            self.obj2track_map[obj_id] = obj_track_ids[keep]
+
     def get_visible_2d_and_uncertainties_for_obj(self, obj_id):
         """
         Returns:

@@ -77,6 +77,17 @@ tracker:
   #   v2: False  # keep False unless you specifically use v2 weights
   #   checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
 
+  # type: tapnext
+  # params:
+  #   resize_height: 256
+  #   resize_width: 256
+  #   visible_threshold: 0.5
+  #   certainty_radius: 8
+  #   use_certainty_for_visibility: true
+  #   enable_tf32: true
+  #   device: cuda
+  #   checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapnext/bootstapnext_ckpt.npz
+
 sampler: 
   type: super_point_fps
   params:

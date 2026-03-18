@@ -43,7 +43,7 @@ class ModularPipeline:
         # State
         self.track_table = PointTrackTable.new(n0=0)
         self.objects = []
-        self.num_obj = self.pipeline_cfg.get("max_num_obj", 1)
+        self.num_obj = 0
         self._initialized = False
 
         # depth estimate related
@@ -79,7 +79,49 @@ class ModularPipeline:
         }
 
         # module settings
-        self._estimate_init_pose = self.pipeline_cfg.get("estimate_init_pose", False)
+        bbox_mode = self.pipeline_cfg.get("bbox_estimation_mode", None)
+        if bbox_mode is None:
+            bbox_mode = (
+                "first_frame_dense"
+                if self.pipeline_cfg.get("estimate_init_pose", False)
+                else "continuous"
+            )
+        self._bbox_estimation_mode = str(bbox_mode).lower()
+        self._bbox_estimation_source = str(
+            self.pipeline_cfg.get("bbox_estimation_source", "keypoints")
+        ).lower()
+        self._bbox_outlier_rejection = str(
+            self.pipeline_cfg.get("bbox_outlier_rejection", "mad_dbscan")
+        ).lower()
+        self._bbox_min_points = int(self.pipeline_cfg.get("bbox_min_points", 12))
+        self._bbox_max_points = int(self.pipeline_cfg.get("bbox_max_points", 6000))
+        self._bbox_mad_scale = float(self.pipeline_cfg.get("bbox_mad_scale", 3.5))
+        self._bbox_dbscan_eps = float(self.pipeline_cfg.get("bbox_dbscan_eps", 0.02))
+        self._bbox_dbscan_min_points = int(
+            self.pipeline_cfg.get("bbox_dbscan_min_points", 8)
+        )
+        self._bbox_fit_minimal = bool(
+            self.pipeline_cfg.get("bbox_fit_minimal_obb", True)
+        )
+        self._bbox_debug = bool(self.pipeline_cfg.get("bbox_debug", False))
+        valid_bbox_modes = {"first_frame_dense", "continuous", "manual"}
+        if self._bbox_estimation_mode not in valid_bbox_modes:
+            raise ValueError(
+                f"Invalid bbox_estimation_mode: {self._bbox_estimation_mode}. "
+                f"Expected one of {sorted(valid_bbox_modes)}."
+            )
+        valid_bbox_sources = {"keypoints", "sdf"}
+        if self._bbox_estimation_source not in valid_bbox_sources:
+            raise ValueError(
+                f"Invalid bbox_estimation_source: {self._bbox_estimation_source}. "
+                f"Expected one of {sorted(valid_bbox_sources)}."
+            )
+        valid_outlier_modes = {"none", "mad", "dbscan", "mad_dbscan"}
+        if self._bbox_outlier_rejection not in valid_outlier_modes:
+            raise ValueError(
+                f"Invalid bbox_outlier_rejection: {self._bbox_outlier_rejection}. "
+                f"Expected one of {sorted(valid_outlier_modes)}."
+            )
         self.use_local_graph = self.pipeline_cfg.get("use_local_graph", False)
         self.min_depth = self.pipeline_cfg.get("min_depth", 0.05)
         self.max_depth = self.pipeline_cfg.get("max_depth", 1.0)
@@ -95,6 +137,8 @@ class ModularPipeline:
         self.hist_frames = deque(maxlen=self.num_hist)
         self.hist_fe_results = deque(maxlen=self.num_hist)
         self.hist_track_tables = deque(maxlen=self.num_hist)
+        self.last_frontend_timings = {}
+        self.last_step_module_times = {}
 
         # Logging
         self.save_pose = self.pipeline_cfg.get("save_pose", False)
@@ -138,48 +182,79 @@ class ModularPipeline:
 
         self.frontend.segmenter.add_input_points(obj_points, labels)
 
+    def _infer_num_obj_from_mask(self, mask) -> int:
+        if mask is None or not hasattr(mask, "shape"):
+            return 0
+        shape = getattr(mask, "shape", None)
+        if shape is None or len(shape) == 0:
+            return 0
+        return int(shape[0])
+
     def initialize_first_frame(self, frame):
+        if self.use_depth_estimate and self.depth_estimator is None:
+            # TODO: make this a class
+            if self.depth_estimator_type == "depth_anything":
+                # local import to avoid import-time CUDA/BLAS side-effects
+                from third_party.depth_anything_v2_metric.dpt import DepthAnythingV2
 
-        # TODO: make this a class
-        if self.depth_estimator_type == "depth_anything":
-            # local import to avoid import-time CUDA/BLAS side-effects
-            from third_party.depth_anything_v2_metric.dpt import DepthAnythingV2
-
-            m = DepthAnythingV2(
-                **self._depth_model_cfg[self.depth_encoder], max_depth=20
-            )
-            state = torch.load(
-                f"checkpoints/depth_anything/depth_anything_v2_metric_hypersim_{self.depth_encoder}.pth",
-                map_location="cpu",
-            )
-            m.load_state_dict(state)
-            self.depth_estimator = m.to(self._device).eval()
-        elif self.depth_estimator_type == "promptda":
-            from promptda.promptda import PromptDA
-
-            self.depth_estimator = (
-                PromptDA.from_pretrained(
-                    f"checkpoints/promptda/{self.depth_encoder}.ckpt"
+                m = DepthAnythingV2(
+                    **self._depth_model_cfg[self.depth_encoder], max_depth=20
                 )
-                .to(self._device)
-                .eval()
-            )
+                ckpt_path = (
+                    "checkpoints/depth_anything/"
+                    f"depth_anything_v2_metric_hypersim_{self.depth_encoder}.pth"
+                )
+                try:
+                    state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+                except TypeError:
+                    state = torch.load(ckpt_path, map_location="cpu")
+                m.load_state_dict(state)
+                self.depth_estimator = m.to(self._device).eval()
+            elif self.depth_estimator_type == "promptda":
+                from promptda.promptda import PromptDA
+
+                self.depth_estimator = (
+                    PromptDA.from_pretrained(
+                        f"checkpoints/promptda/{self.depth_encoder}.ckpt"
+                    )
+                    .to(self._device)
+                    .eval()
+                )
 
         # 1. Initialize FrontEnd (Segmentation + Tracker)
         self.frontend.initialize(frame)
 
         # 2. Setup Objects based on segmentation
         if self.frontend.use_segmenter:
-            # Prefer segmenter's object count if available (supports mask init), otherwise fall back to point labels
-            if (
-                hasattr(self.frontend.segmenter, "num_obj")
-                and self.frontend.segmenter.num_obj > 0
-            ):
-                self.num_obj = self.frontend.segmenter.num_obj
+            mask_count = self._infer_num_obj_from_mask(frame.mask)
+            seg_count = int(getattr(self.frontend.segmenter, "num_obj", 0) or 0)
+            point_group_count = len(
+                getattr(self.frontend.segmenter, "input_point_groups", []) or []
+            )
+
+            # Trust the actual mask tensor first, because that is what downstream
+            # samplers index into on the first frame.
+            if mask_count > 0:
+                self.num_obj = mask_count
+                if seg_count > 0 and seg_count != mask_count:
+                    print(
+                        "[ModularPipeline] Segmenter object count mismatch on init: "
+                        f"segmenter.num_obj={seg_count}, masks={mask_count}. "
+                        "Using the mask count."
+                    )
+            elif seg_count > 0:
+                self.num_obj = seg_count
+            elif point_group_count > 0:
+                self.num_obj = point_group_count
             else:
                 self.num_obj = np.sum(
                     np.asarray(self.frontend.segmenter.input_labels) == 1
                 )
+        else:
+            self.num_obj = 1
+
+        self.frontend.set_num_obj(self.num_obj)
+        self.kf_manager.set_num_obj(self.num_obj)
         print(f"Initialized with {self.num_obj} objects based on segmenter output.")
         for obj_id in range(self.num_obj):
             self.objects.append(Object(obj_id))
@@ -248,10 +323,12 @@ class ModularPipeline:
 
         # 5. Estimate Initial Pose (if configured)
         out_pose = np.tile(np.eye(4), (self.num_obj, 1, 1))
-        if self._estimate_init_pose:
+        if self._bbox_estimation_mode == "first_frame_dense":
             self._estimate_init_pose_and_bbox_for_all_obj(frame)
             for i in range(self.num_obj):
                 out_pose[i] = np.eye(4)
+        elif self._bbox_estimation_mode == "continuous":
+            self.update_object_bboxes()
 
         # Log initial state
         if self.save_meta_data:
@@ -385,6 +462,7 @@ class ModularPipeline:
         module_times = {
             "frontend": 0.0,
             "track_table": 0.0,
+            "track_compact": 0.0,
             "recovery": 0.0,
             "local_opt": 0.0,
             "keyframe": 0.0,
@@ -396,6 +474,7 @@ class ModularPipeline:
         #################################################################
         t0 = time.time()
         fe_result = self.frontend.step(frame, self.track_table, self.objects)
+        self.last_frontend_timings = dict(getattr(fe_result, "timings", {}))
         module_times["frontend"] = time.time() - t0
 
         # per-object update
@@ -528,6 +607,21 @@ class ModularPipeline:
             print(f"Frame {frame.id}: Keyframe triggered. Resetting local optimizer.")
             self.local_optimizer.reset(kf.obj_id)
 
+        t0 = time.time()
+        retired_track_ids = self.kf_manager.collect_retired_track_ids(self.objects)
+        if retired_track_ids.size > 0:
+            removed_track_ids = self.frontend.tracker.deactivate_query_points(
+                retired_track_ids
+            )
+            self.track_table.deactivate_tracks(retired_track_ids)
+            if removed_track_ids.size > 0:
+                print(
+                    f"Frame {frame.id}: Deactivated {removed_track_ids.size} tracker points "
+                    f"(active={len(self.frontend.tracker._active_global_ids)}, "
+                    f"global={self.frontend.tracker._num_global_points})."
+                )
+        module_times["track_compact"] = time.time() - t0
+
         #################################################################
         ##                     Global Optimization                     ##
         #################################################################
@@ -585,6 +679,9 @@ class ModularPipeline:
 
         module_times["global_opt"] = time.time() - t0
 
+        if self._bbox_estimation_mode == "continuous":
+            self.update_object_bboxes()
+
         #################################################################
         ##                         Logging                             ##
         #################################################################
@@ -594,10 +691,13 @@ class ModularPipeline:
         module_times["logging"] = time.time() - t0
 
         iter_total_time = time.time() - iter_start_time
+        self.last_step_module_times = {k: float(v) for k, v in module_times.items()}
+        self.last_step_module_times["total"] = float(iter_total_time)
         print(
             f"Frame {frame.id}: "
             f"frontend={module_times['frontend']:.4f}s, "
             f"track_table={module_times['track_table']:.4f}s, "
+            f"track_compact={module_times['track_compact']:.4f}s, "
             f"recovery={module_times['recovery']:.4f}s, "
             f"local_opt={module_times['local_opt']:.4f}s, "
             f"keyframe={module_times['keyframe']:.4f}s, "
@@ -795,6 +895,251 @@ class ModularPipeline:
         qx, qy, qz, qw = rotation.as_quat()
         return f"{timestamp:.6f} {tx:.6f} {ty:.6f} {tz:.6f} {qx:.6f} {qy:.6f} {qz:.6f} {qw:.6f}\n"
 
+    def _subsample_bbox_points(self, points: np.ndarray) -> np.ndarray:
+        if self._bbox_max_points <= 0 or points.shape[0] <= self._bbox_max_points:
+            return points
+        idx = np.linspace(0, points.shape[0] - 1, self._bbox_max_points, dtype=np.int64)
+        return points[idx]
+
+    def _infer_bbox_points_from_keypoints(self, obj) -> np.ndarray:
+        points = np.asarray(getattr(obj, "key_points", np.empty((0, 3))), dtype=float)
+        if points.ndim != 2 or points.shape[1] != 3 or points.shape[0] == 0:
+            return np.empty((0, 3), dtype=float)
+
+        valid = np.asarray(getattr(obj, "valid", np.empty((0,), dtype=bool))).reshape(-1)
+        if valid.dtype != np.bool_:
+            if np.issubdtype(valid.dtype, np.number):
+                valid = valid != 0
+            else:
+                valid = valid.astype(bool, copy=False)
+        if valid.shape[0] == points.shape[0] and np.any(valid):
+            points = points[valid]
+
+        finite_mask = np.all(np.isfinite(points), axis=1)
+        return points[finite_mask]
+
+    def _infer_bbox_points_from_sdf(self, obj) -> np.ndarray:
+        sdf_volume = getattr(obj, "sdf_volume", None)
+        if sdf_volume is None or not hasattr(sdf_volume, "get_volume"):
+            return np.empty((0, 3), dtype=float)
+
+        try:
+            tsdf_vol, _ = sdf_volume.get_volume()
+        except Exception:
+            return np.empty((0, 3), dtype=float)
+
+        if tsdf_vol is None or np.size(tsdf_vol) == 0:
+            return np.empty((0, 3), dtype=float)
+
+        tsdf_vol = np.asarray(tsdf_vol, dtype=np.float32)
+        if not np.isfinite(tsdf_vol).all():
+            return np.empty((0, 3), dtype=float)
+        if float(np.nanmin(tsdf_vol)) > 0.0 or float(np.nanmax(tsdf_vol)) < 0.0:
+            return np.empty((0, 3), dtype=float)
+
+        try:
+            from skimage import measure
+
+            verts, _, _, _ = measure.marching_cubes(
+                tsdf_vol, level=0.0, method="lewiner"
+            )
+        except Exception:
+            return np.empty((0, 3), dtype=float)
+
+        points = (
+            verts * float(sdf_volume._voxel_size) + np.asarray(sdf_volume._vol_origin)
+        )
+        finite_mask = np.all(np.isfinite(points), axis=1)
+        return points[finite_mask]
+
+    def _reject_bbox_outliers_mad(self, points: np.ndarray) -> np.ndarray:
+        pts = np.asarray(points, dtype=float)
+        if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] < 6:
+            return pts
+
+        filtered = pts
+
+        center = np.median(filtered, axis=0)
+        abs_dev = np.abs(filtered - center[None, :])
+        mad = np.median(abs_dev, axis=0)
+        spread = np.ptp(filtered, axis=0)
+        axis_scale = np.maximum(1.4826 * mad, 0.10 * spread + 0.003)
+        axis_keep = np.all(
+            abs_dev <= (self._bbox_mad_scale * axis_scale)[None, :], axis=1
+        )
+        if np.count_nonzero(axis_keep) >= 4:
+            filtered = filtered[axis_keep]
+
+        if filtered.shape[0] >= 6:
+            center = np.median(filtered, axis=0)
+            dist = np.linalg.norm(filtered - center[None, :], axis=1)
+            dist_med = np.median(dist)
+            dist_mad = np.median(np.abs(dist - dist_med))
+            dist_scale = max(1.4826 * dist_mad, 0.01)
+            radial_keep = dist <= (dist_med + self._bbox_mad_scale * dist_scale)
+            if np.count_nonzero(radial_keep) >= 4:
+                filtered = filtered[radial_keep]
+
+        return filtered
+
+    def _reject_bbox_outliers_dbscan(self, points: np.ndarray) -> np.ndarray:
+        pts = np.asarray(points, dtype=float)
+        if pts.ndim != 2 or pts.shape[1] != 3:
+            return pts
+        if pts.shape[0] < max(4, self._bbox_dbscan_min_points):
+            return pts
+
+        try:
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
+            labels = np.asarray(
+                pcd.cluster_dbscan(
+                    eps=self._bbox_dbscan_eps,
+                    min_points=self._bbox_dbscan_min_points,
+                    print_progress=False,
+                ),
+                dtype=np.int32,
+            )
+        except Exception:
+            return pts
+
+        if labels.size == 0:
+            return pts
+
+        valid_labels = labels[labels >= 0]
+        if valid_labels.size == 0:
+            return pts
+
+        unique, counts = np.unique(valid_labels, return_counts=True)
+        keep_label = int(unique[np.argmax(counts)])
+        keep = labels == keep_label
+        if np.count_nonzero(keep) < 4:
+            return pts
+
+        return pts[keep]
+
+    def _filter_bbox_points(self, points: np.ndarray, source: str) -> np.ndarray:
+        pts = np.asarray(points, dtype=float)
+        if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] == 0:
+            return np.empty((0, 3), dtype=float)
+
+        finite_mask = np.all(np.isfinite(pts), axis=1)
+        pts = pts[finite_mask]
+        if pts.shape[0] == 0:
+            return pts
+
+        pts = self._subsample_bbox_points(pts)
+        mode = self._bbox_outlier_rejection
+        filtered = pts
+
+        if mode in {"mad", "mad_dbscan"}:
+            cand = self._reject_bbox_outliers_mad(filtered)
+            if cand.shape[0] >= 4:
+                filtered = cand
+
+        if mode in {"dbscan", "mad_dbscan"}:
+            cand = self._reject_bbox_outliers_dbscan(filtered)
+            if cand.shape[0] >= 4:
+                filtered = cand
+
+        return filtered
+
+    def _fit_bbox_dict_from_points(self, points: np.ndarray, source: str):
+        pts = np.asarray(points, dtype=float)
+        if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] < self._bbox_min_points:
+            return None
+
+        try:
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
+
+            obb = None
+            if self._bbox_fit_minimal and hasattr(pcd, "get_minimal_oriented_bounding_box"):
+                try:
+                    obb = pcd.get_minimal_oriented_bounding_box(robust=True)
+                except TypeError:
+                    obb = pcd.get_minimal_oriented_bounding_box()
+                except RuntimeError:
+                    obb = None
+
+            if obb is None:
+                try:
+                    obb = pcd.get_oriented_bounding_box(robust=True)
+                except TypeError:
+                    obb = pcd.get_oriented_bounding_box()
+
+            center = np.asarray(obb.center, dtype=float).reshape(3)
+            extent = np.asarray(obb.extent, dtype=float).reshape(3)
+            rot = np.asarray(obb.R, dtype=float).reshape(3, 3)
+            if np.all(np.isfinite(center)) and np.all(np.isfinite(extent)) and np.all(
+                extent > 1e-4
+            ):
+                return {
+                    "center": center,
+                    "extent": extent,
+                    "rot": rot,
+                    "frame": "object",
+                    "source": source,
+                    "num_points": int(pts.shape[0]),
+                }
+        except Exception:
+            pass
+
+        mn = pts.min(axis=0)
+        mx = pts.max(axis=0)
+        extent = np.maximum(mx - mn, 1e-3)
+        pad = np.maximum(0.005, 0.05 * extent)
+        return {
+            "bbox": np.vstack([mn - pad, mx + pad]),
+            "frame": "object",
+            "source": source,
+            "num_points": int(pts.shape[0]),
+        }
+
+    def _estimate_bbox_for_object(self, obj_id: int, source: str = None):
+        if obj_id < 0 or obj_id >= len(self.objects):
+            return None
+
+        obj = self.objects[obj_id]
+        source = self._bbox_estimation_source if source is None else str(source).lower()
+
+        if source == "keypoints":
+            pts_obj = self._infer_bbox_points_from_keypoints(obj)
+        elif source == "sdf":
+            pts_obj = self._infer_bbox_points_from_sdf(obj)
+        else:
+            raise ValueError(f"Unsupported bbox source: {source}")
+
+        pts_obj = self._filter_bbox_points(pts_obj, source=source)
+        bbox = self._fit_bbox_dict_from_points(pts_obj, source=source)
+
+        if bbox is None and self._bbox_debug:
+            print(
+                f"[ModularPipeline] Failed to estimate bbox for obj {obj_id} "
+                f"from source '{source}' (points={pts_obj.shape[0]})."
+            )
+        return bbox
+
+    def update_object_bboxes(self, source: str = None, force: bool = False) -> int:
+        if (not force) and self._bbox_estimation_mode == "manual":
+            return 0
+
+        updated = 0
+        source = self._bbox_estimation_source if source is None else str(source).lower()
+        for obj_id in range(self.num_obj):
+            bbox = self._estimate_bbox_for_object(obj_id, source=source)
+            if bbox is None:
+                continue
+            self.objects[obj_id].bbox = bbox
+            updated += 1
+
+        if self._bbox_debug and (updated > 0 or force):
+            print(
+                f"[ModularPipeline] Updated bbox for {updated}/{self.num_obj} object(s) "
+                f"from source '{source}'."
+            )
+        return updated
+
     def _estimate_init_pose_and_bbox_for_all_obj(self, frame):
         out_pose = np.tile(np.eye(4), (self.num_obj, 1, 1))
         # estimate initial pose
@@ -826,55 +1171,37 @@ class ModularPipeline:
                 min_depth=self.min_depth,
                 max_depth=self.max_depth,
             )
-            # estimate initial bbox
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(initial_3d_points)
+            initial_3d_points = self._filter_bbox_points(
+                initial_3d_points, source="first_frame_dense"
+            )
+            if initial_3d_points.shape[0] < max(4, self._bbox_min_points):
+                if self._bbox_debug:
+                    print(
+                        f"[ModularPipeline] Skipping first-frame bbox for obj {obj_id}: "
+                        f"only {initial_3d_points.shape[0]} usable dense points."
+                    )
+                continue
 
-            ## Temporary outlier removal
-            ## TODO: Make this a class
-            pcd_stat_outlier_removal = False
-            pcd_stat_outlier_removal_nb_neighbors = 20
-            pcd_stat_outlier_removal_std_ratio = 2.0
-            pcd_radius_outlier_removal = True
-            pcd_radius_outlier_removal_radius = 0.1
+            pcd_world_clean = o3d.geometry.PointCloud()
+            pcd_world_clean.points = o3d.utility.Vector3dVector(
+                initial_3d_points.astype(np.float64)
+            )
 
-            if pcd_stat_outlier_removal:
-                _, ind_stat = pcd.remove_statistical_outlier(
-                    nb_neighbors=pcd_stat_outlier_removal_nb_neighbors,
-                    std_ratio=pcd_stat_outlier_removal_std_ratio,
-                )
-            close_indices = None
-            if pcd_radius_outlier_removal:
-                # Distance-based outlier removal if clicked point is provided
-                mean_mask_pixel_world, _ = convert_pixel_to_world(
-                    pixel=mean_mask_pixel,
-                    depth_image=frame.depth,
-                    cam_intrinsics=frame.intrinsics,
-                    cam2world=np.eye(4),
-                    depth_factor=frame.depth_factor,
-                )
-                # Calculate distances from clicked point to all points
-                points_array = initial_3d_points
-                distances = np.linalg.norm(points_array - mean_mask_pixel_world, axis=1)
-
-                # Keep points within a reasonable distance (e.g., 0.2 meters)
-                max_distance = pcd_radius_outlier_removal_radius
-                close_indices = np.where(distances <= max_distance)[0]
-
-            ind_union = None
-            if pcd_stat_outlier_removal and pcd_radius_outlier_removal:
-                ind_union = np.intersect1d(ind_stat, close_indices)
-            elif pcd_stat_outlier_removal:
-                ind_union = ind_stat
-            elif pcd_radius_outlier_removal:
-                ind_union = close_indices
-
-            if ind_union is not None:
-                pcd_world_clean = pcd.select_by_index(ind_union)
+            if self._bbox_fit_minimal and hasattr(
+                pcd_world_clean, "get_minimal_oriented_bounding_box"
+            ):
+                try:
+                    init_bbox = pcd_world_clean.get_minimal_oriented_bounding_box(
+                        robust=True
+                    )
+                except TypeError:
+                    init_bbox = pcd_world_clean.get_minimal_oriented_bounding_box()
+                except RuntimeError:
+                    init_bbox = pcd_world_clean.get_oriented_bounding_box()
             else:
-                pcd_world_clean = pcd
+                init_bbox = pcd_world_clean.get_oriented_bounding_box()
 
-            self.objects[obj_id].init_bbox = pcd_world_clean.get_oriented_bounding_box()
+            self.objects[obj_id].init_bbox = init_bbox
             # self.objects[obj_id].init_bbox = pcd.get_axis_aligned_bounding_box()
             self.objects[obj_id].bbox = self.objects[obj_id].init_bbox
             # set the initial pose
@@ -905,6 +1232,9 @@ class ModularPipeline:
                 # get color from frame.rgb
                 # color = frame.rgb[y_coords, x_coords]
                 color = frame.rgb[valid_pxl_in_mask[:, 1], valid_pxl_in_mask[:, 0]]
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = o3d.utility.Vector3dVector(initial_3d_points.astype(np.float64))
+                color = color[: len(initial_3d_points)]
                 pcd.colors = o3d.utility.Vector3dVector(color / 255.0)
                 o3d.io.write_point_cloud(
                     os.path.join(debug_bbx_dir, f"initial_pcd_{obj_id}.ply"),

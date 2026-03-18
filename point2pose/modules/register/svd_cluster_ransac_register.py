@@ -216,6 +216,7 @@ class SVDClusterRANSACRegister(Register):
 
         remaining = np.ones(N, dtype=bool)
         candidates = []
+        dense_cur_pts = None
 
         for _c in range(self._max_clusters):
             candidate = self._RANSAC(
@@ -336,6 +337,7 @@ class SVDClusterRANSACRegister(Register):
                 window_size=self._select_3d_dist_window_size,
                 min_neighbors=self._select_3d_dist_min_neighbors,
             )
+            dense_cur_pts = trg_pcd_full
             # map_pts = obj.key_points
             for c in candidates:
                 map_pts = obj.key_points.copy()
@@ -367,6 +369,7 @@ class SVDClusterRANSACRegister(Register):
                 window_size=self._select_3d_dist_window_size,
                 min_neighbors=self._select_3d_dist_min_neighbors,
             )
+            dense_cur_pts = trg_pcd_full
             # map_pts = obj.key_points
             for c in candidates:
                 T_map2cur = c["T"]
@@ -564,6 +567,7 @@ class SVDClusterRANSACRegister(Register):
                 window_size=self._select_3d_dist_window_size,
                 min_neighbors=self._select_3d_dist_min_neighbors,
             )
+            dense_cur_pts = trg_pcd_full
 
             best_cluster_idx = self._select_dense_map_hybrid(
                 candidates=candidates,
@@ -763,6 +767,7 @@ class SVDClusterRANSACRegister(Register):
                 cur_frame=cur_frame,
                 obj_id=obj_id,
                 obj=obj,
+                pts_cur=dense_cur_pts,
             )
             candidates[best_cluster_idx]["T"] = refined_T
             candidates[best_cluster_idx]["sdf_refine"] = sdf_refine_info
@@ -1457,6 +1462,7 @@ class SVDClusterRANSACRegister(Register):
         cur_frame,
         obj_id,
         obj,
+        pts_cur=None,
     ):
         info = {"enabled": True, "applied": False, "skip_reason": ""}
         if obj is None:
@@ -1470,9 +1476,11 @@ class SVDClusterRANSACRegister(Register):
             info["skip_reason"] = "no_sdf"
             return np.asarray(T_seed, dtype=np.float64), info
 
-        pts_cur = self._get_sdf_source_points(
-            src_pcd=src_corr, cur_frame=cur_frame, obj_id=obj_id
-        )
+        pts_cur = self._prepare_sdf_source_points(pts_cur)
+        if pts_cur is None:
+            pts_cur = self._get_sdf_source_points(
+                src_pcd=src_corr, cur_frame=cur_frame, obj_id=obj_id
+            )
         if pts_cur is None or pts_cur.shape[0] < self._sdf_refine_min_pts:
             info["skip_reason"] = "too_few_points"
             return np.asarray(T_seed, dtype=np.float64), info
@@ -1486,6 +1494,7 @@ class SVDClusterRANSACRegister(Register):
             obj=obj,
             src_corr=src_corr,
             tgt_corr=tgt_corr,
+            init_cost=seed_cost,
         )
         info["debug"] = dbg
 
@@ -1506,6 +1515,18 @@ class SVDClusterRANSACRegister(Register):
         info["skip_reason"] = "not_improved"
         return np.asarray(T_seed, dtype=np.float64), info
 
+    def _prepare_sdf_source_points(self, pts):
+        if pts is None:
+            return None
+
+        pts = np.asarray(pts, dtype=np.float32)
+        if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] == 0:
+            return None
+        if pts.shape[0] > self._sdf_refine_max_pts:
+            step = int(np.ceil(pts.shape[0] / float(self._sdf_refine_max_pts)))
+            pts = pts[::step]
+        return pts
+
     def _get_sdf_source_points(self, src_pcd, cur_frame, obj_id):
         pts = None
         if self._sdf_refine_use_dense_cur and cur_frame is not None:
@@ -1523,16 +1544,113 @@ class SVDClusterRANSACRegister(Register):
                 pts = None
         if pts is None and src_pcd is not None:
             pts = np.asarray(src_pcd)
-        if pts is None:
-            return None
+        return self._prepare_sdf_source_points(pts)
 
-        pts = np.asarray(pts, dtype=np.float32)
-        if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] == 0:
-            return None
-        if pts.shape[0] > self._sdf_refine_max_pts:
-            step = int(np.ceil(pts.shape[0] / float(self._sdf_refine_max_pts)))
-            pts = pts[::step]
-        return pts
+    def _query_dense_tsdf_signed(self, obj, pts_obj, return_grad=False):
+        pts_obj = np.asarray(pts_obj, dtype=np.float32)
+        n = pts_obj.shape[0]
+        vals = np.full((n,), np.nan, dtype=np.float64)
+        valid = np.zeros((n,), dtype=bool)
+        grad = np.zeros((n, 3), dtype=np.float64) if return_grad else None
+
+        if getattr(obj, "sdf", None) is None or "tsdf" not in obj.sdf:
+            return (vals, grad, valid) if return_grad else (vals, valid)
+
+        vol_bnds = None
+        if "vol_bnds" in obj.sdf:
+            vol_bnds = np.asarray(obj.sdf["vol_bnds"], dtype=np.float32)
+        if vol_bnds is not None:
+            inb = np.logical_and(
+                np.all(pts_obj >= vol_bnds[:, 0][None, :], axis=1),
+                np.all(pts_obj <= vol_bnds[:, 1][None, :], axis=1),
+            )
+        else:
+            inb = np.ones((n,), dtype=bool)
+
+        tsdf = np.asarray(obj.sdf["tsdf"], dtype=np.float32)
+        origin = np.asarray(obj.sdf["vol_origin"], dtype=np.float32)
+        voxel = float(obj.sdf["voxel_size"])
+        vol_dim = np.array(tsdf.shape, dtype=np.int32)
+
+        xyz = (pts_obj - origin[None, :]) / voxel
+        x, y, z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+        x0 = np.floor(x).astype(np.int32)
+        y0 = np.floor(y).astype(np.int32)
+        z0 = np.floor(z).astype(np.int32)
+        x1 = x0 + 1
+        y1 = y0 + 1
+        z1 = z0 + 1
+
+        inb_tri = (
+            (x0 >= 0)
+            & (y0 >= 0)
+            & (z0 >= 0)
+            & (x1 < vol_dim[0])
+            & (y1 < vol_dim[1])
+            & (z1 < vol_dim[2])
+        )
+        keep = inb & inb_tri
+        if not np.any(keep):
+            return (vals, grad, valid) if return_grad else (vals, valid)
+
+        xx = x[keep] - x0[keep]
+        yy = y[keep] - y0[keep]
+        zz = z[keep] - z0[keep]
+
+        x0k, y0k, z0k = x0[keep], y0[keep], z0[keep]
+        x1k, y1k, z1k = x1[keep], y1[keep], z1[keep]
+
+        c000 = tsdf[x0k, y0k, z0k]
+        c100 = tsdf[x1k, y0k, z0k]
+        c010 = tsdf[x0k, y1k, z0k]
+        c110 = tsdf[x1k, y1k, z0k]
+        c001 = tsdf[x0k, y0k, z1k]
+        c101 = tsdf[x1k, y0k, z1k]
+        c011 = tsdf[x0k, y1k, z1k]
+        c111 = tsdf[x1k, y1k, z1k]
+
+        c00 = c000 * (1.0 - xx) + c100 * xx
+        c10 = c010 * (1.0 - xx) + c110 * xx
+        c01 = c001 * (1.0 - xx) + c101 * xx
+        c11 = c011 * (1.0 - xx) + c111 * xx
+        c0 = c00 * (1.0 - yy) + c10 * yy
+        c1 = c01 * (1.0 - yy) + c11 * yy
+        interp = c0 * (1.0 - zz) + c1 * zz
+
+        idx_keep = np.where(keep)[0]
+        finite = np.isfinite(interp)
+        idx_valid = idx_keep[finite]
+        vals[idx_valid] = interp[finite].astype(np.float64)
+        valid[idx_valid] = True
+
+        if not return_grad:
+            return vals, valid
+
+        dfdx = (
+            (1.0 - yy) * (1.0 - zz) * (c100 - c000)
+            + yy * (1.0 - zz) * (c110 - c010)
+            + (1.0 - yy) * zz * (c101 - c001)
+            + yy * zz * (c111 - c011)
+        ) / voxel
+        dfdy = (
+            (1.0 - xx) * (1.0 - zz) * (c010 - c000)
+            + xx * (1.0 - zz) * (c110 - c100)
+            + (1.0 - xx) * zz * (c011 - c001)
+            + xx * zz * (c111 - c101)
+        ) / voxel
+        dfdz = (
+            (1.0 - xx) * (1.0 - yy) * (c001 - c000)
+            + xx * (1.0 - yy) * (c101 - c100)
+            + (1.0 - xx) * yy * (c011 - c010)
+            + xx * yy * (c111 - c110)
+        ) / voxel
+        grad_valid = np.stack([dfdx, dfdy, dfdz], axis=1).astype(np.float64)
+        grad_finite = np.all(np.isfinite(grad_valid), axis=1)
+        grad_idx = idx_keep[finite & grad_finite]
+        grad[grad_idx] = grad_valid[finite & grad_finite]
+        valid[idx_keep[finite & ~grad_finite]] = False
+        vals[idx_keep[finite & ~grad_finite]] = np.nan
+        return vals, grad, valid
 
     def _query_sdf_signed(self, obj, pts_obj):
         pts_obj = np.asarray(pts_obj, dtype=np.float32)
@@ -1567,67 +1685,23 @@ class SVDClusterRANSACRegister(Register):
             except Exception:
                 pass
 
-        if getattr(obj, "sdf", None) is None or "tsdf" not in obj.sdf:
-            return vals, valid
-
-        tsdf = np.asarray(obj.sdf["tsdf"], dtype=np.float32)
-        origin = np.asarray(obj.sdf["vol_origin"], dtype=np.float32)
-        voxel = float(obj.sdf["voxel_size"])
-        vol_dim = np.array(tsdf.shape, dtype=np.int32)
-
-        xyz = (pts_obj - origin[None, :]) / voxel
-        x, y, z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
-        x0 = np.floor(x).astype(np.int32)
-        y0 = np.floor(y).astype(np.int32)
-        z0 = np.floor(z).astype(np.int32)
-        x1 = x0 + 1
-        y1 = y0 + 1
-        z1 = z0 + 1
-
-        inb_tri = (
-            (x0 >= 0)
-            & (y0 >= 0)
-            & (z0 >= 0)
-            & (x1 < vol_dim[0])
-            & (y1 < vol_dim[1])
-            & (z1 < vol_dim[2])
-        )
-        keep = inb & inb_tri
-        if not np.any(keep):
-            return vals, valid
-
-        xx = x[keep] - x0[keep]
-        yy = y[keep] - y0[keep]
-        zz = z[keep] - z0[keep]
-
-        x0k, y0k, z0k = x0[keep], y0[keep], z0[keep]
-        x1k, y1k, z1k = x1[keep], y1[keep], z1[keep]
-
-        c000 = tsdf[x0k, y0k, z0k]
-        c100 = tsdf[x1k, y0k, z0k]
-        c010 = tsdf[x0k, y1k, z0k]
-        c110 = tsdf[x1k, y1k, z0k]
-        c001 = tsdf[x0k, y0k, z1k]
-        c101 = tsdf[x1k, y0k, z1k]
-        c011 = tsdf[x0k, y1k, z1k]
-        c111 = tsdf[x1k, y1k, z1k]
-
-        c00 = c000 * (1 - xx) + c100 * xx
-        c10 = c010 * (1 - xx) + c110 * xx
-        c01 = c001 * (1 - xx) + c101 * xx
-        c11 = c011 * (1 - xx) + c111 * xx
-        c0 = c00 * (1 - yy) + c10 * yy
-        c1 = c01 * (1 - yy) + c11 * yy
-        interp = c0 * (1 - zz) + c1 * zz
-
-        idx_keep = np.where(keep)[0]
-        vals[idx_keep] = interp.astype(np.float64)
-        valid[idx_keep] = np.isfinite(interp)
+        dense_vals, dense_valid = self._query_dense_tsdf_signed(obj, pts_obj)
+        keep = dense_valid & inb
+        vals[keep] = dense_vals[keep]
+        valid[keep] = True
         return vals, valid
 
     def _query_sdf_and_grad(self, obj, pts_obj):
         pts_obj = np.asarray(pts_obj, dtype=np.float32)
         n = pts_obj.shape[0]
+        if getattr(obj, "sdf", None) is not None and "tsdf" in obj.sdf:
+            sdf0, grad, valid = self._query_dense_tsdf_signed(
+                obj, pts_obj, return_grad=True
+            )
+            gnorm = np.linalg.norm(grad, axis=1)
+            valid &= np.isfinite(sdf0) & np.isfinite(gnorm) & (gnorm > 1e-8)
+            return sdf0, grad, valid
+
         sdf0, v0 = self._query_sdf_signed(obj, pts_obj)
 
         if getattr(obj, "sdf", None) is not None and "voxel_size" in obj.sdf:
@@ -1692,7 +1766,13 @@ class SVDClusterRANSACRegister(Register):
         return np.ones_like(r_abs, dtype=np.float64)
 
     def _refine_pose_with_sdf(
-        self, pts_cur, T_cur2obj_init, obj, src_corr=None, tgt_corr=None
+        self,
+        pts_cur,
+        T_cur2obj_init,
+        obj,
+        src_corr=None,
+        tgt_corr=None,
+        init_cost=None,
     ):
         T = np.asarray(T_cur2obj_init, dtype=np.float64).copy()
         pts_cur = np.asarray(pts_cur, dtype=np.float64)
@@ -1711,7 +1791,12 @@ class SVDClusterRANSACRegister(Register):
             return None, dbg
 
         best_T = T.copy()
-        best_cost = np.inf
+        current_cost = (
+            float(init_cost)
+            if init_cost is not None and np.isfinite(init_cost)
+            else self._eval_sdf_cost(pts_cur, T, obj)
+        )
+        best_cost = current_cost if np.isfinite(current_cost) else np.inf
 
         for it in range(self._sdf_refine_iters):
             pts_obj = transform_pts(
@@ -1744,12 +1829,8 @@ class SVDClusterRANSACRegister(Register):
 
             n = pts_obj_in.shape[0]
             J = np.zeros((n, 6), dtype=np.float64)
-            for i in range(n):
-                x = pts_obj_in[i]
-                G = np.zeros((3, 6), dtype=np.float64)
-                G[:, :3] = np.eye(3)
-                G[:, 3:] = -_skew(x)
-                J[i] = g_sdf_in[i] @ G
+            J[:, :3] = g_sdf_in
+            J[:, 3:] = np.cross(pts_obj_in, g_sdf_in)
 
             w = self._kernel_weights(np.abs(r_sdf_in))
             sw = np.sqrt(np.clip(w, 0.0, None))[:, None]
@@ -1786,10 +1867,11 @@ class SVDClusterRANSACRegister(Register):
 
             T_candidate = _left_update_SE3(T, dxi)
             c_cost = self._eval_sdf_cost(pts_cur, T_candidate, obj)
-            t_cost = self._eval_sdf_cost(pts_cur, T, obj)
+            t_cost = current_cost
 
             if np.isfinite(c_cost) and c_cost <= t_cost:
                 T = T_candidate
+                current_cost = c_cost
                 if c_cost < best_cost:
                     best_cost = c_cost
                     best_T = T.copy()
@@ -1798,6 +1880,7 @@ class SVDClusterRANSACRegister(Register):
                 h_cost = self._eval_sdf_cost(pts_cur, T_half, obj)
                 if np.isfinite(h_cost) and h_cost < t_cost:
                     T = T_half
+                    current_cost = h_cost
                     if h_cost < best_cost:
                         best_cost = h_cost
                         best_T = T.copy()

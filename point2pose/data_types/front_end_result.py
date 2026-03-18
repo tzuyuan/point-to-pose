@@ -39,6 +39,7 @@ class FrontEndResult:
     visibles: Optional[np.ndarray] = None
     track_3d: Optional[np.ndarray] = None
     track_valid: Optional[np.ndarray] = None
+    timings: Dict[str, float] = field(default_factory=dict)
 
     # Dense recovery info (before/after dense registration)
     # Key: obj_id

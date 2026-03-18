@@ -164,8 +164,12 @@ class Pipeline:
         # ------------- segmentation -------------
         self.segmenter.initialize(frame.rgb)
 
-        # get number of objects
-        self.num_obj = np.sum(np.asarray(self.segmenter.input_labels) == 1)
+        # Prefer the segmenter's explicit object count so grouped prompt clicks
+        # count correctly when one object has multiple positive points.
+        if hasattr(self.segmenter, "num_obj") and self.segmenter.num_obj > 0:
+            self.num_obj = self.segmenter.num_obj
+        else:
+            self.num_obj = np.sum(np.asarray(self.segmenter.input_labels) == 1)
 
         # get segmentation mask
         obj_ids, mask_logits = self.segmenter.segment(frame.rgb)

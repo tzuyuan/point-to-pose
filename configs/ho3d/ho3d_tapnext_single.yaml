@@ -1,53 +1,15 @@
-realsense:
-  params:
-    rs_serial: 941322070969
-    width: 640
-    height: 480
-    color_fps: 60
-    depth_fps: 60
-    # Reduce latency by keeping the RealSense queues short and draining to the newest frame.
-    frames_queue_size: 1
-    drop_stale_frames: true
-    max_frame_drain: 8
-    timing_debug_every: 30
-    # Motion blur is mostly driven by the RGB exposure time.
-    # To reduce blur:
-    # 1. try color_fps: 60 if your camera supports it
-    # 2. set color_auto_exposure: false
-    # 3. lower color_exposure_us (for example 4000-8000)
-    # 4. raise color_gain if the image becomes too dark
-    color_auto_exposure: true
-    color_auto_exposure_priority: false
-    color_exposure_us: 100
-    color_gain: null
-    color_sharpness: null
-    depth_emitter_enabled: true
-
 
 
 pipeline:
   type: modular
   params:
-    # Bounding-box estimation modes:
-    #   first_frame_dense: estimate bbox + init pose from the first frame dense mask cloud
-    #   continuous: update bbox automatically from the configured source over time
-    #   manual: only update bbox when the RealSense example receives the 'b' key
-    bbox_estimation_mode: manual
-    # Source used by continuous/manual modes: keypoints | sdf
-    bbox_estimation_source: sdf
-    # Outlier rejection: none | mad | dbscan | mad_dbscan
-    bbox_outlier_rejection: mad_dbscan
-    bbox_min_points: 12
-    bbox_max_points: 6000
-    bbox_mad_scale: 3.5
-    bbox_dbscan_eps: 0.02
-    bbox_dbscan_min_points: 8
-    bbox_fit_minimal_obb: true
+    max_num_obj: 1
+    estimate_init_pose: false
 
     use_segmenter: true
     sync_timing_cuda: true
-    retire_invalid_tracks: false
-    retire_protect_keyframe_tracks: false
+    retire_invalid_tracks: true
+    retire_protect_keyframe_tracks: true
 
     # depth related
     fill_missing_depth: true
@@ -61,8 +23,8 @@ pipeline:
     device: cuda
     depth_encoder: vitl
 
-    max_rel_rotation_deg: 30
-    max_rel_translation: 0.1
+    max_rel_rotation_deg: 15
+    max_rel_translation: 0.03
     pose_jump_guard_enable: true
     pose_jump_guard_trans_thres: 0.08
     pose_jump_guard_rot_deg_thres: 25.0
@@ -122,7 +84,7 @@ pipeline:
     pending_reset_on_bad: true
 
     # newly promoted point warmup trust
-    promoted_warmup_frames: 1
+    promoted_warmup_frames: 4
     promoted_init_uncer: 0.2
     promoted_min_uncer: 0.1
     promoted_spread_to_uncer: 0.00
@@ -153,18 +115,39 @@ reconstructor:
     sdf_use_gpu: true
     sdf_backend: python_tsdf
     sdf_voxel_size: 0.005
-    sdf_bounds_padding: 0.1
-    sdf_max_voxels: 20000
+    sdf_bounds_padding: 0.2
+    sdf_max_voxels: 20000000
     sdf_max_extent_m: 1.0
     sdf_min_points: 300
     sdf_filter_max_radius: 0.25
     sdf_filter_keep_percentile: 98.0
     sdf_fuse_color: true
+
+
+
+# register:
+#   # svd_ransac, svd_residual_outlier, svd_uncertainty_outlier, svd_cluster_ransac
+#   type: svd_residual_outlier
+#   params:
+#     remove_outside_mask: true
+#     debug_level: 0
+#     max_iter: 15
+#     uncer_thres: 0.3
+#     threshold_method: mad
+#     inlier_thres: 0.01
+#     thres_reduce_factor: 0.005
+#     mad_scale: 5
+#     min_inliers: 3
+#     min_variance: 1e-2
+
+#     # outlier pose
+#     residual_thres: 0.007
     
 register:
   # type: svd_residual_outlier
   type: svd_cluster_ransac
   params:
+
 
     threshold_method: fixed
 
@@ -224,6 +207,73 @@ register:
     uncer_thres: 0.3
     residual_thres: 0.007
 
+# register:
+#   type: svd_residual_outlier
+#   params:
+#     threshold_method: mad
+#     ransac_iters: 50
+#     sample_size: 4
+#     inlier_thres: 0.005
+#     min_inliers: 4
+#     max_clusters: 10
+#     use_uncertainty: false
+#     min_variance: 1e-3
+
+#     select_method: 3d_dist_dense_map
+#     select_3d_dist_min_depth: 0.08
+#     select_3d_dist_max_depth: 2
+#     select_3d_dist_fill_missing_depth: true
+#     select_3d_dist_window_size: 5
+#     select_3d_dist_min_neighbors: 1
+#     select_dense_map_close_margin: 0.007
+
+#     # sdf_optimize#     # Optional post-selection pose refinement with SDF loss.
+#     enable_sdf_refine: true
+#     sdf_refine_iters: 8
+#     sdf_refine_damping: 1e-4
+#     sdf_refine_grad_eps: 0.5
+#     sdf_refine_max_pts: 1500
+#     sdf_refine_use_dense_cur: true
+#     sdf_refine_min_pts: 30
+#     sdf_trim_method: mad
+#     sdf_mad_scale: 2.5
+#     sdf_inlier_thres: 0.01
+#     sdf_inlier_percentile: 80.0
+#     sdf_kernel: huber
+#     sdf_kernel_delta: 0.01
+#     sdf_min_support_ratio: 0.15
+#     sdf_bad_penalty: 0.05
+#     sdf_refine_step_trans_clip: 0.02
+#     sdf_refine_step_rot_clip: 0.2
+
+
+#     sdf_opt_max_iter: 25
+#     sdf_opt_percentile: 70.0
+#     sdf_opt_rot_bound: 0.15
+#     sdf_opt_trans_bound: 0.03
+#     sdf_opt_reg_lambda: 1e-3
+#     sdf_opt_reg_rot: 1.0
+#     sdf_opt_reg_trans: 1.0
+    
+#     # front end
+#     remove_outside_mask: true
+#     uncer_thres: 0.3
+#     residual_thres: 0.007
+
+
+# register:
+#   type: svd_ransac
+#   params:
+#     sample_size: 5     
+#     max_trials: 300
+#     inlier_thres: 0.01
+#     min_inliers: 5
+#     refine_iters: 1
+#     min_triangle_area: 1e-6
+#     min_pca_ratio: 1e-3
+#     # outlier pose
+#     residual_thres: 0.001
+
 dense_register:
   type: cupoch_icp
   params:
@@ -232,7 +282,7 @@ dense_register:
     max_num_points: 10000
     max_correspondence_distance: 0.05
     max_iterations: 30
-    epsilon: 1qe-6
+    epsilon: 1e-6
     debug_level: 0
     debug_dir: /home/justin/code/point-to-pose/debug/dense_register
 
@@ -250,31 +300,18 @@ segmenter:
     model_cfg: configs/sam2.1/sam2.1_hiera_l.yaml
     checkpoint: /home/justin/code/point-to-pose/checkpoints/sam2.1/sam2.1_hiera_large.pt
     device: cuda
-    vos_inference: true
-    apply_postprocessing: false
 
 tracker:
-  type: tapir
+  type: tapnext
   params:
-    resize_height: 480
-    resize_width: 480
+    resize_height: 256
+    resize_width: 256
     visible_threshold: 0.5
-    query_chunk_size: 2048
+    certainty_radius: 8
+    use_certainty_for_visibility: true
     enable_tf32: true
     device: cuda
-    checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
-
-# tracker:
-  # type: tapnext
-  # params:
-  #   resize_height: 256
-  #   resize_width: 256
-  #   visible_threshold: 0.5
-  #   certainty_radius: 8
-  #   use_certainty_for_visibility: true
-  #   enable_tf32: true
-  #   device: cuda
-  #   checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapnext/bootstapnext_ckpt.npz
+    checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapnext/bootstapnext_ckpt.npz
  
   
 # tracker:
@@ -340,7 +377,7 @@ criterion:
 
     # uncertainty criterion
     uncer_thres: 0.3
-    min_num_pts: 0
+    min_num_pts: 20
 
     # rotation threshold and min num criterion
     # if it's smaller than this it will not trigger sampling
@@ -350,7 +387,7 @@ criterion:
     discretization_angle: 60
 
     # rotation threshold criterion
-    max_angle_deg: 20
+    max_angle_deg: 10
 
     # mask area criterion
     fit_mode: convex
@@ -393,7 +430,5 @@ visualization:
     visualize_points: true
     # uncertainty, visible, visible_valid, visible_uncertainty, registration_used_valid, registration_correspondence, frame_id
     points_vis_method: visible_uncertainty
-    save_images: false
+    save_images: True
     output_image_dir: /home/justin/code/point-to-pose/debug/output_images
-    save_final_sdf_on_exit: true
-    final_sdf_output_dir: /home/justin/code/point-to-pose/debug/final_sdf

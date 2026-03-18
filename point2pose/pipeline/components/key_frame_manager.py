@@ -22,7 +22,7 @@ class KeyFrameManager:
         self.cfg = cfg
         self.pipeline_cfg = cfg.pipeline.params
 
-        self.num_obj = self.pipeline_cfg.get("max_num_obj", 1)
+        self.num_obj = 0
         self.save_key_points = self.pipeline_cfg.get("save_key_points", False)
         self.max_rel_rotation_deg = self.pipeline_cfg.get("max_rel_rotation_deg", 45.0)
         self.fill_missing_depth = self.pipeline_cfg.get("fill_missing_depth", False)
@@ -206,12 +206,29 @@ class KeyFrameManager:
         self.pending_kf_require_pose_stable = bool(
             self.pipeline_cfg.get("pending_kf_require_pose_stable", True)
         )
+        self.retire_invalid_tracks = bool(
+            self.pipeline_cfg.get("retire_invalid_tracks", True)
+        )
+        self.retire_protect_keyframe_tracks = bool(
+            self.pipeline_cfg.get("retire_protect_keyframe_tracks", True)
+        )
         self.pending_kf_sdf_gate = bool(
             self.pipeline_cfg.get("pending_kf_sdf_gate", False)
         )
         self.pending_kf_sdf_gate_thres = float(
             self.pipeline_cfg.get("pending_kf_sdf_gate_thres", 0.02)
         )
+
+    def set_num_obj(self, num_obj: int):
+        self.num_obj = max(int(num_obj), 0)
+
+    def _infer_num_obj_from_mask(self, mask) -> int:
+        if mask is None or not hasattr(mask, "shape"):
+            return 0
+        shape = getattr(mask, "shape", None)
+        if shape is None or len(shape) == 0:
+            return 0
+        return int(shape[0])
 
     # -------------------------------------------------------------------------
     # First frame initialization
@@ -224,6 +241,10 @@ class KeyFrameManager:
         - Populates track_table and object.key_points
         - Creates an initial KeyFrame for each object
         """
+        self.num_obj = len(objects)
+        if self.num_obj == 0:
+            self.num_obj = self._infer_num_obj_from_mask(getattr(frame, "mask", None))
+
         self.samp_ctx.frame = frame
         self.samp_ctx.update_sampler_context(frame=frame, track_table=track_table)
 
@@ -314,6 +335,7 @@ class KeyFrameManager:
         cur_fe_result = hist_fe_results[-1]
         cur_frame = hist_frames[-1]
         cur_track_table_copy = hist_track_tables[-1]
+        self.num_obj = len(objects)
 
         # Update contexts for criterion + sampler
         self.crit_ctx.update_criterion_context(
@@ -374,6 +396,24 @@ class KeyFrameManager:
             #             f"detected for obj {obj_id}. Skipping sampling."
             #         )
             #         continue
+
+            # Skip resampling when the current/anchor pose is already covered by an
+            # existing promoted or pending keyframe pose. This uses the configured
+            # anchor thresholds, which were previously not applied to revisit rejection.
+            # pose_is_novel, novel_info = self._is_pose_novel_for_sampling(
+            #     obj_id=obj_id,
+            #     pose=np.asarray(obj.pose, dtype=np.float64),
+            # )
+            # if not pose_is_novel:
+            #     if self.pipeline_cfg.get("debug_level", 0) > 0:
+            #         print(
+            #             "[KeyFrameManager] Frame "
+            #             f"{cur_frame.id}: skip sampling for obj {obj_id} "
+            #             f"(pose already covered by {novel_info['source']} "
+            #             f"{novel_info['index']}, dR={novel_info['rot_deg']:.2f}deg, "
+            #             f"dT={novel_info['trans_m']:.3f}m)."
+            #         )
+            #     continue
 
             # Decide whether this frame is a keyframe for this object
             if not self.criterion.check_sample_criterion(self.crit_ctx, obj_id):
@@ -634,6 +674,63 @@ class KeyFrameManager:
 
         return created_keyframes
 
+    def _iter_sampling_reference_poses(self, obj_id: int):
+        """Yield promoted and pending keyframe poses for sampling-coverage checks."""
+        for i, kf in enumerate(self.keyframes.get(obj_id, [])):
+            pose = getattr(kf, "pose", None)
+            if pose is not None:
+                yield "keyframe", i, np.asarray(pose, dtype=np.float64)
+
+        for i, meta in enumerate(self.pending_keyframes.get(obj_id, [])):
+            kf = meta.get("keyframe", None)
+            pose = getattr(kf, "pose", None) if kf is not None else None
+            if pose is not None:
+                yield "pending_keyframe", i, np.asarray(pose, dtype=np.float64)
+
+    def _is_pose_novel_for_sampling(self, obj_id: int, pose: np.ndarray):
+        """
+        Check whether a pose is sufficiently different from existing sampled views.
+
+        Returns:
+            (is_novel: bool, info: dict)
+        """
+        pose = np.asarray(pose, dtype=np.float64)
+        best_info = None
+        best_score = None
+
+        rot_th = float(self.anchor_rot_deg)
+        trans_th = float(self.anchor_trans)
+
+        for source, index, ref_pose in self._iter_sampling_reference_poses(obj_id):
+            rot_deg, trans_m = self._compute_abs_motion(ref_pose, pose)
+            score = rot_deg + 1000.0 * trans_m
+
+            if best_score is None or score < best_score:
+                best_score = score
+                best_info = {
+                    "source": source,
+                    "index": int(index),
+                    "rot_deg": float(rot_deg),
+                    "trans_m": float(trans_m),
+                }
+
+            if (rot_deg <= rot_th) and (trans_m <= trans_th):
+                return False, {
+                    "source": source,
+                    "index": int(index),
+                    "rot_deg": float(rot_deg),
+                    "trans_m": float(trans_m),
+                }
+
+        if best_info is None:
+            best_info = {
+                "source": "none",
+                "index": -1,
+                "rot_deg": np.inf,
+                "trans_m": np.inf,
+            }
+        return True, best_info
+
     # -------------------------------------------------------------------------
     # Helpers
     # -------------------------------------------------------------------------
@@ -708,8 +805,12 @@ class KeyFrameManager:
         """
         all_sampled_points = np.empty((0, 2))
         frame = context.frame
+        num_obj = int(self.num_obj)
+        mask_count = self._infer_num_obj_from_mask(getattr(frame, "mask", None))
+        if mask_count > 0:
+            num_obj = mask_count if num_obj <= 0 else min(num_obj, mask_count)
 
-        for obj_id in range(self.num_obj):
+        for obj_id in range(num_obj):
             new_sampled_points = self.sampler.sample(context, obj_id)
             if len(new_sampled_points) == 0:
                 continue
@@ -864,6 +965,70 @@ class KeyFrameManager:
         if self.pending_kf_ttl_on_growth_frames:
             return int(meta.get("eval_age", 0))
         return int(meta.get("age", 0))
+
+    def _collect_protected_track_ids_for_obj(self, obj_id: int) -> np.ndarray:
+        protected = []
+
+        pending = np.asarray(
+            self.pending_track_ids.get(obj_id, []), dtype=np.int64
+        ).reshape(-1)
+        if pending.size > 0:
+            protected.append(pending)
+
+        promoted = np.asarray(
+            [tid for (oid, tid) in self.promoted_meta.keys() if oid == obj_id],
+            dtype=np.int64,
+        ).reshape(-1)
+        if promoted.size > 0:
+            protected.append(promoted)
+
+        for meta in self.pending_keyframes.get(obj_id, []):
+            track_ids = np.asarray(meta.get("track_ids", []), dtype=np.int64).reshape(
+                -1
+            )
+            if track_ids.size > 0:
+                protected.append(track_ids)
+
+        if self.retire_protect_keyframe_tracks:
+            for kf in self.keyframes.get(obj_id, []):
+                for attr in ("kp_track_indices", "obs_track_indices", "reg_valid_idx"):
+                    track_ids = np.asarray(
+                        getattr(kf, attr, np.zeros((0,), dtype=np.int64)),
+                        dtype=np.int64,
+                    ).reshape(-1)
+                    if track_ids.size > 0:
+                        protected.append(track_ids)
+
+        if not protected:
+            return np.zeros((0,), dtype=np.int64)
+        return np.unique(np.concatenate(protected))
+
+    def collect_retired_track_ids(self, objects) -> np.ndarray:
+        if not self.retire_invalid_tracks:
+            return np.zeros((0,), dtype=np.int64)
+
+        retired = []
+        for obj in objects:
+            track_ids = np.asarray(obj.kp_track_indices, dtype=np.int64).reshape(-1)
+            valid = np.asarray(obj.valid, dtype=bool).reshape(-1)
+            if track_ids.size == 0 or valid.size != track_ids.size:
+                continue
+
+            invalid_track_ids = track_ids[~valid]
+            if invalid_track_ids.size == 0:
+                continue
+
+            protected = self._collect_protected_track_ids_for_obj(obj.id)
+            if protected.size > 0:
+                invalid_track_ids = invalid_track_ids[
+                    ~np.isin(invalid_track_ids, protected)
+                ]
+            if invalid_track_ids.size > 0:
+                retired.append(invalid_track_ids)
+
+        if not retired:
+            return np.zeros((0,), dtype=np.int64)
+        return np.unique(np.concatenate(retired))
 
     def _queue_pending_keyframe(
         self, obj_id: int, keyframe: KeyFrame, track_ids: np.ndarray, frame_id: int

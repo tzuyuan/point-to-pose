@@ -43,9 +43,18 @@ class TapirTracker(Tracker):
         self._resize_height = config.get("resize_height", 256)
         self._resize_width = config.get("resize_width", 256)
         self._visible_threshold = config.get("visible_threshold", 0.5)
+        self._query_chunk_size = config.get("query_chunk_size", 64)
+        self._enable_tf32 = config.get("enable_tf32", False)
+        self._inactive_uncertainty = float(config.get("inactive_uncertainty", 1.0))
 
         self._device = config.get("device", "cpu")
         # self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        if self._enable_tf32 and str(self._device).startswith("cuda"):
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            if hasattr(torch, "set_float32_matmul_precision"):
+                torch.set_float32_matmul_precision("high")
 
         checkpoint_path = config.get(
             "checkpoint_path", "causal_bootstapir_checkpoint.pt"
@@ -53,7 +62,11 @@ class TapirTracker(Tracker):
 
         # TAPIR model
         self._model = tapir_model.TAPIR(pyramid_level=1, use_casual_conv=True)
-        self._model.load_state_dict(torch.load(checkpoint_path))
+        try:
+            state_dict = torch.load(checkpoint_path, weights_only=True)
+        except TypeError:
+            state_dict = torch.load(checkpoint_path)
+        self._model.load_state_dict(state_dict)
         self._model = self._model.to(self._device)
         self._model = self._model.eval()
         torch.set_grad_enabled(False)
@@ -63,6 +76,9 @@ class TapirTracker(Tracker):
         self.query_features = None
         self._causal_state = None
         self._initialized = False
+        self._active_global_ids = np.empty((0,), dtype=np.int64)
+        self._num_global_points = 0
+        self._last_tracks_full = np.empty((0, 2), dtype=np.float32)
 
     def initialize(self, frame):
         """
@@ -95,6 +111,9 @@ class TapirTracker(Tracker):
             uncertainties: np.ndarray, shape (num_points, 1), [uncertainty]
             visibles: np.ndarray, shape (num_points, 1), [visible]
         """
+        if self.query_features is None or self._active_global_ids.size == 0:
+            return self._build_full_outputs()
+
         rgb_resize = cv2.resize(frame.rgb, (self._resize_width, self._resize_height))
         rgb_resize_pinned = torch.from_numpy(rgb_resize).pin_memory()
         rgb_resize_tensor = rgb_resize_pinned.to(self._device, non_blocking=True)
@@ -115,10 +134,11 @@ class TapirTracker(Tracker):
                 (self._img_width, self._img_height),
             ).view(-1, 2)
 
-            return (
-                tracks.float().numpy(),
-                uncertainty.cpu().float().numpy().reshape(-1),
-                visibles.cpu().numpy().reshape(-1),
+            active_tracks = tracks.float().numpy()
+            active_uncertainty = uncertainty.cpu().float().numpy().reshape(-1)
+            active_visibles = visibles.cpu().numpy().reshape(-1)
+            return self._scatter_active_outputs(
+                active_tracks, active_uncertainty, active_visibles
             )
 
     def add_query_points(self, frame, new_points):
@@ -141,8 +161,9 @@ class TapirTracker(Tracker):
         rgb_resize = cv2.resize(frame.rgb, (self._resize_width, self._resize_height))
         rgb_resize_tensor = torch.tensor(rgb_resize).to(self._device)
 
+        global_old_len = self._num_global_points
+
         if self.query_points is None:
-            old_len = 0
             self.query_points = new_query_points
             # Initialize query features
             self.query_features = self._online_model_init(
@@ -161,7 +182,6 @@ class TapirTracker(Tracker):
                     for k, v in self._causal_state[i].items():
                         self._causal_state[i][k] = v.to(self._device)
         else:
-            old_len = self.query_points.shape[0]
             self.query_points = torch.cat((self.query_points, new_query_points), axis=0)
 
             new_qf = self._online_model_init(
@@ -176,10 +196,45 @@ class TapirTracker(Tracker):
             self._causal_state = self._expand_causal_state(new_query_points.shape[0])
 
         # get new length
-        new_len = self.query_points.shape[0]
+        n_new = int(new_query_points.shape[0])
+        global_new_len = global_old_len + n_new
+        new_global_ids = np.arange(global_old_len, global_new_len, dtype=np.int64)
+        self._active_global_ids = np.concatenate((self._active_global_ids, new_global_ids))
+        self._num_global_points = global_new_len
 
-        # indices of the newly added points
-        return np.arange(old_len, new_len)
+        new_points_np = np.asarray(new_points, dtype=np.float32).reshape(-1, 2)
+        if self._last_tracks_full.shape[0] == 0:
+            self._last_tracks_full = new_points_np.copy()
+        else:
+            self._last_tracks_full = np.concatenate(
+                [self._last_tracks_full, new_points_np], axis=0
+            )
+
+        return new_global_ids
+
+    def deactivate_query_points(self, global_ids):
+        if self.query_features is None or self._active_global_ids.size == 0:
+            return np.zeros((0,), dtype=np.int64)
+
+        global_ids = np.asarray(global_ids, dtype=np.int64).reshape(-1)
+        if global_ids.size == 0:
+            return np.zeros((0,), dtype=np.int64)
+
+        global_ids = np.unique(global_ids)
+        keep_mask = ~np.isin(self._active_global_ids, global_ids)
+        if np.all(keep_mask):
+            return np.zeros((0,), dtype=np.int64)
+
+        removed = self._active_global_ids[~keep_mask].copy()
+        self._active_global_ids = self._active_global_ids[keep_mask]
+
+        keep_mask_t = torch.as_tensor(
+            keep_mask, dtype=torch.bool, device=self.query_points.device
+        )
+        self.query_points = self.query_points[keep_mask_t]
+        self.query_features = self._filter_query_features(self.query_features, keep_mask_t)
+        self._causal_state = self._filter_causal_state(self._causal_state, keep_mask_t)
+        return removed
 
     def _expand_causal_state(self, n_new: int, point_axis: int = 1):
         """
@@ -198,6 +253,23 @@ class TapirTracker(Tracker):
                     shape[point_axis] = n_new
                     pad = torch.zeros(shape, dtype=v.dtype, device=v.device)
                     new_level[k] = torch.cat([v, pad], dim=point_axis)
+                else:
+                    new_level[k] = v
+            out.append(new_level)
+        return out
+
+    def _filter_causal_state(self, causal_state, keep_mask, point_axis: int = 1):
+        if causal_state is None:
+            return None
+
+        out = []
+        for level_dict in causal_state:
+            new_level = {}
+            for k, v in level_dict.items():
+                if torch.is_tensor(v) and v.dim() > point_axis:
+                    index = [slice(None)] * v.dim()
+                    index[point_axis] = keep_mask
+                    new_level[k] = v[tuple(index)]
                 else:
                     new_level[k] = v
             out.append(new_level)
@@ -231,6 +303,46 @@ class TapirTracker(Tracker):
             hires=tuple(hires_cat),
             resolutions=a.resolutions,  # keep a's (identical to b's)
         )
+
+    def _filter_query_features(
+        self, query_features: QueryFeatures, keep_mask, point_axis: int = 1
+    ) -> QueryFeatures:
+        lowres = []
+        hires = []
+        for feat in query_features.lowres:
+            index = [slice(None)] * feat.dim()
+            index[point_axis] = keep_mask
+            lowres.append(feat[tuple(index)])
+        for feat in query_features.hires:
+            index = [slice(None)] * feat.dim()
+            index[point_axis] = keep_mask
+            hires.append(feat[tuple(index)])
+        return QueryFeatures(
+            lowres=tuple(lowres),
+            hires=tuple(hires),
+            resolutions=query_features.resolutions,
+        )
+
+    def _build_full_outputs(self):
+        tracks = self._last_tracks_full.copy()
+        if tracks.shape[0] != self._num_global_points:
+            tracks = np.zeros((self._num_global_points, 2), dtype=np.float32)
+            self._last_tracks_full = tracks.copy()
+        uncertainty = np.full(
+            (self._num_global_points,), self._inactive_uncertainty, dtype=np.float32
+        )
+        visibles = np.zeros((self._num_global_points,), dtype=bool)
+        return tracks, uncertainty, visibles
+
+    def _scatter_active_outputs(self, active_tracks, active_uncertainty, active_visibles):
+        tracks, uncertainty, visibles = self._build_full_outputs()
+        active_ids = self._active_global_ids
+        if active_ids.size > 0:
+            tracks[active_ids] = active_tracks
+            uncertainty[active_ids] = active_uncertainty
+            visibles[active_ids] = active_visibles
+        self._last_tracks_full = tracks.copy()
+        return tracks, uncertainty, visibles
 
     def _preprocess_frames(self, frames):
         """Preprocess frames to model inputs.
@@ -304,7 +416,7 @@ class TapirTracker(Tracker):
             feature_grids=feature_grids,
             query_features=query_features,
             query_points_in_video=None,
-            query_chunk_size=64,
+            query_chunk_size=max(1, min(self._query_chunk_size, query_features.lowres[0].shape[1])),
             causal_context=causal_context,
             get_causal_context=True,
         )

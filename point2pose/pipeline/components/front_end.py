@@ -24,7 +24,8 @@ class FrontEnd:
         self.cfg = cfg
         self.pipeline_cfg = cfg.pipeline.params
 
-        self.num_obj = self.pipeline_cfg.get("max_num_obj", 1)
+        self.num_obj = 0
+        self._sync_timing_cuda = bool(self.pipeline_cfg.get("sync_timing_cuda", True))
 
         # ------------- depth related -------------
         self.min_depth = self.pipeline_cfg.get("min_depth", 0.05)
@@ -208,16 +209,36 @@ class FrontEnd:
             self.pipeline_cfg.get("tentative_fallback_allow_stale_when_empty", True)
         )
 
+    def _sync_cuda_for_timing(self):
+        if self._sync_timing_cuda and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    def set_num_obj(self, num_obj: int):
+        self.num_obj = max(int(num_obj), 0)
+
+    def _infer_num_obj_from_mask(self, mask) -> int:
+        if mask is None or not hasattr(mask, "shape"):
+            return 0
+        shape = getattr(mask, "shape", None)
+        if shape is None or len(shape) == 0:
+            return 0
+        return int(shape[0])
+
     def initialize(self, frame):
         """Initialize segmentation and tracker with the first frame."""
         self.segmenter.initialize(frame.rgb, mask=frame.mask)
 
         if self.use_segmenter:
-            # get number of objects
-            # self.num_obj = np.sum(np.asarray(self.segmenter.input_labels) == 1)
             # get segmentation mask
             obj_ids, mask_logits = self.segmenter.segment(frame.rgb)
             frame.mask = mask_logits
+            mask_count = self._infer_num_obj_from_mask(mask_logits)
+            if mask_count > 0:
+                self.num_obj = mask_count
+            else:
+                self.num_obj = int(getattr(self.segmenter, "num_obj", 0) or 0)
+        else:
+            self.num_obj = 1
 
         self.tracker.initialize(frame)
         self.frame_id = 0
@@ -238,21 +259,32 @@ class FrontEnd:
         # Timing dictionary for frontend modules
         fe_timings = {}
 
+        def start_timer():
+            self._sync_cuda_for_timing()
+            return time.perf_counter()
+
+        def stop_timer(t_start):
+            self._sync_cuda_for_timing()
+            return time.perf_counter() - t_start
+
+        if objects is not None:
+            self.num_obj = len(objects)
+
         ##########################################################
         ##                     segmenter                        ##
         ##########################################################
-        t_start = time.time()
+        t_start = start_timer()
         if self.use_segmenter:
             _, mask_logits = self.segmenter.segment(frame.rgb)
             frame.mask = mask_logits  # mask is a torch tensor on gpu
-        fe_timings["segmenter"] = time.time() - t_start
+        fe_timings["segmenter"] = stop_timer(t_start)
 
         ##########################################################
         ##                      tracker                         ##
         ##########################################################
-        t_start = time.time()
+        t_start = start_timer()
         tracks, uncertainties, visibles = self.tracker.track_once(frame)
-        fe_timings["tracker"] = time.time() - t_start
+        fe_timings["tracker"] = stop_timer(t_start)
 
         print(f"number of tracks: {len(tracks)}")
 
@@ -262,7 +294,7 @@ class FrontEnd:
         ##########################################################
         ##              2D -> 3D conversion                     ##
         ##########################################################
-        t_start = time.time()
+        t_start = start_timer()
         track_3d, track_valid = convert_pixel_to_world(
             pixel=tracks,
             depth_image=frame.depth,
@@ -280,7 +312,7 @@ class FrontEnd:
             sigma_base_b=0.0,
             edge_alpha=5.0,
         )
-        fe_timings["2d_to_3d"] = time.time() - t_start
+        fe_timings["2d_to_3d"] = stop_timer(t_start)
 
         ##########################################################
         ##                      register                        ##
@@ -326,7 +358,7 @@ class FrontEnd:
 
             if self.frame_reg_mode == "f2f":
                 # Frame-to-frame registration (relative pose)
-                t_start = time.time()
+                t_start = start_timer()
                 if obj.lost:
                     print(f"[FrontEnd] Object {obj_id} is lost, skip f2f registration.")
                     continue
@@ -336,12 +368,12 @@ class FrontEnd:
                         obj_id, track_table, track_3d, track_valid, current_visibles
                     )
                 )
-                fe_timings["extract_valid"] += time.time() - t_start
+                fe_timings["extract_valid"] += stop_timer(t_start)
 
                 prev_pose = obj.pose.copy()
                 # solve frame to frame registration
                 if prev3d.shape[0] >= 3 and correspond_curr3d.shape[0] >= 3:
-                    t_start = time.time()
+                    t_start = start_timer()
                     T_rel, stats_reg = self.register.register(
                         prev3d,
                         correspond_curr3d,
@@ -353,7 +385,7 @@ class FrontEnd:
                         obj=obj,
                         mode="f2f",
                     )
-                    fe_timings["registration"] += time.time() - t_start
+                    fe_timings["registration"] += stop_timer(t_start)
                     mean_res = self._compute_mean_residual(stats_reg)
 
                 stats_reg["correspond_curr3d"] = correspond_curr3d
@@ -362,7 +394,7 @@ class FrontEnd:
 
             elif self.frame_reg_mode == "f2m":
                 # Frame-to-map registration (absolute pose)
-                t_start = time.time()
+                t_start = start_timer()
                 # idx, key_points, correspond_curr3d, valid_stats = self._extract_valid_key_points(
                 #     obj,
                 #     track_table.obj2track_map[obj_id],
@@ -403,12 +435,12 @@ class FrontEnd:
                 #     )
                 # )
 
-                fe_timings["extract_valid"] += time.time() - t_start
+                fe_timings["extract_valid"] += stop_timer(t_start)
 
                 prev_pose = obj.pose.copy()
                 # solve frame to map registration
                 if key_points.shape[0] >= 3 and correspond_curr3d.shape[0] >= 3:
-                    t_start = time.time()
+                    t_start = start_timer()
 
                     T_c2w_est, stats_reg = self.register.register(
                         src_pcd=key_points,
@@ -423,7 +455,7 @@ class FrontEnd:
                         mode="f2m",
                         # img_pts=tracks[idx],
                     )
-                    fe_timings["registration"] += time.time() - t_start
+                    fe_timings["registration"] += stop_timer(t_start)
                     mean_res = self._compute_mean_residual(stats_reg)
 
                     T_c2w_est, jump_rejected, jump_info = self._apply_pose_jump_guard(
@@ -500,7 +532,7 @@ class FrontEnd:
                     )
 
                     # perform dense recovery
-                    t_start = time.time()
+                    t_start = start_timer()
                     if self.frame_reg_mode == "f2f":
                         T_rel_dense, stats_dense_after = self._apply_dense_recovery(
                             obj_id, self.prev_frame, frame, T_rel
@@ -515,7 +547,7 @@ class FrontEnd:
                                 init_pose=init_pose,
                             )
                         )
-                    fe_timings["dense_recovery"] += time.time() - t_start
+                    fe_timings["dense_recovery"] += stop_timer(t_start)
 
                     # Store dense recovery info in result
                     result.dense_recovery_triggered[obj_id] = True
@@ -698,17 +730,19 @@ class FrontEnd:
 
         # Optionally save cropped pcd
         if self.save_cropped_pcd:
-            t_start = time.time()
+            t_start = start_timer()
             self._save_cropped_pcd(frame)
-            fe_timings["save_cropped_pcd"] = time.time() - t_start
+            fe_timings["save_cropped_pcd"] = stop_timer(t_start)
 
         # Update previous frame for next step
         self.prev_frame = frame
 
         # Print timing summary
         total_fe_time = sum(fe_timings.values())
+        result.timings = {k: float(v) for k, v in fe_timings.items()}
+        result.timings["total"] = float(total_fe_time)
         timing_str = " | ".join(
-            [f"{k}: {v*1000:.2f}ms" for k, v in fe_timings.items() if v > 0]
+            [f"{k}: {v*1000:.2f}ms" for k, v in fe_timings.items()]
         )
         print(
             f"[FrontEnd] Frame {frame.id} timing: {timing_str} | Total: {total_fe_time*1000:.2f}ms"
@@ -968,7 +1002,7 @@ class FrontEnd:
         return T_candidate, False
 
     def _save_cropped_pcd(self, frame):
-        num_objs = self.num_obj
+        num_objs = self._infer_num_obj_from_mask(frame.mask)
         for obj_id in range(num_objs):
             try:
                 mask = frame.mask[obj_id, 0]
