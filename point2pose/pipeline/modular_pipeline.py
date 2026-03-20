@@ -147,12 +147,14 @@ class ModularPipeline:
         self.debug_level = self.pipeline_cfg.get("debug_level", 0)
         self.debug_dir = self.pipeline_cfg.get("debug_dir", None)
         self.sdf_mesh_save_every = int(self.pipeline_cfg.get("sdf_mesh_save_every", 1))
-        self.sdf_mesh_save_dir = None
+        self.sdf_mesh_save_dir = self.pipeline_cfg.get("sdf_mesh_save_dir", None)
 
-        if self.debug_dir:
-            self.sdf_mesh_save_dir = os.path.join(self.debug_dir, "sdf_mesh")
-        else:
-            self.sdf_mesh_save_dir = "./results/sdf_mesh"
+        if self.sdf_mesh_save_dir is None:
+            if self.debug_dir:
+                self.sdf_mesh_save_dir = os.path.join(self.debug_dir, "sdf_mesh")
+            else:
+                self.sdf_mesh_save_dir = "./results/sdf_mesh"
+        self.sdf_mesh_save_dir = os.path.abspath(str(self.sdf_mesh_save_dir))
         os.makedirs(self.sdf_mesh_save_dir, exist_ok=True)
 
         if self.save_pose:

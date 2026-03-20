@@ -79,7 +79,13 @@ def get_all_video_names(data_path):
     return sorted(video_names)
 
 
-def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: str):
+def run_ho3d_single(
+    data_path: str,
+    video_name: str,
+    out_dir: str,
+    config_path: str,
+    max_frames: int | None = None,
+):
     """Process a single HO3D video and return evaluation metrics."""
     video_path = os.path.join(data_path, os.path.join("evaluation/", video_name))
 
@@ -130,6 +136,8 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
         last_frame_idx = -1
         try:
             for i, color_file in enumerate(reader.color_files):
+                if max_frames is not None and i >= max_frames:
+                    break
                 last_frame_idx = i
                 color = cv2.imread(color_file)
                 H, W = color.shape[:2]
@@ -351,32 +359,51 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
 
 
 def run_ho3d_all(
-    data_path: str, out_dir: str, config_path: str, rerun_existing: bool = True
+    data_path: str,
+    out_dir: str,
+    config_path: str,
+    rerun_existing: bool = True,
+    video_names: list[str] | None = None,
+    max_frames: int | None = None,
 ):
     """Process all HO3D videos and generate a summary."""
     os.makedirs(out_dir, exist_ok=True)
 
     # Get all video names
-    video_names = get_all_video_names(data_path)
-    print(f"Found {len(video_names)} videos to process: {video_names}")
+    all_video_names = get_all_video_names(data_path)
+    if video_names:
+        missing = [name for name in video_names if name not in all_video_names]
+        if missing:
+            raise ValueError(f"Unknown HO3D videos requested: {missing}")
+        selected_video_names = [name for name in all_video_names if name in video_names]
+    else:
+        selected_video_names = all_video_names
+
+    print(f"Found {len(selected_video_names)} videos to process: {selected_video_names}")
     print("-" * 80)
 
     # Process each video
     results = []
     skipped_count = 0
-    for idx, video_name in enumerate(video_names, 1):
+    for idx, video_name in enumerate(selected_video_names, 1):
         video_out_dir = os.path.join(out_dir, video_name)
         if os.path.isdir(video_out_dir) and not rerun_existing:
             print(
-                f"\n[{idx}/{len(video_names)}] Skipping video: {video_name} "
+                f"\n[{idx}/{len(selected_video_names)}] Skipping video: {video_name} "
                 f"(existing output found at {video_out_dir})"
             )
             skipped_count += 1
             continue
 
-        print(f"\n[{idx}/{len(video_names)}] Processing video: {video_name}")
+        print(f"\n[{idx}/{len(selected_video_names)}] Processing video: {video_name}")
         try:
-            result = run_ho3d_single(data_path, video_name, out_dir, config_path)
+            result = run_ho3d_single(
+                data_path,
+                video_name,
+                out_dir,
+                config_path,
+                max_frames=max_frames,
+            )
             if result is not None:
                 results.append(result)
         except Exception as e:
@@ -465,13 +492,28 @@ if __name__ == "__main__":
         action="store_false",
         help="Skip a sequence if its output directory already exists.",
     )
+    parser.add_argument(
+        "--video_names",
+        type=str,
+        default="",
+        help="Optional comma-separated subset of HO3D videos to run.",
+    )
+    parser.add_argument(
+        "--max_frames",
+        type=int,
+        default=None,
+        help="Optional frame cap for quicker debugging or small sweeps.",
+    )
     parser.set_defaults(rerun_existing=True)
 
     args = parser.parse_args()
+    video_names = [v.strip() for v in args.video_names.split(",") if v.strip()]
 
     run_ho3d_all(
         args.data_path,
         args.out_dir,
         args.config_path,
         rerun_existing=bool(args.rerun_existing),
+        video_names=video_names or None,
+        max_frames=args.max_frames,
     )

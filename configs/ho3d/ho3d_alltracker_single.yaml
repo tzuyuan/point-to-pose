@@ -1,52 +1,13 @@
-realsense:
-  params:
-    rs_serial: 941322070969
-    width: 640
-    height: 480
-    color_fps: 60
-    depth_fps: 60
-    # Reduce latency by keeping the RealSense queues short and draining to the newest frame.
-    frames_queue_size: 1
-    drop_stale_frames: true
-    max_frame_drain: 8
-    timing_debug_every: 30
-    # Motion blur is mostly driven by the RGB exposure time.
-    # To reduce blur:
-    # 1. try color_fps: 60 if your camera supports it
-    # 2. set color_auto_exposure: false
-    # 3. lower color_exposure_us (for example 4000-8000)
-    # 4. raise color_gain if the image becomes too dark
-    color_auto_exposure: true
-    color_auto_exposure_priority: false
-    color_exposure_us: 100
-    color_gain: null
-    color_sharpness: null
-    depth_emitter_enabled: true
-
-
 pipeline:
   type: modular
   params:
-    # Bounding-box estimation modes:
-    #   first_frame_dense: estimate bbox + init pose from the first frame dense mask cloud
-    #   continuous: update bbox automatically from the configured source over time
-    #   manual: only update bbox when the RealSense example receives the 'b' key
-    bbox_estimation_mode: manual
-    # Source used by continuous/manual modes: keypoints | sdf
-    bbox_estimation_source: sdf
-    # Outlier rejection: none | mad | dbscan | mad_dbscan
-    bbox_outlier_rejection: mad_dbscan
-    bbox_min_points: 12
-    bbox_max_points: 6000
-    bbox_mad_scale: 3.5
-    bbox_dbscan_eps: 0.02
-    bbox_dbscan_min_points: 8
-    bbox_fit_minimal_obb: true
+    max_num_obj: 1
+    estimate_init_pose: false
 
     use_segmenter: true
     sync_timing_cuda: true
-    retire_invalid_tracks: false
-    retire_protect_keyframe_tracks: false
+    retire_invalid_tracks: true
+    retire_protect_keyframe_tracks: true
 
     # depth related
     fill_missing_depth: true
@@ -60,14 +21,14 @@ pipeline:
     device: cuda
     depth_encoder: vitl
 
-    max_rel_rotation_deg: 30
-    max_rel_translation: 0.1
+    max_rel_rotation_deg: 15
+    max_rel_translation: 0.03
     pose_jump_guard_enable: true
-    pose_jump_guard_trans_thres: 0.1
-    pose_jump_guard_rot_deg_thres: 30.0
-    pose_jump_guard_min_inliers: 5
-    pose_jump_guard_min_inlier_ratio: 0.0
-    pose_jump_guard_single_cluster_min_inliers: 5
+    pose_jump_guard_trans_thres: 0.08
+    pose_jump_guard_rot_deg_thres: 25.0
+    pose_jump_guard_min_inliers: 10
+    pose_jump_guard_min_inlier_ratio: 0.15
+    pose_jump_guard_single_cluster_min_inliers: 12
 
     kf_gating: false
     anchor_rot_deg: 15.0
@@ -79,11 +40,10 @@ pipeline:
     anchor_vel_rot_deg: 150.0
     anchor_vel_trans: 1.00
 
-    sdf_kf_gate : false
+    sdf_kf_gate: false
     sdf_kf_gate_thres: 0.05
     sdf_kf_gate_percentile: 70.0
     sdf_kf_gate_min_dense: 200
-
 
     # frame-level growth gate
     map_growth_gate: false
@@ -100,7 +60,7 @@ pipeline:
     # pending promotion geometry consistency
     pending_obs_min_count: 4
     pending_obs_max_keep: 8
-    pending_obj_spread_thres: 0.008          # meters
+    pending_obj_spread_thres: 0.008
     pending_use_view_diversity: true
     pending_min_view_angle_deg: 5.0
     pending_kf_min_promoted_ratio: 0.3
@@ -121,7 +81,7 @@ pipeline:
     pending_reset_on_bad: true
 
     # newly promoted point warmup trust
-    promoted_warmup_frames: 1
+    promoted_warmup_frames: 4
     promoted_init_uncer: 0.2
     promoted_min_uncer: 0.1
     promoted_spread_to_uncer: 0.00
@@ -143,8 +103,7 @@ pipeline:
     meta_data_save_path: /home/justin/code/point-to-pose/debug/pipeline/meta_data
     save_cropped_pcd: false
     cropped_pcd_dir: /home/justin/code/point-to-pose/debug/cropped_pcd
-    sdf_mesh_save_every: 5
-    sdf_mesh_save_dir: /home/justin/code/point-to-pose/debug/sdf_mesh
+    sdf_mesh_save_every: 0
 
 reconstructor:
   type: sdf_builder
@@ -153,24 +112,22 @@ reconstructor:
     sdf_use_gpu: true
     sdf_backend: python_tsdf
     sdf_voxel_size: 0.005
-    sdf_bounds_padding: 0.1
-    sdf_max_voxels: 20000
+    sdf_bounds_padding: 0.2
+    sdf_max_voxels: 20000000
     sdf_max_extent_m: 1.0
     sdf_min_points: 300
     sdf_filter_max_radius: 0.25
     sdf_filter_keep_percentile: 98.0
     sdf_fuse_color: true
-    
+
 register:
-  # type: svd_residual_outlier
   type: svd_cluster_ransac
   params:
-
     threshold_method: fixed
 
     ransac_iters: 100
     sample_size: 4
-    inlier_thres: 0.006 #0.004
+    inlier_thres: 0.006
     min_inliers: 5
     max_clusters: 10
     use_uncertainty: true
@@ -250,81 +207,22 @@ segmenter:
     model_cfg: configs/sam2.1/sam2.1_hiera_l.yaml
     checkpoint: /home/justin/code/point-to-pose/checkpoints/sam2.1/sam2.1_hiera_large.pt
     device: cuda
-    vos_inference: true
-    apply_postprocessing: false
-    compile_memory_encoder: true
-    # compile_memory_attention: true
-    compile_prompt_encoder: true
-    compile_mask_decoder: true
 
 tracker:
-  type: tapir
+  type: alltracker
   params:
-    resize_height: 480
-    resize_width: 480
-    visible_threshold: 0.5
-    query_chunk_size: 2048
-    enable_tf32: true
+    repo_path: /home/justin/code/alltracker
     device: cuda
-    checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
+    window_len: 16
+    inference_iters: 4
+    visible_threshold: 0.6
+    use_confidence_product: true
+    enable_tf32: true
+    resize_height: 480
+    resize_width: 640
+    tiny: false
 
-# tracker:
-#   type: tapnext
-#   params:
-#     resize_height: 256
-#     resize_width: 256
-#     visible_threshold: 0.5
-#     certainty_radius: 8
-#     use_certainty_for_visibility: true
-#     enable_tf32: true
-#     device: cuda
-#     checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapnext/bootstapnext_ckpt.npz
- 
-# tracker:
-  # type: tapnext
-  # params:
-  #   resize_height: 256
-  #   resize_width: 256
-  #   visible_threshold: 0.5
-  #   certainty_radius: 8
-  #   use_certainty_for_visibility: true
-  #   enable_tf32: true
-  #   device: cuda
-  #   checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapnext/bootstapnext_ckpt.npz
-
-# tracker:
-#   type: alltracker
-#   params:
-#     # Clone https://github.com/aharley/alltracker and point repo_path there,
-#     # or set ALLTRACKER_REPO_PATH in the environment.
-#     repo_path: /home/justin/code/alltracker
-#     # Optional: leave checkpoint_path unset to auto-download the official weights.
-#     checkpoint_path: /home/justin/code/point-to-pose/checkpoints/alltracker/alltracker.pth
-#     device: cuda
-#     window_len: 16
-#     inference_iters: 4
-#     visible_threshold: 0.6
-#     use_confidence_product: true
-#     enable_tf32: true
-#     resize_height: 480
-#     resize_width: 640
-#     tiny: false
- 
-  
-# tracker:
-#   type: cotracker3_online
-#   params:
-#     img_height: 480
-#     img_width: 640
-#     resize_height: 480
-#     resize_width: 640
-#     device: cuda
-#     window_len: 16
-#     v2: False  
-#     checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
-#     debug: false
-
-sampler: 
+sampler:
   type: super_point_balanced
   params:
     num_points: 30
@@ -348,22 +246,17 @@ sampler:
     sample_filter_enable: true
     sample_require_depth_valid: true
     sample_reject_depth_edge: true
-    sample_depth_edge_window: 2        # 3x3 patch
-    sample_depth_edge_thres: 0.01      # meters depth span
+    sample_depth_edge_window: 2
+    sample_depth_edge_thres: 0.01
     sample_min_pixel_dist_existing: 6.0
     sample_min_pixel_dist_new: 4.0
-    sample_max_per_obj: 0              # 0 = no cap
+    sample_max_per_obj: 0
 
     debug_level: 0
     debug_dir: /home/justin/code/point-to-pose/debug/sampler
     debug_save_superpoint: false
 
 criterion:
-  ### criterion types: 
-  ###      iteration, registration_residual, 
-  ###      uncertainty_ratio, uncertainty_number, 
-  ###      rotation_grid, rotation_threshold
-  ###      mask_area
   type: rotation_threshold_and_min_num
   params:
     # iteration criterion
@@ -374,17 +267,16 @@ criterion:
 
     # uncertainty criterion
     uncer_thres: 0.3
-    min_num_pts: 0
+    min_num_pts: 20
 
     # rotation threshold and min num criterion
-    # if it's smaller than this it will not trigger sampling
-    min_mask_area: 100  
+    min_mask_area: 100
 
     # rotation grid criterion
     discretization_angle: 60
 
     # rotation threshold criterion
-    max_angle_deg: 20
+    max_angle_deg: 10
 
     # mask area criterion
     fit_mode: convex
@@ -427,30 +319,5 @@ visualization:
     visualize_points: true
     # uncertainty, visible, visible_valid, visible_uncertainty, registration_used_valid, registration_correspondence, frame_id
     points_vis_method: visible_uncertainty
-    save_images: false
+    save_images: true
     output_image_dir: /home/justin/code/point-to-pose/debug/output_images
-    save_final_sdf_on_exit: true
-    final_sdf_output_dir: /home/justin/code/point-to-pose/debug/final_sdf
-
-lcm:
-  rgbd_channel: d435i_1
-  camera_info_channel: d435i_1_info
-  obj_pose_bb2world_channel: hw_obj_pose
-  obj_pose_mesh2world_channel: hw_obj_mesh_pose
-  sub_poll_hz: 500.0
-  pub_hz: 60.0
-  drop_stale_frames: true
-  max_frame_drain: 8
-  window_name: Point2Pose LCM Tracker
-  verbose: false
-
-viser:
-  host: 0.0.0.0
-  port: 8080
-  mesh_watch_dir: /home/justin/code/point-to-pose/debug/sdf_mesh
-  mesh_poll_hz: 2.0
-  filter_disconnected: true
-  show_bbox: true
-  show_axes: true
-  show_labels: true
-  show_world_frame: true

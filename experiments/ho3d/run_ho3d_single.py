@@ -48,7 +48,13 @@ def gt_bbox_minmax_from_mesh(reader):
     return np.vstack([bmin.astype(float), bmax.astype(float)])  # (2,3)
 
 
-def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: str):
+def run_ho3d_single(
+    data_path: str,
+    video_name: str,
+    out_dir: str,
+    config_path: str,
+    max_frames: int | None = None,
+):
     video_path = os.path.join(data_path, os.path.join("evaluation/", video_name))
 
     reader = Ho3dReader(video_path, data_path)
@@ -111,6 +117,8 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
     gt_ids = []
 
     for i, color_file in enumerate(reader.color_files):
+        if max_frames is not None and i >= max_frames:
+            break
         color = cv2.imread(color_file)
         H, W = color.shape[:2]
         rgb = cv2.cvtColor(color, cv2.COLOR_BGR2RGB)
@@ -413,7 +421,19 @@ if __name__ == "__main__":
         type=str,
         default="/home/justin/code/point-to-pose/configs/ho3d/ho3d_single.yaml",
     )
+    parser.add_argument(
+        "--max_frames",
+        type=int,
+        default=None,
+        help="Optional frame cap for quicker debugging or small sweeps.",
+    )
 
     args = parser.parse_args()
 
-    run_ho3d_single(args.data_path, args.video_name, args.out_dir, args.config_path)
+    run_ho3d_single(
+        args.data_path,
+        args.video_name,
+        args.out_dir,
+        args.config_path,
+        max_frames=args.max_frames,
+    )

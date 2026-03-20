@@ -11,6 +11,7 @@ dependencies = [
     "omegaconf",
     "pyrealsense2",
     "torch",
+    "viser",
     # add other core dependencies
 ]
 
