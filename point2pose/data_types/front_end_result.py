@@ -12,9 +12,16 @@ class FrontEndResult:
     frame_id: int
     # Per-object results, keyed by obj_id
     obj_poses: Dict[int, np.ndarray] = field(default_factory=dict)  # 4x4 pose matrices
+    obj_poses_raw: Dict[int, np.ndarray] = field(
+        default_factory=dict
+    )  # raw frontend pose matrices
+    obj_poses_filtered: Dict[int, np.ndarray] = field(
+        default_factory=dict
+    )  # filtered pose matrices
     rel_poses: Dict[int, np.ndarray] = field(
         default_factory=dict
     )  # 4x4 relative pose matrices
+    pose_filter_stats: Dict[int, Dict[str, Any]] = field(default_factory=dict)
 
     # Registration stats per object
     # Key: obj_id, Value: Dict with stats (inliers, residuals, etc.)

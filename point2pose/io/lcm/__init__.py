@@ -2,6 +2,7 @@ __all__ = [
     "LcmTrackingRunner",
     "NamedVecListLcmSubscriber",
     "NamedVecListLcmPublisher",
+    "RgbdLcmPublisher",
     "RgbdLcmSubscriber",
     "ViserLcmVisualizer",
 ]
@@ -20,6 +21,10 @@ def __getattr__(name):
         from .runtime import NamedVecListLcmSubscriber
 
         return NamedVecListLcmSubscriber
+    if name == "RgbdLcmPublisher":
+        from .runtime import RgbdLcmPublisher
+
+        return RgbdLcmPublisher
     if name == "RgbdLcmSubscriber":
         from .runtime import RgbdLcmSubscriber
 

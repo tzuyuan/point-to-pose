@@ -15,6 +15,7 @@ from point2pose.modules.object.object import Object
 from point2pose.io.outputs.logger import DataLogger
 from point2pose.utils.camera import convert_pixel_to_world
 from point2pose.utils.transform import inverse_SE3
+from point2pose.utils.se3_cv_pose_filter import SE3ConstantVelocityFilter
 from point2pose.utils.logger_fields import RAGGED_FIELDS
 
 # Components
@@ -22,6 +23,7 @@ from point2pose.pipeline.components.front_end import FrontEnd
 from point2pose.pipeline.components.key_frame_manager import KeyFrameManager
 from point2pose.pipeline.components.local_optimizer import LocalOptimizer
 from point2pose.pipeline.components.key_frame_graph import KeyFrameGraph
+from point2pose.pipeline.components.pose_filter_manager import PoseFilterManager
 from point2pose.pipeline.components.recovery_manager import RecoveryManager
 from point2pose.modules.reconstruction import SDFBuilder
 
@@ -139,6 +141,67 @@ class ModularPipeline:
         self.hist_track_tables = deque(maxlen=self.num_hist)
         self.last_frontend_timings = {}
         self.last_step_module_times = {}
+
+        # Online pose filtering
+        self.pose_filter_enable = bool(
+            self.pipeline_cfg.get("pose_filter_enable", False)
+        )
+        self.pose_filter_log_raw_pose = bool(
+            self.pipeline_cfg.get("pose_filter_log_raw_pose", True)
+        )
+        self.pose_filter_skip_on_jump_reject = bool(
+            self.pipeline_cfg.get("pose_filter_skip_on_jump_reject", True)
+        )
+        self.pose_filter_nominal_dt = float(
+            self.pipeline_cfg.get("pose_filter_nominal_dt", 1.0 / 30.0)
+        )
+        self.pose_filter_min_dt = float(
+            self.pipeline_cfg.get(
+                "pose_filter_min_dt", 0.5 * self.pose_filter_nominal_dt
+            )
+        )
+        self.pose_filter_max_dt = float(
+            self.pipeline_cfg.get(
+                "pose_filter_max_dt", max(0.2, 5.0 * self.pose_filter_nominal_dt)
+            )
+        )
+        jump_guard_trans = float(
+            self.pipeline_cfg.get(
+                "pose_jump_guard_trans_thres", self.max_rel_translation
+            )
+        )
+        jump_guard_rot_deg = float(
+            self.pipeline_cfg.get(
+                "pose_jump_guard_rot_deg_thres", self.max_rel_rotation_deg
+            )
+        )
+        self.pose_filter_reset_trans_thres = float(
+            self.pipeline_cfg.get(
+                "pose_filter_reset_trans_thres",
+                max(self.max_rel_translation, jump_guard_trans),
+            )
+        )
+        self.pose_filter_reset_rot_deg_thres = float(
+            self.pipeline_cfg.get(
+                "pose_filter_reset_rot_deg_thres",
+                max(self.max_rel_rotation_deg, jump_guard_rot_deg),
+            )
+        )
+        self.pose_filter_min_valid_correspondences = int(
+            self.pipeline_cfg.get(
+                "pose_filter_min_valid_correspondences",
+                max(3, int(self.cfg.register.params.get("min_inliers", 3))),
+            )
+        )
+        self.pose_filter_manager = PoseFilterManager(
+            enabled=self.pose_filter_enable,
+            log_raw_pose=self.pose_filter_log_raw_pose,
+            min_valid_correspondences=self.pose_filter_min_valid_correspondences,
+            reset_trans_thres=self.pose_filter_reset_trans_thres,
+            reset_rot_deg_thres=self.pose_filter_reset_rot_deg_thres,
+            filter_kwargs=self._build_pose_filter_kwargs(),
+            skip_on_jump_reject=self.pose_filter_skip_on_jump_reject,
+        )
 
         # Logging
         self.save_pose = self.pipeline_cfg.get("save_pose", False)
@@ -275,6 +338,8 @@ class ModularPipeline:
             else:
                 self.pose_log_files.append(None)
 
+        self._initialize_pose_filters(frame)
+
         # 3. Initialize KeyFrameManager (Sampling)
         # This will populate track_table and object keypoints
         new_kfs = self.kf_manager.initialize(
@@ -369,7 +434,12 @@ class ModularPipeline:
                     "obj_kp_3d_camera": kf_kp_3d_camera_init,  # Newly initialized keypoints in camera frame
                     "is_key_frame": True,
                     "pose_frontend": np.eye(4),
+                    "pose_frontend_raw": np.eye(4),
                     "pose_local": np.eye(4),
+                    "pose_filter_twist": np.zeros(6, dtype=float),
+                    "pose_filter_pred_only": False,
+                    "pose_filter_innovation": np.zeros(6, dtype=float),
+                    "pose_filter_meas_scale": 1.0,
                     "reg_curr3d": self.objects[obj_id].key_points,
                     "reg_residuals": np.zeros(len(self.objects[obj_id].key_points)),
                     "reg_inliers": np.ones(
@@ -476,6 +546,7 @@ class ModularPipeline:
         #################################################################
         t0 = time.time()
         fe_result = self.frontend.step(frame, self.track_table, self.objects)
+        self._apply_pose_filters(frame, fe_result)
         self.last_frontend_timings = dict(getattr(fe_result, "timings", {}))
         module_times["frontend"] = time.time() - t0
 
@@ -845,7 +916,22 @@ class ModularPipeline:
                 "pose_frontend": (
                     pose_frontend[obj_id] if pose_frontend else np.eye(4)
                 ),
+                "pose_frontend_raw": self._get_logged_pose_frontend_raw(
+                    fe_result, obj_id
+                ),
                 "pose_local": pose_local[obj_id] if pose_local else np.eye(4),
+                "pose_filter_twist": self._get_pose_filter_field(
+                    fe_result, obj_id, "twist", np.zeros(6, dtype=float)
+                ),
+                "pose_filter_pred_only": bool(
+                    self._get_pose_filter_field(fe_result, obj_id, "pred_only", False)
+                ),
+                "pose_filter_innovation": self._get_pose_filter_field(
+                    fe_result, obj_id, "innovation", np.zeros(6, dtype=float)
+                ),
+                "pose_filter_meas_scale": float(
+                    self._get_pose_filter_field(fe_result, obj_id, "meas_scale", 1.0)
+                ),
                 # Dense recovery info
                 "dense_recovery_triggered": dense_recovery_triggered,
                 "dense_recovery_pose_before": fe_result.dense_recovery_pose_before.get(
@@ -959,30 +1045,37 @@ class ModularPipeline:
         if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] < 6:
             return pts
 
-        filtered = pts
+        keep = np.ones(pts.shape[0], dtype=bool)
 
-        center = np.median(filtered, axis=0)
-        abs_dev = np.abs(filtered - center[None, :])
+        # PCA-align before per-axis filtering so non-axis-aligned objects
+        # don't have their corner points incorrectly trimmed.
+        center = np.median(pts, axis=0)
+        centered = pts - center[None, :]
+        _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+        aligned = centered @ Vt.T  # rotate to PCA frame
+
+        abs_dev = np.abs(aligned)
         mad = np.median(abs_dev, axis=0)
-        spread = np.ptp(filtered, axis=0)
+        spread = np.ptp(aligned, axis=0)
         axis_scale = np.maximum(1.4826 * mad, 0.10 * spread + 0.003)
-        axis_keep = np.all(
-            abs_dev <= (self._bbox_mad_scale * axis_scale)[None, :], axis=1
-        )
+        axis_keep = np.all(abs_dev <= (self._bbox_mad_scale * axis_scale)[None, :], axis=1)
         if np.count_nonzero(axis_keep) >= 4:
-            filtered = filtered[axis_keep]
+            keep &= axis_keep
 
-        if filtered.shape[0] >= 6:
-            center = np.median(filtered, axis=0)
-            dist = np.linalg.norm(filtered - center[None, :], axis=1)
-            dist_med = np.median(dist)
-            dist_mad = np.median(np.abs(dist - dist_med))
+        # Radial pass on the surviving points (frame-independent).
+        if np.count_nonzero(keep) >= 6:
+            sub = pts[keep]
+            center2 = np.median(sub, axis=0)
+            dist = np.linalg.norm(pts - center2[None, :], axis=1)
+            dist_sub = dist[keep]
+            dist_med = np.median(dist_sub)
+            dist_mad = np.median(np.abs(dist_sub - dist_med))
             dist_scale = max(1.4826 * dist_mad, 0.01)
             radial_keep = dist <= (dist_med + self._bbox_mad_scale * dist_scale)
-            if np.count_nonzero(radial_keep) >= 4:
-                filtered = filtered[radial_keep]
+            if np.count_nonzero(keep & radial_keep) >= 4:
+                keep &= radial_keep
 
-        return filtered
+        return pts[keep]
 
     def _reject_bbox_outliers_dbscan(self, points: np.ndarray) -> np.ndarray:
         pts = np.asarray(points, dtype=float)
@@ -1258,39 +1351,107 @@ class ModularPipeline:
 
     def _update_object_from_frontend(self, obj_id, fe_result):
         obj = self.objects[obj_id]
-
-        # if obj.lost:
-        #     return
-
-        # 1. Pose update from front end
-        if obj_id in fe_result.obj_poses:
-            obj.pose = fe_result.obj_poses[obj_id]
-
-        # 2. Save 3D correspondences (f2f)
-        obj.curr_frame_points_3d = fe_result.valid_curr_3d.get(obj_id, None)
-        obj.curr_frame_indices = fe_result.valid_indices.get(obj_id, None)
-
-        # 3. Save registration stats
-        stats = fe_result.reg_stats.get(obj_id, {})
-        obj.inliers = stats.get("inliers", None)
-        obj.residuals = stats.get("residuals", None)
-
-        # 4. Cache uncertainty for gating & KF decision
-        if obj.curr_frame_indices is not None:
-            obj.curr_uncertainties = fe_result.uncertainties[obj.curr_frame_indices]
-        else:
-            obj.curr_uncertainties = None
-
-        # 5. Compute mean residual
-        obj.mean_residual = fe_result.mean_residuals[obj_id]
-
-        # 6. Lost condition
-        # obj.lost = obj.mean_residual > self.reg_residual_thres
+        self.pose_filter_manager.update_object_from_frontend(obj_id, obj, fe_result)
 
     def _update_history_frames(self, frame, fe_result, track_table):
         self.hist_frames.append(frame)
         self.hist_fe_results.append(fe_result)
         self.hist_track_tables.append(copy.deepcopy(track_table))
+
+    def _build_pose_filter_kwargs(self) -> dict:
+        nominal_dt = max(float(self.pose_filter_nominal_dt), 1e-6)
+        max_rel_trans = max(float(self.max_rel_translation), 1e-4)
+        max_rel_rot_rad = max(np.deg2rad(float(self.max_rel_rotation_deg)), 1e-4)
+        jump_trans = max(float(self.pose_filter_reset_trans_thres), 1e-4)
+        jump_rot_rad = max(
+            np.deg2rad(float(self.pose_filter_reset_rot_deg_thres)), 1e-4
+        )
+        residual_ref = float(
+            self.pipeline_cfg.get(
+                "pose_filter_residual_ref",
+                self.cfg.register.params.get("residual_thres", 0.007),
+            )
+        )
+
+        trans_meas_sigma = float(
+            self.pipeline_cfg.get(
+                "pose_filter_trans_meas_sigma",
+                max(residual_ref, min(max_rel_trans, jump_trans) / 6.0),
+            )
+        )
+        rot_meas_sigma = float(
+            self.pipeline_cfg.get(
+                "pose_filter_rot_meas_sigma",
+                max(np.deg2rad(0.5), min(max_rel_rot_rad, jump_rot_rad) / 6.0),
+            )
+        )
+        trans_accel_sigma = float(
+            self.pipeline_cfg.get(
+                "pose_filter_trans_accel_sigma",
+                0.5 * min(max_rel_trans, jump_trans) / max(nominal_dt**2, 1e-6),
+            )
+        )
+        rot_accel_sigma = float(
+            self.pipeline_cfg.get(
+                "pose_filter_rot_accel_sigma",
+                0.5 * min(max_rel_rot_rad, jump_rot_rad) / max(nominal_dt**2, 1e-6),
+            )
+        )
+
+        return {
+            "nominal_dt": nominal_dt,
+            "min_dt": float(self.pose_filter_min_dt),
+            "max_dt": float(self.pose_filter_max_dt),
+            "rot_accel_sigma": rot_accel_sigma,
+            "trans_accel_sigma": trans_accel_sigma,
+            "rot_meas_sigma": rot_meas_sigma,
+            "trans_meas_sigma": trans_meas_sigma,
+            "residual_ref": residual_ref,
+            "min_inliers": int(
+                self.pipeline_cfg.get(
+                    "pose_filter_min_inliers",
+                    self.pipeline_cfg.get(
+                        "pose_jump_guard_min_inliers",
+                        self.cfg.register.params.get("min_inliers", 3),
+                    ),
+                )
+            ),
+            "min_inlier_ratio": float(
+                self.pipeline_cfg.get(
+                    "pose_filter_min_inlier_ratio",
+                    self.pipeline_cfg.get("pose_jump_guard_min_inlier_ratio", 0.0),
+                )
+            ),
+            "min_valid_correspondences": int(
+                self.pose_filter_min_valid_correspondences
+            ),
+            "max_meas_scale": float(
+                self.pipeline_cfg.get("pose_filter_max_meas_scale", 50.0)
+            ),
+            "skip_on_jump_reject": bool(self.pose_filter_skip_on_jump_reject),
+            "jump_reject_meas_scale": float(
+                self.pipeline_cfg.get("pose_filter_jump_reject_meas_scale", 20.0)
+            ),
+        }
+
+    def _make_pose_filter(self) -> SE3ConstantVelocityFilter:
+        return SE3ConstantVelocityFilter(**self._build_pose_filter_kwargs())
+
+    def _initialize_pose_filters(self, frame) -> None:
+        self.pose_filter_manager.initialize(self.num_obj, self.objects, getattr(frame, "timestamp", None))
+
+    def _default_pose_filter_stats(self, pose: np.ndarray | None = None) -> dict:
+        del pose
+        return self.pose_filter_manager.default_stats()
+
+    def _apply_pose_filters(self, frame, fe_result) -> None:
+        self.pose_filter_manager.apply(frame, fe_result, self.objects)
+
+    def _get_pose_filter_field(self, fe_result, obj_id: int, key: str, default):
+        return self.pose_filter_manager.get_field(fe_result, obj_id, key, default)
+
+    def _get_logged_pose_frontend_raw(self, fe_result, obj_id: int) -> np.ndarray:
+        return self.pose_filter_manager.get_logged_raw_pose(fe_result, obj_id)
 
     def _se3_delta(self, T_new, T_old):
         dT = T_new @ inverse_SE3(T_old)

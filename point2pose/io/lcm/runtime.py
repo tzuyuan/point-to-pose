@@ -13,7 +13,7 @@ from point2pose.io.lcm.data_models import (
     NamedVecListPayload,
     RGBDFramePacket,
 )
-from point2pose.io.lcm.image_conversion import unpack_image_from_bytes
+from point2pose.io.lcm.image_conversion import pack_image_to_bytes, unpack_image_from_bytes
 from point2pose.io.lcm.messages import camera_info_t, rgbd_t, vec_list_t
 
 
@@ -164,6 +164,98 @@ class RgbdLcmSubscriber:
     def has_rgbd(self) -> bool:
         with self._lock:
             return bool(self._rgbd_packets)
+
+
+class RgbdLcmPublisher:
+    def __init__(
+        self,
+        rgbd_channel: str,
+        camera_info_channel: str | None = None,
+        lcm_factory: Callable[[], object] | None = None,
+        verbose: bool = False,
+    ):
+        self.rgbd_channel = str(rgbd_channel)
+        self.camera_info_channel = (
+            str(camera_info_channel)
+            if camera_info_channel
+            else f"{self.rgbd_channel}_info"
+        )
+        self.verbose = bool(verbose)
+        self._lcm_factory = lcm_factory or _default_lcm_factory
+        self._lcm = None
+
+    def start(self):
+        if self._lcm is None:
+            self._lcm = self._lcm_factory()
+
+    def stop(self):
+        self._lcm = None
+
+    def _ensure_lcm(self):
+        if self._lcm is None:
+            self.start()
+        return self._lcm
+
+    def publish_rgbd(self, packet: RGBDFramePacket):
+        rgb = np.asarray(packet.rgb_image)
+        depth = np.asarray(packet.depth_image)
+
+        if rgb.ndim == 2:
+            rgb = rgb[..., None]
+        if rgb.ndim != 3:
+            raise ValueError(
+                f"RGB image must have shape (H, W, C) or (H, W); got {rgb.shape}"
+            )
+        if depth.ndim != 2:
+            raise ValueError(f"Depth image must have shape (H, W); got {depth.shape}")
+        if rgb.shape[:2] != depth.shape:
+            raise ValueError(
+                "RGB and depth image sizes do not match: "
+                f"{rgb.shape[:2]} vs {depth.shape}"
+            )
+
+        msg = rgbd_t()
+        msg.timestamp = float(packet.timestamp)
+        msg.height = int(packet.height) if int(packet.height) > 0 else int(rgb.shape[0])
+        msg.width = int(packet.width) if int(packet.width) > 0 else int(rgb.shape[1])
+        msg.num_rgb_channels = int(packet.num_rgb_channels) or int(rgb.shape[2])
+        msg.rgb_channel_type = int(packet.rgb_channel_type)
+        msg.rgb_image = pack_image_to_bytes(rgb, msg.rgb_channel_type)
+        msg.rgb_size = len(msg.rgb_image)
+        msg.depth_channel_type = int(packet.depth_channel_type)
+        msg.depth_image = pack_image_to_bytes(depth, msg.depth_channel_type)
+        msg.depth_size = len(msg.depth_image)
+        self._ensure_lcm().publish(self.rgbd_channel, msg.encode())
+
+    def publish_camera_info(self, packet: CameraInfoPacket):
+        intrinsics = np.asarray(packet.intrinsics, dtype=np.float64)
+        if intrinsics.shape != (3, 3):
+            raise ValueError(
+                f"Camera intrinsics must have shape (3, 3); got {intrinsics.shape}"
+            )
+
+        world_to_camera = np.asarray(packet.world_to_camera, dtype=np.float64)
+        if world_to_camera.shape != (4, 4):
+            raise ValueError(
+                "Camera extrinsic must have shape (4, 4); "
+                f"got {world_to_camera.shape}"
+            )
+
+        msg = camera_info_t()
+        msg.height = int(packet.height)
+        msg.width = int(packet.width)
+        msg.timestamp = float(packet.timestamp)
+        msg.fx = float(intrinsics[0, 0])
+        msg.fy = float(intrinsics[1, 1])
+        msg.cx = float(intrinsics[0, 2])
+        msg.cy = float(intrinsics[1, 2])
+        msg.extrinsic = tuple(
+            np.asarray(world_to_camera[:3, :], dtype=np.float32).reshape(-1).tolist()
+        )
+        msg.depth_factor = float(packet.depth_factor)
+        msg.fixed = bool(packet.fixed)
+        msg.attached_body = str(packet.attached_body)
+        self._ensure_lcm().publish(self.camera_info_channel, msg.encode())
 
 
 class NamedVecListLcmPublisher:

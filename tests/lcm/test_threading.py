@@ -3,12 +3,20 @@ import time
 
 import numpy as np
 
-from point2pose.io.lcm.data_models import NamedVecListPayload
-from point2pose.io.lcm.image_conversion import pack_image_to_bytes
-from point2pose.io.lcm.messages import rgbd_t, vec_list_t
+from point2pose.io.lcm.data_models import (
+    CameraInfoPacket,
+    NamedVecListPayload,
+    RGBDFramePacket,
+)
+from point2pose.io.lcm.image_conversion import (
+    pack_image_to_bytes,
+    unpack_image_from_bytes,
+)
+from point2pose.io.lcm.messages import camera_info_t, rgbd_t, vec_list_t
 from point2pose.io.lcm.runtime import (
     NamedVecListLcmPublisher,
     NamedVecListLcmSubscriber,
+    RgbdLcmPublisher,
     RgbdLcmSubscriber,
 )
 
@@ -144,6 +152,103 @@ def test_subscriber_keeps_recent_backlog_when_not_dropping_stale_frames():
     assert second is not None
     assert np.isclose(first.timestamp, 2.0)
     assert np.isclose(second.timestamp, 3.0)
+
+
+def test_rgbd_publisher_encodes_rgbd_packets():
+    fake = _FakeLcm()
+    publisher = RgbdLcmPublisher(
+        rgbd_channel="rgbd",
+        camera_info_channel="rgbd_info",
+        lcm_factory=lambda: fake,
+    )
+
+    rgb = np.arange(12, dtype=np.uint8).reshape(2, 2, 3)
+    depth = np.arange(4, dtype=np.uint16).reshape(2, 2)
+    publisher.publish_rgbd(
+        RGBDFramePacket(
+            timestamp=3.5,
+            height=2,
+            width=2,
+            num_rgb_channels=3,
+            rgb_channel_type=rgbd_t.CHANNEL_TYPE_UINT8,
+            depth_channel_type=rgbd_t.CHANNEL_TYPE_UINT16,
+            rgb_image=rgb,
+            depth_image=depth,
+        )
+    )
+
+    assert len(fake.published) == 1
+    channel, payload = fake.published[0]
+    assert channel == "rgbd"
+
+    decoded = rgbd_t.decode(payload)
+    assert np.isclose(decoded.timestamp, 3.5)
+    assert decoded.height == 2
+    assert decoded.width == 2
+    assert decoded.num_rgb_channels == 3
+    decoded_rgb = unpack_image_from_bytes(
+        decoded.rgb_image,
+        height=decoded.height,
+        width=decoded.width,
+        num_channels=decoded.num_rgb_channels,
+        channel_type=decoded.rgb_channel_type,
+    )
+    decoded_depth = unpack_image_from_bytes(
+        decoded.depth_image,
+        height=decoded.height,
+        width=decoded.width,
+        num_channels=1,
+        channel_type=decoded.depth_channel_type,
+    )
+    assert np.array_equal(decoded_rgb, rgb)
+    assert np.array_equal(decoded_depth, depth)
+
+
+def test_rgbd_publisher_encodes_camera_info_packets():
+    fake = _FakeLcm()
+    publisher = RgbdLcmPublisher(
+        rgbd_channel="rgbd",
+        camera_info_channel="rgbd_info",
+        lcm_factory=lambda: fake,
+    )
+
+    world_to_camera = np.eye(4, dtype=np.float64)
+    world_to_camera[:3, 3] = np.array([0.1, 0.2, 0.3], dtype=np.float64)
+    publisher.publish_camera_info(
+        CameraInfoPacket(
+            timestamp=4.0,
+            height=480,
+            width=640,
+            intrinsics=np.array(
+                [[500.0, 0.0, 320.0], [0.0, 501.0, 240.0], [0.0, 0.0, 1.0]],
+                dtype=np.float64,
+            ),
+            world_to_camera=world_to_camera,
+            depth_factor=1000.0,
+            fixed=True,
+            attached_body="camera_link",
+        )
+    )
+
+    assert len(fake.published) == 1
+    channel, payload = fake.published[0]
+    assert channel == "rgbd_info"
+
+    decoded = camera_info_t.decode(payload)
+    assert decoded.height == 480
+    assert decoded.width == 640
+    assert np.isclose(decoded.timestamp, 4.0)
+    assert np.isclose(decoded.fx, 500.0)
+    assert np.isclose(decoded.fy, 501.0)
+    assert np.isclose(decoded.cx, 320.0)
+    assert np.isclose(decoded.cy, 240.0)
+    assert np.allclose(
+        np.asarray(decoded.extrinsic, dtype=np.float32).reshape(3, 4),
+        world_to_camera[:3, :].astype(np.float32),
+    )
+    assert np.isclose(decoded.depth_factor, 1000.0)
+    assert decoded.fixed is True
+    assert decoded.attached_body == "camera_link"
 
 
 def test_named_vec_list_subscriber_keeps_newest_payload():

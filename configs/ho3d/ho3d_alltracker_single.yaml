@@ -29,6 +29,12 @@ pipeline:
     pose_jump_guard_min_inliers: 10
     pose_jump_guard_min_inlier_ratio: 0.15
     pose_jump_guard_single_cluster_min_inliers: 12
+    pose_filter_enable: true
+    pose_filter_nominal_dt: 0.0333333
+    pose_filter_min_dt: 0.0166667
+    pose_filter_max_dt: 0.1000000
+    pose_filter_skip_on_jump_reject: true
+    pose_filter_log_raw_pose: true
 
     kf_gating: false
     anchor_rot_deg: 15.0
