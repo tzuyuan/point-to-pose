@@ -68,16 +68,36 @@ pipeline:
     pose_jump_guard_min_inliers: 5
     pose_jump_guard_min_inlier_ratio: 0.0
     pose_jump_guard_single_cluster_min_inliers: 5
-    pose_filter_enable: true
+    
+    pose_filter_enable: false
     pose_filter_nominal_dt: 0.0166667
     pose_filter_min_dt: 0.0083333
     pose_filter_max_dt: 0.1000000
     pose_filter_skip_on_jump_reject: true
-    pose_filter_log_raw_pose: true
+    pose_filter_log_raw_pose: false
+    pose_filter_enable_velocity_prediction: true
+    enable_twist_observation: true 
 
-    kf_gating: false
+    mask_pose_fallback_enable: true
+    mask_pose_fallback_only_when_weak: true
+    mask_pose_fallback_weak_min_valid_points: 3
+    mask_pose_fallback_weak_min_inliers: 3
+    mask_pose_fallback_weak_mean_residual: 0.01
+    mask_pose_fallback_use_on_lost: true
+    mask_pose_fallback_use_on_jump_reject: true
+    mask_pose_fallback_center_mode: bbox
+    mask_pose_fallback_use_mask_depth: true
+    mask_pose_fallback_depth_blend: 0.5
+    mask_pose_fallback_min_mask_area: 64
+    mask_pose_fallback_min_depth_samples: 16
+    mask_pose_fallback_max_mask_pixels: 4096
+    mask_pose_fallback_gain: 1.0
+    mask_pose_fallback_max_translation_step: 0.10
+    mask_pose_fallback_clear_lost_on_apply: true
+
+    kf_gating: true
     anchor_rot_deg: 15.0
-    anchor_trans: 0.03
+    anchor_trans: 0.1
     anchor_min_inliers: 4
     anchor_min_inlier_ratio: 0.0
     anchor_max_median_res: 0.01

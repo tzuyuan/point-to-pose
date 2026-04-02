@@ -18,6 +18,15 @@ def _rotation_error_rad(T_a: np.ndarray, T_b: np.ndarray) -> float:
     return float(np.arccos(trace))
 
 
+def _good_stats(*, rejected: bool = False) -> dict:
+    return {
+        "valid_idx": np.array([0, 1, 2], dtype=int),
+        "inliers": np.array([True, True, True], dtype=bool),
+        "mean_residual": 1e-4,
+        "pose_jump_guard_info": {"rejected": bool(rejected)},
+    }
+
+
 def test_constant_velocity_pose_filter_converges_and_tracks_twist():
     dt = 0.1
     true_twist = np.array([0.0, 0.0, 0.25, 0.04, -0.01, 0.02], dtype=float)
@@ -321,3 +330,177 @@ def test_velocity_damping_disabled_preserves_velocity_during_prediction():
     # Without damping, velocity should be almost unchanged (process noise
     # doesn't shrink the velocity, only grows the covariance).
     assert np.linalg.norm(v_after - v_before) < 1e-9
+
+
+def test_velocity_prediction_can_be_disabled_for_prediction_only_steps():
+    dt = 0.1
+    filt = SE3ConstantVelocityFilter(
+        nominal_dt=dt,
+        min_dt=dt,
+        max_dt=dt,
+        rot_accel_sigma=0.01,
+        trans_accel_sigma=0.005,
+        rot_meas_sigma=1e-3,
+        trans_meas_sigma=1e-4,
+        min_inliers=3,
+        min_inlier_ratio=0.1,
+        min_valid_correspondences=3,
+        velocity_damping_half_life=0.5,
+        enable_velocity_prediction=False,
+    )
+    filt.initialize(np.eye(4), 0.0)
+
+    true_twist = np.array([0.0, 0.0, 0.0, 0.1, 0.0, 0.0], dtype=float)
+    pose = np.eye(4)
+    for i in range(1, 11):
+        pose = _pose_from_twist_step(pose, true_twist, dt)
+        filt.step(pose, i * dt, _good_stats(), measurement_ok=True, hard_reset=False)
+
+    pose_before = filt.get_pose().copy()
+    twist_before = filt.get_twist().copy()
+    for i in range(11, 16):
+        filtered_pose, info = filt.step(
+            None,
+            i * dt,
+            _good_stats(rejected=True),
+            measurement_ok=False,
+            hard_reset=False,
+        )
+        assert info["pred_only"] is True
+        assert info["velocity_prediction_enabled"] is False
+        assert np.allclose(filtered_pose, pose_before, atol=1e-9)
+        assert np.allclose(filt.get_twist(), twist_before, atol=1e-9)
+
+
+def test_twist_observation_can_be_disabled():
+    dt = 0.1
+    true_twist = np.array([0.0, 0.0, 0.0, 0.1, 0.0, 0.0], dtype=float)
+    filt = SE3ConstantVelocityFilter(
+        nominal_dt=dt,
+        min_dt=dt,
+        max_dt=dt,
+        rot_accel_sigma=0.05,
+        trans_accel_sigma=0.01,
+        rot_meas_sigma=1e-3,
+        trans_meas_sigma=1e-4,
+        min_inliers=3,
+        min_inlier_ratio=0.1,
+        min_valid_correspondences=3,
+        enable_twist_observation=False,
+    )
+    filt.initialize(np.eye(4), 0.0)
+
+    pose = np.eye(4)
+    for i in range(1, 4):
+        pose = _pose_from_twist_step(pose, true_twist, dt)
+        _, info = filt.step(
+            pose, i * dt, _good_stats(), measurement_ok=True, hard_reset=False
+        )
+
+    assert info["twist_obs_used"] is False
+    assert info["twist_obs_reason"] == "disabled"
+
+
+def test_twist_observation_uses_only_reliable_raw_pose_history():
+    dt = 0.1
+    true_twist = np.array([0.0, 0.0, 0.2, 0.08, -0.01, 0.02], dtype=float)
+    filt = SE3ConstantVelocityFilter(
+        nominal_dt=dt,
+        min_dt=dt,
+        max_dt=dt,
+        rot_accel_sigma=0.05,
+        trans_accel_sigma=0.01,
+        rot_meas_sigma=1e-3,
+        trans_meas_sigma=1e-4,
+        min_inliers=3,
+        min_inlier_ratio=0.1,
+        min_valid_correspondences=3,
+        enable_twist_observation=True,
+        twist_observation_window_size=5,
+        twist_observation_min_poses=2,
+        twist_observation_method="median",
+    )
+    filt.initialize(np.eye(4), 0.0)
+
+    pose_1 = _pose_from_twist_step(np.eye(4), true_twist, dt)
+    filt.step(pose_1, dt, _good_stats(), measurement_ok=True, hard_reset=False)
+
+    bad_pose = np.eye(4)
+    bad_pose[:3, 3] = np.array([2.0, 0.0, 0.0], dtype=float)
+    _, bad_info = filt.step(
+        bad_pose,
+        2.0 * dt,
+        _good_stats(rejected=True),
+        measurement_ok=False,
+        hard_reset=False,
+    )
+    assert bad_info["pred_only"] is True
+
+    pose_3 = _pose_from_twist_step(pose_1, true_twist, 2.0 * dt)
+    _, info = filt.step(
+        pose_3,
+        3.0 * dt,
+        _good_stats(),
+        measurement_ok=True,
+        hard_reset=False,
+    )
+
+    assert info["twist_obs_used"] is True
+    assert info["twist_obs_num_poses"] == 3
+    assert np.allclose(info["twist_obs"], true_twist, atol=1e-6)
+
+
+def test_windowed_twist_observation_is_more_robust_than_last_difference():
+    dt = 0.1
+    true_twist = np.array([0.0, 0.0, 0.15, 0.03, -0.01, 0.02], dtype=float)
+    filt = SE3ConstantVelocityFilter(
+        nominal_dt=dt,
+        min_dt=dt,
+        max_dt=dt,
+        rot_accel_sigma=0.1,
+        trans_accel_sigma=0.03,
+        rot_meas_sigma=np.deg2rad(1.0),
+        trans_meas_sigma=0.005,
+        min_inliers=3,
+        min_inlier_ratio=0.1,
+        min_valid_correspondences=3,
+        enable_twist_observation=True,
+        twist_observation_window_size=5,
+        twist_observation_min_poses=5,
+        twist_observation_method="median",
+    )
+    filt.initialize(np.eye(4), 0.0)
+
+    pose = np.eye(4)
+    prev_clean_pose = np.eye(4)
+    for i in range(1, 5):
+        pose = _pose_from_twist_step(pose, true_twist, dt)
+        prev_clean_pose = pose.copy()
+        filt.step(pose, i * dt, _good_stats(), measurement_ok=True, hard_reset=False)
+
+    true_pose = _pose_from_twist_step(prev_clean_pose, true_twist, dt)
+    noisy_pose = exp_se3(
+        vec_to_se3(
+            np.array(
+                [0.0, 0.0, 0.08, 0.03, -0.015, 0.01],
+                dtype=float,
+            )
+        )
+    ) @ true_pose
+    _, info = filt.step(
+        noisy_pose,
+        5.0 * dt,
+        _good_stats(),
+        measurement_ok=True,
+        hard_reset=False,
+    )
+
+    naive_last_twist = SE3ConstantVelocityFilter._pose_delta_vec(
+        noisy_pose, prev_clean_pose
+    ) / dt
+    robust_err = float(np.linalg.norm(info["twist_obs"] - true_twist))
+    naive_err = float(np.linalg.norm(naive_last_twist - true_twist))
+
+    assert info["twist_obs_used"] is True
+    assert info["twist_obs_num_samples"] == 4
+    assert robust_err < naive_err

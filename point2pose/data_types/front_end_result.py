@@ -22,6 +22,10 @@ class FrontEndResult:
         default_factory=dict
     )  # 4x4 relative pose matrices
     pose_filter_stats: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+    mask_fallback_triggered: Dict[int, bool] = field(default_factory=dict)
+    mask_fallback_pose_before: Dict[int, np.ndarray] = field(default_factory=dict)
+    mask_fallback_pose_after: Dict[int, np.ndarray] = field(default_factory=dict)
+    mask_fallback_stats: Dict[int, Dict[str, Any]] = field(default_factory=dict)
 
     # Registration stats per object
     # Key: obj_id, Value: Dict with stats (inliers, residuals, etc.)

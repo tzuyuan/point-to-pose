@@ -36,8 +36,12 @@ class PoseFilterManager:
 
         for obj_id in range(int(num_obj)):
             pose_filter = SE3ConstantVelocityFilter(**self.filter_kwargs)
-            pose_filter.initialize(np.asarray(objects[obj_id].pose, dtype=float), timestamp)
+            pose_filter.initialize(
+                np.asarray(objects[obj_id].pose, dtype=float), timestamp
+            )
             self.pose_filters[obj_id] = pose_filter
+
+    # -- Main entry point -----------------------------------------------------
 
     def apply(self, frame, fe_result, objects: list) -> None:
         fe_result.obj_poses_raw = {}
@@ -45,76 +49,115 @@ class PoseFilterManager:
         fe_result.pose_filter_stats = {}
 
         if not self.enabled:
-            for obj_id in range(len(objects)):
-                raw_pose = fe_result.obj_poses.get(obj_id)
-                if raw_pose is not None:
-                    raw_pose_arr = np.asarray(raw_pose, dtype=float).copy()
-                    fe_result.obj_poses_raw[obj_id] = raw_pose_arr
-                    fe_result.obj_poses_filtered[obj_id] = raw_pose_arr.copy()
-                fe_result.pose_filter_stats[obj_id] = self.default_stats()
+            self._apply_passthrough(fe_result, objects)
             return
 
         timestamp = getattr(frame, "timestamp", None)
         for obj_id, obj in enumerate(objects):
+            self._apply_one(obj_id, obj, frame, fe_result, timestamp)
+
+    def _apply_passthrough(self, fe_result, objects: list) -> None:
+        """When filtering is disabled, pass raw poses through unchanged."""
+        for obj_id in range(len(objects)):
             raw_pose = fe_result.obj_poses.get(obj_id)
             if raw_pose is not None:
-                fe_result.obj_poses_raw[obj_id] = np.asarray(raw_pose, dtype=float).copy()
+                raw_pose_arr = np.asarray(raw_pose, dtype=float).copy()
+                fe_result.obj_poses_raw[obj_id] = raw_pose_arr
+                fe_result.obj_poses_filtered[obj_id] = raw_pose_arr.copy()
+            fe_result.pose_filter_stats[obj_id] = self.default_stats()
 
-            pose_filter = self.pose_filters.get(obj_id)
-            if pose_filter is None:
-                pose_filter = SE3ConstantVelocityFilter(**self.filter_kwargs)
-                pose_filter.initialize(np.asarray(obj.pose, dtype=float), timestamp)
-                self.pose_filters[obj_id] = pose_filter
+    def _apply_one(self, obj_id: int, obj, frame, fe_result, timestamp) -> None:
+        """Run the filter for a single object."""
+        raw_pose = fe_result.obj_poses.get(obj_id)
+        if raw_pose is not None:
+            fe_result.obj_poses_raw[obj_id] = np.asarray(raw_pose, dtype=float).copy()
 
-            stats = dict(fe_result.reg_stats.get(obj_id, {}) or {})
-            stats["mean_residual"] = fe_result.mean_residuals.get(obj_id, -1.0)
+        pose_filter = self._get_or_create_filter(obj_id, obj, timestamp)
+        raw_pose_arr = None if raw_pose is None else np.asarray(raw_pose, dtype=float)
+        stats = self._build_stats(fe_result, obj_id)
+        measurement_ok = self._check_measurement_ok(
+            raw_pose_arr, fe_result, obj_id, obj, stats
+        )
+        hard_reset = self._check_hard_reset(
+            raw_pose_arr, fe_result, obj_id, pose_filter
+        )
 
-            raw_pose_arr = None if raw_pose is None else np.asarray(raw_pose, dtype=float)
-            valid_idx = np.asarray(
-                fe_result.valid_indices.get(obj_id, np.array([])), dtype=int
-            ).reshape(-1)
-            jump_info = stats.get("pose_jump_guard_info", {}) or {}
-            jump_rejected = bool(jump_info.get("rejected", False))
-            measurement_ok = (
-                raw_pose_arr is not None
-                and raw_pose_arr.shape == (4, 4)
-                and valid_idx.size >= self.min_valid_correspondences
-                and not bool(getattr(obj, "lost", False))
-                and not (jump_rejected and self.skip_on_jump_reject)
-            )
+        filtered_pose, filter_stats = pose_filter.step(
+            raw_pose_arr,
+            timestamp,
+            stats,
+            measurement_ok,
+            hard_reset=hard_reset,
+        )
 
-            hard_reset = False
-            if (
-                raw_pose_arr is not None
-                and raw_pose_arr.shape == (4, 4)
-                and fe_result.dense_recovery_triggered.get(obj_id, False)
-            ):
-                pose_before = pose_filter.get_pose()
-                if pose_before is None:
-                    hard_reset = True
-                else:
-                    dt_reset, ddeg_reset = self._se3_delta(raw_pose_arr, pose_before)
-                    hard_reset = (
-                        dt_reset > self.reset_trans_thres
-                        or ddeg_reset > self.reset_rot_deg_thres
-                    )
+        if filtered_pose is None:
+            filtered_pose = np.asarray(obj.pose, dtype=float).copy()
+        else:
+            filtered_pose = np.asarray(filtered_pose, dtype=float).copy()
 
-            filtered_pose, filter_stats = pose_filter.step(
-                raw_pose_arr,
-                timestamp,
-                stats,
-                measurement_ok,
-                hard_reset=hard_reset,
-            )
+        fe_result.obj_poses[obj_id] = filtered_pose
+        fe_result.obj_poses_filtered[obj_id] = filtered_pose.copy()
+        fe_result.pose_filter_stats[obj_id] = filter_stats
 
-            if filtered_pose is None:
-                filtered_pose = np.asarray(obj.pose, dtype=float).copy()
-            else:
-                filtered_pose = np.asarray(filtered_pose, dtype=float).copy()
+    # -- Per-object helpers ---------------------------------------------------
 
-            fe_result.obj_poses[obj_id] = filtered_pose
-            fe_result.obj_poses_filtered[obj_id] = filtered_pose.copy()
-            fe_result.pose_filter_stats[obj_id] = filter_stats
+    def _get_or_create_filter(
+        self, obj_id: int, obj, timestamp
+    ) -> SE3ConstantVelocityFilter:
+        pose_filter = self.pose_filters.get(obj_id)
+        if pose_filter is None:
+            pose_filter = SE3ConstantVelocityFilter(**self.filter_kwargs)
+            pose_filter.initialize(np.asarray(obj.pose, dtype=float), timestamp)
+            self.pose_filters[obj_id] = pose_filter
+        return pose_filter
+
+    def _build_stats(self, fe_result, obj_id: int) -> dict[str, Any]:
+        stats = dict(fe_result.reg_stats.get(obj_id, {}) or {})
+        stats["mean_residual"] = fe_result.mean_residuals.get(obj_id, -1.0)
+        return stats
+
+    def _check_measurement_ok(
+        self,
+        raw_pose_arr,
+        fe_result,
+        obj_id: int,
+        obj,
+        stats: dict[str, Any],
+    ) -> bool:
+        if raw_pose_arr is None or raw_pose_arr.shape != (4, 4):
+            return False
+        valid_idx = np.asarray(
+            fe_result.valid_indices.get(obj_id, np.array([])), dtype=int
+        ).reshape(-1)
+        if valid_idx.size < self.min_valid_correspondences:
+            return False
+        if bool(getattr(obj, "lost", False)):
+            return False
+        jump_info = stats.get("pose_jump_guard_info", {}) or {}
+        if bool(jump_info.get("rejected", False)) and self.skip_on_jump_reject:
+            return False
+        return True
+
+    def _check_hard_reset(
+        self,
+        raw_pose_arr,
+        fe_result,
+        obj_id: int,
+        pose_filter: SE3ConstantVelocityFilter,
+    ) -> bool:
+        if raw_pose_arr is None or raw_pose_arr.shape != (4, 4):
+            return False
+        if not fe_result.dense_recovery_triggered.get(obj_id, False):
+            return False
+        pose_before = pose_filter.get_pose()
+        if pose_before is None:
+            return True
+        dt_reset, ddeg_reset = self._se3_delta(raw_pose_arr, pose_before)
+        return (
+            dt_reset > self.reset_trans_thres or ddeg_reset > self.reset_rot_deg_thres
+        )
+
+    # -- Static helpers -------------------------------------------------------
 
     def get_logged_raw_pose(self, fe_result, obj_id: int) -> np.ndarray:
         if not self.log_raw_pose:
@@ -147,9 +190,20 @@ class PoseFilterManager:
             "pred_only": False,
             "measurement_used": False,
             "hard_reset": False,
+            "velocity_prediction_enabled": True,
             "meas_scale": 1.0,
             "innovation": np.zeros(6, dtype=float),
             "twist": np.zeros(6, dtype=float),
+            "twist_obs_used": False,
+            "twist_obs": np.zeros(6, dtype=float),
+            "twist_obs_sigma": np.zeros(6, dtype=float),
+            "twist_obs_method": "median",
+            "twist_obs_reason": "disabled",
+            "twist_obs_num_poses": 0,
+            "twist_obs_num_samples": 0,
+            "twist_obs_num_inlier_samples": 0,
+            "twist_obs_rot_dispersion": 0.0,
+            "twist_obs_trans_dispersion": 0.0,
             "reason": "disabled",
         }
 

@@ -24,6 +24,9 @@ from point2pose.pipeline.components.key_frame_manager import KeyFrameManager
 from point2pose.pipeline.components.local_optimizer import LocalOptimizer
 from point2pose.pipeline.components.key_frame_graph import KeyFrameGraph
 from point2pose.pipeline.components.pose_filter_manager import PoseFilterManager
+from point2pose.pipeline.components.mask_pose_fallback_manager import (
+    MaskPoseFallbackManager,
+)
 from point2pose.pipeline.components.recovery_manager import RecoveryManager
 from point2pose.modules.reconstruction import SDFBuilder
 
@@ -201,6 +204,70 @@ class ModularPipeline:
             reset_rot_deg_thres=self.pose_filter_reset_rot_deg_thres,
             filter_kwargs=self._build_pose_filter_kwargs(),
             skip_on_jump_reject=self.pose_filter_skip_on_jump_reject,
+        )
+        self.mask_pose_fallback_enable = bool(
+            self.pipeline_cfg.get("mask_pose_fallback_enable", False)
+        )
+        self.mask_pose_fallback_manager = MaskPoseFallbackManager(
+            enabled=self.mask_pose_fallback_enable,
+            only_when_weak=bool(
+                self.pipeline_cfg.get("mask_pose_fallback_only_when_weak", True)
+            ),
+            weak_min_valid_points=int(
+                self.pipeline_cfg.get(
+                    "mask_pose_fallback_weak_min_valid_points",
+                    self.pose_filter_min_valid_correspondences,
+                )
+            ),
+            weak_min_inliers=int(
+                self.pipeline_cfg.get(
+                    "mask_pose_fallback_weak_min_inliers",
+                    max(3, int(self.cfg.register.params.get("min_inliers", 3))),
+                )
+            ),
+            weak_mean_residual=float(
+                self.pipeline_cfg.get(
+                    "mask_pose_fallback_weak_mean_residual",
+                    self.cfg.register.params.get("residual_thres", 0.0007),
+                )
+            ),
+            use_on_lost=bool(
+                self.pipeline_cfg.get("mask_pose_fallback_use_on_lost", True)
+            ),
+            use_on_jump_reject=bool(
+                self.pipeline_cfg.get("mask_pose_fallback_use_on_jump_reject", True)
+            ),
+            center_mode=str(
+                self.pipeline_cfg.get("mask_pose_fallback_center_mode", "bbox")
+            ),
+            use_mask_depth=bool(
+                self.pipeline_cfg.get("mask_pose_fallback_use_mask_depth", True)
+            ),
+            depth_blend=float(
+                self.pipeline_cfg.get("mask_pose_fallback_depth_blend", 0.5)
+            ),
+            min_mask_area=int(
+                self.pipeline_cfg.get("mask_pose_fallback_min_mask_area", 64)
+            ),
+            min_depth_samples=int(
+                self.pipeline_cfg.get("mask_pose_fallback_min_depth_samples", 16)
+            ),
+            max_mask_pixels=int(
+                self.pipeline_cfg.get("mask_pose_fallback_max_mask_pixels", 4096)
+            ),
+            gain=float(self.pipeline_cfg.get("mask_pose_fallback_gain", 1.0)),
+            max_translation_step=float(
+                self.pipeline_cfg.get(
+                    "mask_pose_fallback_max_translation_step",
+                    self.max_rel_translation,
+                )
+            ),
+            clear_lost_on_apply=bool(
+                self.pipeline_cfg.get("mask_pose_fallback_clear_lost_on_apply", True)
+            ),
+            min_depth=float(self.min_depth),
+            max_depth=float(self.max_depth),
+            debug=bool(self.pipeline_cfg.get("mask_pose_fallback_debug", False)),
         )
 
         # Logging
@@ -546,6 +613,7 @@ class ModularPipeline:
         #################################################################
         t0 = time.time()
         fe_result = self.frontend.step(frame, self.track_table, self.objects)
+        self._apply_mask_pose_fallback(frame, fe_result)
         self._apply_pose_filters(frame, fe_result)
         self.last_frontend_timings = dict(getattr(fe_result, "timings", {}))
         module_times["frontend"] = time.time() - t0
@@ -1432,6 +1500,30 @@ class ModularPipeline:
             "jump_reject_meas_scale": float(
                 self.pipeline_cfg.get("pose_filter_jump_reject_meas_scale", 20.0)
             ),
+            "velocity_damping_half_life": self.pipeline_cfg.get(
+                "pose_filter_velocity_damping_half_life", None
+            ),
+            "enable_velocity_prediction": bool(
+                self.pipeline_cfg.get("pose_filter_enable_velocity_prediction", True)
+            ),
+            "enable_twist_observation": bool(
+                self.pipeline_cfg.get("pose_filter_enable_twist_observation", False)
+            ),
+            "twist_observation_window_size": int(
+                self.pipeline_cfg.get("pose_filter_twist_window_size", 5)
+            ),
+            "twist_observation_min_poses": int(
+                self.pipeline_cfg.get("pose_filter_twist_min_poses", 3)
+            ),
+            "twist_observation_method": str(
+                self.pipeline_cfg.get("pose_filter_twist_method", "median")
+            ),
+            "twist_rot_meas_sigma": self.pipeline_cfg.get(
+                "pose_filter_twist_rot_meas_sigma", None
+            ),
+            "twist_trans_meas_sigma": self.pipeline_cfg.get(
+                "pose_filter_twist_trans_meas_sigma", None
+            ),
         }
 
     def _make_pose_filter(self) -> SE3ConstantVelocityFilter:
@@ -1446,6 +1538,9 @@ class ModularPipeline:
 
     def _apply_pose_filters(self, frame, fe_result) -> None:
         self.pose_filter_manager.apply(frame, fe_result, self.objects)
+
+    def _apply_mask_pose_fallback(self, frame, fe_result) -> None:
+        self.mask_pose_fallback_manager.apply(frame, fe_result, self.objects)
 
     def _get_pose_filter_field(self, fe_result, obj_id: int, key: str, default):
         return self.pose_filter_manager.get_field(fe_result, obj_id, key, default)
