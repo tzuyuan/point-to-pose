@@ -39,8 +39,10 @@ class MaskPoseFallbackManager:
         min_depth: float,
         max_depth: float,
         debug: bool = False,
+        compute_only: bool = False,
     ):
         self.enabled = bool(enabled)
+        self.compute_only = bool(compute_only)
         self.only_when_weak = bool(only_when_weak)
         self.weak_min_valid_points = max(int(weak_min_valid_points), 0)
         self.weak_min_inliers = max(int(weak_min_inliers), 0)
@@ -219,6 +221,12 @@ class MaskPoseFallbackManager:
             center_pose_new[:3, 3] = pose_new[:3, 3].copy()
             pose_new = center_pose_new @ inverse_SE3(init_pose)
             translation_delta = pose_new[:3, 3] - base_pose[:3, 3]
+
+        if self.compute_only:
+            stats["applied"] = False
+            stats["reason"] = "compute_only"
+            stats["translation_delta"] = np.asarray(translation_delta, dtype=float).copy()
+            return fe_result.obj_poses.get(obj_id), stats
 
         stats["applied"] = True
         stats["reason"] = "applied"

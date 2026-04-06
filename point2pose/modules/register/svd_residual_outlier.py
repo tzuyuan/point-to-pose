@@ -92,7 +92,11 @@ class SVDResidualOutlierRegister(Register):
         )
 
         # fit transformation using svd
-        T = self._svd_fit(p0, tgt_pcd)
+        try:
+            T = self._svd_fit(p0, tgt_pcd)
+        except Exception as e:
+            print(f"[Register] Error occurred while fitting SVD: {e}")
+            return init_pose, stats
 
         inliers = np.ones(N, dtype=bool)
 
@@ -164,7 +168,9 @@ class SVDResidualOutlierRegister(Register):
                 obj_id=obj_id,
                 obj=obj,
             )
-            residuals_refined = np.linalg.norm(transform_pts(T, src_pcd) - tgt_pcd, axis=1)
+            residuals_refined = np.linalg.norm(
+                transform_pts(T, src_pcd) - tgt_pcd, axis=1
+            )
             stats["residuals"] = residuals_refined
             stats["inliers"] = residuals_refined <= thr_final
         stats["sdf_refine"] = sdf_refine_info
@@ -470,7 +476,8 @@ class SVDResidualOutlierRegister(Register):
             cost = float(np.mean(rw**2)) if rw.size else np.inf
             if support_ratio < self._sdf_min_support_ratio:
                 cost += float(
-                    self._sdf_bad_penalty * (self._sdf_min_support_ratio - support_ratio)
+                    self._sdf_bad_penalty
+                    * (self._sdf_min_support_ratio - support_ratio)
                 )
 
             dbg["cost_history"].append(cost)
@@ -485,7 +492,9 @@ class SVDResidualOutlierRegister(Register):
                 break
 
             dxi[:3] = np.clip(
-                dxi[:3], -self._sdf_refine_step_trans_clip, self._sdf_refine_step_trans_clip
+                dxi[:3],
+                -self._sdf_refine_step_trans_clip,
+                self._sdf_refine_step_trans_clip,
             )
             dxi[3:] = np.clip(
                 dxi[3:], -self._sdf_refine_step_rot_clip, self._sdf_refine_step_rot_clip
@@ -521,7 +530,8 @@ class SVDResidualOutlierRegister(Register):
 
     def _eval_sdf_cost(self, pts_cur, T_cur2obj, obj):
         pts_obj = transform_pts(
-            np.asarray(T_cur2obj, dtype=np.float32), np.asarray(pts_cur, dtype=np.float32)
+            np.asarray(T_cur2obj, dtype=np.float32),
+            np.asarray(pts_cur, dtype=np.float32),
         )
         vals, valid = self._query_sdf_signed(obj, pts_obj)
         if valid.sum() < self._sdf_refine_min_pts:
@@ -537,7 +547,9 @@ class SVDResidualOutlierRegister(Register):
         support = float(valid.mean())
         cost = float(np.mean(w * (rr**2)))
         if support < self._sdf_min_support_ratio:
-            cost += float(self._sdf_bad_penalty * (self._sdf_min_support_ratio - support))
+            cost += float(
+                self._sdf_bad_penalty * (self._sdf_min_support_ratio - support)
+            )
         return cost
 
     def _svd_fit(self, pa, qa):

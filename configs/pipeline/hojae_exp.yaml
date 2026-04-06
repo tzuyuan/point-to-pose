@@ -69,6 +69,24 @@ pipeline:
     pose_jump_guard_min_inlier_ratio: 0.0
     pose_jump_guard_single_cluster_min_inliers: 5
 
+    pose_filter_enable: true
+    pose_filter_type: lowpass
+    pose_filter_nominal_dt: 0.0166667
+    pose_filter_min_dt: 0.0083333
+    pose_filter_max_dt: 0.1000000
+    pose_filter_skip_on_jump_reject: true
+    pose_filter_log_raw_pose: false
+    pose_filter_rot_smooth_alpha: 0.3
+    pose_filter_mask_trans_trust: 0.8
+    pose_filter_rot_process_sigma: 0.087
+    pose_filter_trans_process_sigma: 0.02
+    pose_filter_lowpass_alpha: 0.7        # smoothing factor (smaller = more smoothing)
+    pose_filter_lowpass_window_size: 5  # optional: use moving average instead of exponential smoothing
+
+    pose_filter_outlier_rejection: false
+    pose_filter_outlier_trans_thres: 0.1    # meters (default 0.1)
+    pose_filter_outlier_rot_deg_thres: 30.0 # degrees (default 30.0)
+
     kf_gating: false
     anchor_rot_deg: 15.0
     anchor_trans: 0.03

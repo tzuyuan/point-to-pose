@@ -5,6 +5,8 @@ from typing import Any
 import numpy as np
 
 from point2pose.utils.se3_cv_pose_filter import SE3ConstantVelocityFilter
+from point2pose.utils.se3_low_pass_filter import SE3LowPassFilterAdapter
+from point2pose.utils.se3_mask_fused_filter import SE3MaskFusedFilter
 from point2pose.utils.transform import inverse_SE3
 
 
@@ -19,6 +21,7 @@ class PoseFilterManager:
         reset_rot_deg_thres: float,
         filter_kwargs: dict[str, Any],
         skip_on_jump_reject: bool = True,
+        filter_type: str = "constant_velocity",
     ):
         self.enabled = bool(enabled)
         self.log_raw_pose = bool(log_raw_pose)
@@ -27,7 +30,8 @@ class PoseFilterManager:
         self.reset_rot_deg_thres = float(reset_rot_deg_thres)
         self.filter_kwargs = dict(filter_kwargs)
         self.skip_on_jump_reject = bool(skip_on_jump_reject)
-        self.pose_filters: dict[int, SE3ConstantVelocityFilter] = {}
+        self.filter_type = str(filter_type).strip().lower()
+        self.pose_filters: dict[int, Any] = {}
 
     def initialize(self, num_obj: int, objects: list, timestamp: float | None) -> None:
         self.pose_filters = {}
@@ -35,7 +39,7 @@ class PoseFilterManager:
             return
 
         for obj_id in range(int(num_obj)):
-            pose_filter = SE3ConstantVelocityFilter(**self.filter_kwargs)
+            pose_filter = self._create_filter()
             pose_filter.initialize(
                 np.asarray(objects[obj_id].pose, dtype=float), timestamp
             )
@@ -72,6 +76,23 @@ class PoseFilterManager:
         if raw_pose is not None:
             fe_result.obj_poses_raw[obj_id] = np.asarray(raw_pose, dtype=float).copy()
 
+        # When mask fallback was applied (for lowpass filter), re-initialize
+        # the filter at the fallback pose and pass it through unsmoothed.
+        if self.filter_type == "lowpass":
+            fallback_triggered = getattr(fe_result, "mask_fallback_triggered", {})
+            if fallback_triggered.get(obj_id, False):
+                pose_arr = (
+                    np.asarray(raw_pose, dtype=float).copy()
+                    if raw_pose is not None
+                    else np.asarray(obj.pose, dtype=float).copy()
+                )
+                pf = self._get_or_create_filter(obj_id, obj, timestamp)
+                pf.initialize(pose_arr, timestamp)
+                fe_result.obj_poses[obj_id] = pose_arr
+                fe_result.obj_poses_filtered[obj_id] = pose_arr.copy()
+                fe_result.pose_filter_stats[obj_id] = self.default_stats()
+                return
+
         pose_filter = self._get_or_create_filter(obj_id, obj, timestamp)
         raw_pose_arr = None if raw_pose is None else np.asarray(raw_pose, dtype=float)
         stats = self._build_stats(fe_result, obj_id)
@@ -82,12 +103,24 @@ class PoseFilterManager:
             raw_pose_arr, fe_result, obj_id, pose_filter
         )
 
+        extra_kwargs = {}
+        if self.filter_type == "mask_fused":
+            mask_stats = getattr(fe_result, "mask_fallback_stats", {}).get(
+                obj_id, {}
+            )
+            target_center = mask_stats.get("target_center_cam", None)
+            if target_center is not None:
+                target_center = np.asarray(target_center, dtype=float).reshape(3)
+                if np.all(np.isfinite(target_center)):
+                    extra_kwargs["mask_position_3d"] = target_center
+
         filtered_pose, filter_stats = pose_filter.step(
             raw_pose_arr,
             timestamp,
             stats,
             measurement_ok,
             hard_reset=hard_reset,
+            **extra_kwargs,
         )
 
         if filtered_pose is None:
@@ -101,12 +134,17 @@ class PoseFilterManager:
 
     # -- Per-object helpers ---------------------------------------------------
 
-    def _get_or_create_filter(
-        self, obj_id: int, obj, timestamp
-    ) -> SE3ConstantVelocityFilter:
+    def _create_filter(self):
+        if self.filter_type == "mask_fused":
+            return SE3MaskFusedFilter(**self.filter_kwargs)
+        if self.filter_type == "lowpass":
+            return SE3LowPassFilterAdapter(**self.filter_kwargs)
+        return SE3ConstantVelocityFilter(**self.filter_kwargs)
+
+    def _get_or_create_filter(self, obj_id: int, obj, timestamp):
         pose_filter = self.pose_filters.get(obj_id)
         if pose_filter is None:
-            pose_filter = SE3ConstantVelocityFilter(**self.filter_kwargs)
+            pose_filter = self._create_filter()
             pose_filter.initialize(np.asarray(obj.pose, dtype=float), timestamp)
             self.pose_filters[obj_id] = pose_filter
         return pose_filter
@@ -143,7 +181,7 @@ class PoseFilterManager:
         raw_pose_arr,
         fe_result,
         obj_id: int,
-        pose_filter: SE3ConstantVelocityFilter,
+        pose_filter,
     ) -> bool:
         if raw_pose_arr is None or raw_pose_arr.shape != (4, 4):
             return False

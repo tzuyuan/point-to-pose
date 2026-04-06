@@ -146,6 +146,9 @@ class ModularPipeline:
         self.last_step_module_times = {}
 
         # Online pose filtering
+        self.pose_filter_type = str(
+            self.pipeline_cfg.get("pose_filter_type", "constant_velocity")
+        ).strip().lower()
         self.pose_filter_enable = bool(
             self.pipeline_cfg.get("pose_filter_enable", False)
         )
@@ -204,15 +207,26 @@ class ModularPipeline:
             reset_rot_deg_thres=self.pose_filter_reset_rot_deg_thres,
             filter_kwargs=self._build_pose_filter_kwargs(),
             skip_on_jump_reject=self.pose_filter_skip_on_jump_reject,
+            filter_type=self.pose_filter_type,
         )
         self.mask_pose_fallback_enable = bool(
             self.pipeline_cfg.get("mask_pose_fallback_enable", False)
         )
+        _mask_fused_mode = (self.pose_filter_type == "mask_fused")
         self.mask_pose_fallback_manager = MaskPoseFallbackManager(
-            enabled=self.mask_pose_fallback_enable,
-            only_when_weak=bool(
-                self.pipeline_cfg.get("mask_pose_fallback_only_when_weak", True)
+            # When using mask_fused filter, always enable fallback so mask
+            # stats (target_center_cam) are computed every frame, but set
+            # compute_only=True so it doesn't modify poses — the filter
+            # handles fusion itself.
+            enabled=self.mask_pose_fallback_enable or _mask_fused_mode,
+            only_when_weak=(
+                False
+                if _mask_fused_mode
+                else bool(
+                    self.pipeline_cfg.get("mask_pose_fallback_only_when_weak", True)
+                )
             ),
+            compute_only=_mask_fused_mode,
             weak_min_valid_points=int(
                 self.pipeline_cfg.get(
                     "mask_pose_fallback_weak_min_valid_points",
@@ -1427,6 +1441,13 @@ class ModularPipeline:
         self.hist_track_tables.append(copy.deepcopy(track_table))
 
     def _build_pose_filter_kwargs(self) -> dict:
+        if self.pose_filter_type == "mask_fused":
+            return self._build_mask_fused_filter_kwargs()
+        if self.pose_filter_type == "lowpass":
+            return self._build_lowpass_filter_kwargs()
+        return self._build_cv_filter_kwargs()
+
+    def _build_cv_filter_kwargs(self) -> dict:
         nominal_dt = max(float(self.pose_filter_nominal_dt), 1e-6)
         max_rel_trans = max(float(self.max_rel_translation), 1e-4)
         max_rel_rot_rad = max(np.deg2rad(float(self.max_rel_rotation_deg)), 1e-4)
@@ -1523,6 +1544,130 @@ class ModularPipeline:
             ),
             "twist_trans_meas_sigma": self.pipeline_cfg.get(
                 "pose_filter_twist_trans_meas_sigma", None
+            ),
+        }
+
+    def _build_mask_fused_filter_kwargs(self) -> dict:
+        nominal_dt = max(float(self.pose_filter_nominal_dt), 1e-6)
+        max_rel_trans = max(float(self.max_rel_translation), 1e-4)
+        max_rel_rot_rad = max(np.deg2rad(float(self.max_rel_rotation_deg)), 1e-4)
+        jump_trans = max(float(self.pose_filter_reset_trans_thres), 1e-4)
+        jump_rot_rad = max(
+            np.deg2rad(float(self.pose_filter_reset_rot_deg_thres)), 1e-4
+        )
+        residual_ref = float(
+            self.pipeline_cfg.get(
+                "pose_filter_residual_ref",
+                self.cfg.register.params.get("residual_thres", 0.007),
+            )
+        )
+        trans_meas_sigma = float(
+            self.pipeline_cfg.get(
+                "pose_filter_trans_meas_sigma",
+                max(residual_ref, min(max_rel_trans, jump_trans) / 6.0),
+            )
+        )
+        rot_meas_sigma = float(
+            self.pipeline_cfg.get(
+                "pose_filter_rot_meas_sigma",
+                max(np.deg2rad(0.5), min(max_rel_rot_rad, jump_rot_rad) / 6.0),
+            )
+        )
+        return {
+            "nominal_dt": nominal_dt,
+            "min_dt": float(self.pose_filter_min_dt),
+            "max_dt": float(self.pose_filter_max_dt),
+            "rot_process_sigma": float(
+                self.pipeline_cfg.get("pose_filter_rot_process_sigma", np.deg2rad(5.0))
+            ),
+            "trans_process_sigma": float(
+                self.pipeline_cfg.get("pose_filter_trans_process_sigma", 0.02)
+            ),
+            "rot_meas_sigma": rot_meas_sigma,
+            "trans_meas_sigma": trans_meas_sigma,
+            "residual_ref": residual_ref,
+            "min_inliers": int(
+                self.pipeline_cfg.get(
+                    "pose_filter_min_inliers",
+                    self.pipeline_cfg.get(
+                        "pose_jump_guard_min_inliers",
+                        self.cfg.register.params.get("min_inliers", 3),
+                    ),
+                )
+            ),
+            "min_inlier_ratio": float(
+                self.pipeline_cfg.get(
+                    "pose_filter_min_inlier_ratio",
+                    self.pipeline_cfg.get("pose_jump_guard_min_inlier_ratio", 0.0),
+                )
+            ),
+            "min_valid_correspondences": int(
+                self.pose_filter_min_valid_correspondences
+            ),
+            "max_meas_scale": float(
+                self.pipeline_cfg.get("pose_filter_max_meas_scale", 50.0)
+            ),
+            "skip_on_jump_reject": bool(self.pose_filter_skip_on_jump_reject),
+            "rot_smooth_alpha": float(
+                self.pipeline_cfg.get("pose_filter_rot_smooth_alpha", 0.3)
+            ),
+            "mask_trans_trust": float(
+                self.pipeline_cfg.get("pose_filter_mask_trans_trust", 0.8)
+            ),
+        }
+
+    def _build_lowpass_filter_kwargs(self) -> dict:
+        nominal_dt = max(float(self.pose_filter_nominal_dt), 1e-6)
+        residual_ref = float(
+            self.pipeline_cfg.get(
+                "pose_filter_residual_ref",
+                self.cfg.register.params.get("residual_thres", 0.007),
+            )
+        )
+        raw_window = self.pipeline_cfg.get("pose_filter_lowpass_window_size", None)
+        window_size = int(raw_window) if raw_window is not None else None
+        return {
+            "alpha": float(
+                self.pipeline_cfg.get("pose_filter_lowpass_alpha", 0.3)
+            ),
+            "window_size": window_size,
+            "nominal_dt": nominal_dt,
+            "min_dt": float(self.pose_filter_min_dt),
+            "max_dt": float(self.pose_filter_max_dt),
+            "residual_ref": residual_ref,
+            "min_inliers": int(
+                self.pipeline_cfg.get(
+                    "pose_filter_min_inliers",
+                    self.pipeline_cfg.get(
+                        "pose_jump_guard_min_inliers",
+                        self.cfg.register.params.get("min_inliers", 3),
+                    ),
+                )
+            ),
+            "min_inlier_ratio": float(
+                self.pipeline_cfg.get(
+                    "pose_filter_min_inlier_ratio",
+                    self.pipeline_cfg.get("pose_jump_guard_min_inlier_ratio", 0.0),
+                )
+            ),
+            "min_valid_correspondences": int(
+                self.pose_filter_min_valid_correspondences
+            ),
+            "max_meas_scale": float(
+                self.pipeline_cfg.get("pose_filter_max_meas_scale", 50.0)
+            ),
+            "skip_on_jump_reject": bool(self.pose_filter_skip_on_jump_reject),
+            "jump_reject_meas_scale": float(
+                self.pipeline_cfg.get("pose_filter_jump_reject_meas_scale", 20.0)
+            ),
+            "outlier_rejection": bool(
+                self.pipeline_cfg.get("pose_filter_outlier_rejection", False)
+            ),
+            "outlier_trans_thres": float(
+                self.pipeline_cfg.get("pose_filter_outlier_trans_thres", 0.1)
+            ),
+            "outlier_rot_deg_thres": float(
+                self.pipeline_cfg.get("pose_filter_outlier_rot_deg_thres", 30.0)
             ),
         }
 
