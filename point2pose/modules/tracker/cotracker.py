@@ -41,6 +41,12 @@ class CoTrackerRealtimeTracker(Tracker):
             [], dtype=torch.float32, device=self._device
         )
         self._need_commit = False
+        # ID bookkeeping for compatibility with the modular pipeline's
+        # track-retirement path. CoTracker3 cannot actually drop points from
+        # its internal state, so deactivate is a no-op and the count is
+        # cumulative.
+        self._active_global_ids = np.empty((0,), dtype=np.int64)
+        self._num_global_points = 0
 
     def initialize(self, frame):
         self._img_height = frame.rgb.shape[0]
@@ -71,10 +77,20 @@ class CoTrackerRealtimeTracker(Tracker):
         self._new_query_points = new_query_points
         self._need_commit = True
 
-        return np.arange(
-            self._query_points.shape[0] - new_query_points.shape[0],
-            self._query_points.shape[0],
+        n_new = int(new_query_points.shape[0])
+        new_global_ids = np.arange(
+            self._num_global_points, self._num_global_points + n_new, dtype=np.int64
         )
+        self._active_global_ids = np.concatenate((self._active_global_ids, new_global_ids))
+        self._num_global_points += n_new
+        return new_global_ids
+
+    def deactivate_query_points(self, global_ids):
+        """No-op: CoTracker3's online state cannot drop individual queries
+        without rewinding the model. The pipeline's track-retirement path is
+        accommodated, but the underlying model continues to track all points.
+        Returns an empty array so the pipeline records zero removed."""
+        return np.empty((0,), dtype=np.int64)
 
     def track_once(self, frame):
         """

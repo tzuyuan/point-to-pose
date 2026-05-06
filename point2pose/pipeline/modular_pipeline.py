@@ -469,6 +469,7 @@ class ModularPipeline:
             "local_opt": 0.0,
             "keyframe": 0.0,
             "global_opt": 0.0,
+            "tsdf": 0.0,
             "logging": 0.0,
         }
         #################################################################
@@ -662,6 +663,7 @@ class ModularPipeline:
                     f"Frame {frame.id}: No optimized global pose for obj {kf.obj_id} kf {kf.kf_idx}; using keyframe pose for SDF fusion."
                 )
 
+            t_tsdf = time.time()
             sdf_ok = self.sdf_builder.integrate_keyframe(obj=obj, keyframe=kf)
             if sdf_ok:
                 print(
@@ -678,6 +680,7 @@ class ModularPipeline:
                     saved = self.sdf_builder.export_debug_mesh(obj, mesh_path)
                     if saved and self.debug_level > 1:
                         print(f"Frame {frame.id}: Saved SDF mesh to {mesh_path}")
+            module_times["tsdf"] += time.time() - t_tsdf
 
         module_times["global_opt"] = time.time() - t0
 
@@ -704,6 +707,7 @@ class ModularPipeline:
             f"local_opt={module_times['local_opt']:.4f}s, "
             f"keyframe={module_times['keyframe']:.4f}s, "
             f"global_opt={module_times['global_opt']:.4f}s, "
+            f"tsdf={module_times['tsdf']:.4f}s, "
             f"logging={module_times['logging']:.4f}s, "
             f"total={iter_total_time:.4f}s"
         )
