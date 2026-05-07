@@ -162,7 +162,7 @@ def plot_module_boxplot(df: pd.DataFrame, out_path: str):
     data = [df[c].values for c in cols]
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.boxplot(data, labels=names, showfliers=False)
+    ax.boxplot(data, tick_labels=names, showfliers=False)
     ax.set_ylabel("Per-frame time (ms)")
     ax.set_title("Per-module per-frame distribution — default config (num_points=30)")
     plt.setp(ax.get_xticklabels(), rotation=20, ha="right")
@@ -355,6 +355,76 @@ def plot_tracker_compare(tapir_df: pd.DataFrame, ct3_df: pd.DataFrame, out_path:
     return tapir_fit, ct3_fit
 
 
+def plot_tracker_compare_resolutions(root: str, out_path: str, drop_warmup: int = 1,
+                                     videos=None):
+    """Same style as plot_tracker_compare, but the series is one line per resolution.
+
+    Reads resolution_sweep/tapir/<HxW>/<video>/timings.csv. By default combines all
+    videos found at each resolution; pass `videos` to restrict.
+    """
+    runs = discover_resolution_sweep(root)
+    if runs.empty:
+        return
+    if videos is not None:
+        runs = runs[runs["video"].isin(videos)]
+        if runs.empty:
+            return
+
+    from matplotlib.lines import Line2D
+
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    cmap = plt.get_cmap("tab10")
+    legend_handles = []
+
+    def _scatter_and_fit(sub, color, label):
+        if sub.empty:
+            return
+        ax.scatter(sub["num_active_tracks"], sub["tracker_ms"],
+                   s=6, alpha=0.18, color=color)
+        x = sub["num_active_tracks"].values.astype(float)
+        y = sub["tracker_ms"].values.astype(float)
+        slope, b = np.polyfit(x, y, 1)
+        xs = np.linspace(x.min(), x.max(), 100)
+        ax.plot(xs, slope * xs + b, color=color, lw=2)
+        # opaque marker for the legend so the dot color matches the line color
+        legend_handles.append(
+            Line2D([], [], marker="o", linestyle="", color=color,
+                   markersize=6, label=label)
+        )
+
+    by_res = sorted(runs["height"].unique())
+    for i, h in enumerate(by_res):
+        frames = []
+        for _, r in runs[runs["height"] == h].iterrows():
+            df = pd.read_csv(r["csv_path"])
+            if drop_warmup > 0 and len(df) > drop_warmup:
+                df = df.iloc[drop_warmup:]
+            df["video"] = r["video"]
+            frames.append(df)
+        if not frames:
+            continue
+        df = pd.concat(frames, ignore_index=True)
+        sub = df[(df["num_active_tracks"] > 0) & (df["tracker_ms"] > 0)]
+        _scatter_and_fit(sub, cmap(i), f"TAPIR ({h}x{h})")
+
+    # cotracker3 (HO3D, 480x640 per its native config)
+    ct3_runs = discover_alt_run(root, "cotracker3")
+    if not ct3_runs.empty:
+        ct3_df = load_alt_runs(ct3_runs, drop_warmup=drop_warmup)
+        sub = ct3_df[(ct3_df["num_active_tracks"] > 0) & (ct3_df["tracker_ms"] > 0)]
+        _scatter_and_fit(sub, cmap(len(by_res)), "cotracker3 (480x640)")
+
+    ax.set_xlabel("Number of active tracked points (per frame)")
+    ax.set_ylabel("2D tracker time per frame (ms)")
+    ax.set_title("Tracker runtime v.s. Number of Tracks")
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(handles=legend_handles, loc="upper left", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Wrote {out_path}")
+
+
 def collect_quality(root: str, sub_pattern: str, label: str) -> list:
     """Read quality.json from each run under sub_pattern (e.g. 'n030/*' or 'cotracker3/*')."""
     import json as _json
@@ -464,6 +534,11 @@ def main():
 
     # Resolution sweep — optional
     write_resolution_sweep_outputs(args.root, fig_dir, tab_dir, args.drop_warmup)
+    plot_tracker_compare_resolutions(
+        args.root,
+        os.path.join(fig_dir, "tracker_compare_resolutions.png"),
+        drop_warmup=args.drop_warmup,
+    )
 
 
 # -----------------------------------------------------------------------------
