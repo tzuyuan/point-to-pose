@@ -56,6 +56,8 @@ def run_ycbinisaac_runtime(
     model_path: str,
     max_frames: int | None = None,
     run_quality_eval: bool = True,
+    resize_height: int | None = None,
+    resize_width: int | None = None,
 ):
     video_path = os.path.join(data_path, video_name)
     if not os.path.exists(video_path):
@@ -71,6 +73,14 @@ def run_ycbinisaac_runtime(
     os.makedirs(mesh_folder, exist_ok=True)
 
     cfg = OmegaConf.load(config_path)
+    if resize_height is not None:
+        OmegaConf.update(
+            cfg, "tracker.params.resize_height", int(resize_height), force_add=True
+        )
+    if resize_width is not None:
+        OmegaConf.update(
+            cfg, "tracker.params.resize_width", int(resize_width), force_add=True
+        )
     cfg.pipeline.params.sdf_mesh_save_dir = mesh_folder
     cfg.pipeline.params.sdf_mesh_save_every = 0
     object_names = reader.get_object_names()
@@ -145,6 +155,8 @@ def run_ycbinisaac_runtime(
         "video_name": video_name,
         "config_path": os.path.abspath(config_path),
         "object_names": list(object_names),
+        "resize_height": int(resize_height) if resize_height is not None else None,
+        "resize_width": int(resize_width) if resize_width is not None else None,
         "num_frames": n_frames,
         "max_frames": max_frames,
         "wall_total_s": wall_total,
@@ -232,6 +244,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--max_frames", type=int, default=None)
     parser.add_argument("--no_quality_eval", action="store_true")
+    parser.add_argument("--resize_height", type=int, default=None)
+    parser.add_argument("--resize_width", type=int, default=None)
 
     args = parser.parse_args()
     run_ycbinisaac_runtime(
@@ -242,4 +256,6 @@ if __name__ == "__main__":
         model_path=args.model_path,
         max_frames=args.max_frames,
         run_quality_eval=not args.no_quality_eval,
+        resize_height=args.resize_height,
+        resize_width=args.resize_width,
     )

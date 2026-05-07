@@ -332,21 +332,20 @@ def plot_tracker_compare(tapir_df: pd.DataFrame, ct3_df: pd.DataFrame, out_path:
         if sub.empty:
             return None
         ax.scatter(sub["num_active_tracks"], sub["tracker_ms"],
-                   s=6, alpha=0.18, color=color, label=f"{label} (per-frame)")
+                   s=6, alpha=0.18, color=color, label=label)
         x = sub["num_active_tracks"].values.astype(float)
         y = sub["tracker_ms"].values.astype(float)
         slope, b = np.polyfit(x, y, 1)
         xs = np.linspace(x.min(), x.max(), 100)
-        ax.plot(xs, slope * xs + b, color=color, lw=2,
-                label=f"{label} fit: {slope*1000:.2f} μs/pt + {b:.1f} ms")
+        ax.plot(xs, slope * xs + b, color=color, lw=2)
         return (slope, b, len(sub))
 
     tapir_fit = _scatter_and_fit(tapir_df, "tab:blue", "TAPIR")
-    ct3_fit = _scatter_and_fit(ct3_df, "tab:orange", "cotracker3_online")
+    ct3_fit = _scatter_and_fit(ct3_df, "tab:orange", "cotracker3")
 
     ax.set_xlabel("Number of active tracked points (per frame)")
     ax.set_ylabel("2D tracker time per frame (ms)")
-    ax.set_title("Tracker runtime vs num tracks: TAPIR vs cotracker3_online")
+    ax.set_title("Tracker runtime v.s. Number of Tracks")
     ax.grid(True, linestyle="--", alpha=0.5)
     ax.legend(loc="upper left", fontsize=9)
     fig.tight_layout()
@@ -462,6 +461,160 @@ def main():
 
     # Quality table comparing TAPIR vs cotracker3 (uses quality.json files)
     write_quality_table(args.root, os.path.join(tab_dir, "quality_tapir_vs_cotracker3.csv"))
+
+    # Resolution sweep — optional
+    write_resolution_sweep_outputs(args.root, fig_dir, tab_dir, args.drop_warmup)
+
+
+# -----------------------------------------------------------------------------
+# Resolution sweep
+# -----------------------------------------------------------------------------
+
+def discover_resolution_sweep(root: str) -> pd.DataFrame:
+    """Find timings.csv under root/resolution_sweep/tapir/<HxW>/<video>/timings.csv."""
+    pattern = os.path.join(root, "resolution_sweep", "tapir", "*", "*", "timings.csv")
+    rows = []
+    for csv_path in glob.glob(pattern):
+        m = re.search(r"/(\d+)x(\d+)/([^/]+)/timings\.csv$", csv_path)
+        if not m:
+            continue
+        rows.append({
+            "height": int(m.group(1)),
+            "width": int(m.group(2)),
+            "video": m.group(3),
+            "csv_path": csv_path,
+        })
+    if not rows:
+        return pd.DataFrame(columns=["height", "width", "video", "csv_path"])
+    return pd.DataFrame(rows).sort_values(["height", "video"]).reset_index(drop=True)
+
+
+def _load_quality(csv_path: str) -> dict:
+    """Read sibling quality.json and return a flat dict (handles both single and multi-obj formats)."""
+    import json as _json
+    q_path = os.path.join(os.path.dirname(csv_path), "quality.json")
+    if not os.path.exists(q_path):
+        return {}
+    try:
+        with open(q_path) as f:
+            data = _json.load(f)
+    except Exception:
+        return {}
+    if isinstance(data, dict) and "add_s_auc" in data:
+        return data
+    if isinstance(data, dict) and len(data) > 0:
+        # multi-object — return the first (we use single-obj sequences)
+        first = next(iter(data.values()))
+        if isinstance(first, dict):
+            return first
+    return {}
+
+
+def write_resolution_sweep_outputs(root: str, fig_dir: str, tab_dir: str, drop_warmup: int):
+    runs = discover_resolution_sweep(root)
+    if runs.empty:
+        return
+    print("Discovered resolution-sweep runs:")
+    print(runs.to_string(index=False))
+
+    rows = []
+    for _, r in runs.iterrows():
+        df = pd.read_csv(r["csv_path"])
+        if drop_warmup > 0 and len(df) > drop_warmup:
+            df = df.iloc[drop_warmup:]
+        q = _load_quality(r["csv_path"])
+        rows.append({
+            "video": r["video"],
+            "resolution": f"{r['height']}x{r['width']}",
+            "h": int(r["height"]),
+            "w": int(r["width"]),
+            "tracker_ms_mean": float(df["tracker_ms"].mean()),
+            "total_ms_mean": float(df["total_ms"].mean()),
+            "add_s_err_cm": q.get("add_s_err_mean_cm"),
+            "add_err_cm": q.get("add_err_mean_cm"),
+            "add_s_auc": q.get("add_s_auc"),
+            "add_auc": q.get("add_auc"),
+            "n_frames": int(len(df)),
+        })
+    table = pd.DataFrame(rows).sort_values(["video", "h"]).reset_index(drop=True)
+    csv_path = os.path.join(tab_dir, "resolution_sweep.csv")
+    md_path = os.path.join(tab_dir, "resolution_sweep.md")
+    table.to_csv(csv_path, index=False)
+    md_df = table.drop(columns=["h", "w"]).round(2)
+    Path(md_path).write_text(
+        "# TAPIR resolution sweep — runtime + quality\n\n"
+        "Mean per-frame tracker_ms and pipeline total_ms (frame 0 dropped as warm-up). "
+        "ADD/ADD-S in cm; AUC in percent.\n\n"
+        + md_df.to_markdown(index=False) + "\n"
+    )
+    print(f"Wrote {csv_path} and {md_path}")
+
+    # Plots
+    cmap = plt.get_cmap("tab10")
+    videos = sorted(table["video"].unique())
+
+    # 1) Runtime vs resolution
+    fig, ax = plt.subplots(figsize=(7, 5))
+    for i, v in enumerate(videos):
+        sub = table[table["video"] == v].sort_values("h")
+        ax.plot(sub["h"], sub["tracker_ms_mean"], marker="o", color=cmap(i), label=v)
+    ax.set_xlabel("Tracker input resolution (square, pixels per side)")
+    ax.set_ylabel("Mean 2D tracker time per frame (ms)")
+    ax.set_title("TAPIR runtime vs input resolution")
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="upper left", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(os.path.join(fig_dir, "resolution_runtime.png"), dpi=150,
+                bbox_inches="tight")
+    plt.close(fig)
+    print(f"Wrote {os.path.join(fig_dir, 'resolution_runtime.png')}")
+
+    # 2) Quality vs resolution
+    fig, ax = plt.subplots(figsize=(7, 5))
+    for i, v in enumerate(videos):
+        sub = table[table["video"] == v].sort_values("h").dropna(subset=["add_s_auc"])
+        if sub.empty:
+            continue
+        ax.plot(sub["h"], sub["add_s_auc"], marker="o", color=cmap(i), label=f"{v} ADD-S AUC")
+        if sub["add_auc"].notna().any():
+            ax.plot(sub["h"], sub["add_auc"], marker="s", color=cmap(i), linestyle="--",
+                    alpha=0.7, label=f"{v} ADD AUC")
+    ax.set_xlabel("Tracker input resolution (square, pixels per side)")
+    ax.set_ylabel("AUC (%)")
+    ax.set_title("TAPIR quality vs input resolution")
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="lower right", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(fig_dir, "resolution_quality.png"), dpi=150,
+                bbox_inches="tight")
+    plt.close(fig)
+    print(f"Wrote {os.path.join(fig_dir, 'resolution_quality.png')}")
+
+    # 3) Pareto: runtime vs quality
+    fig, ax = plt.subplots(figsize=(7, 5))
+    for i, v in enumerate(videos):
+        sub = table[table["video"] == v].sort_values("h").dropna(subset=["add_s_auc"])
+        if sub.empty:
+            continue
+        ax.plot(sub["tracker_ms_mean"], sub["add_s_auc"],
+                marker="o", color=cmap(i), label=v)
+        for _, row in sub.iterrows():
+            ax.annotate(
+                row["resolution"],
+                (row["tracker_ms_mean"], row["add_s_auc"]),
+                textcoords="offset points", xytext=(6, 4), fontsize=8,
+                color=cmap(i),
+            )
+    ax.set_xlabel("Mean 2D tracker time per frame (ms)")
+    ax.set_ylabel("ADD-S AUC (%)")
+    ax.set_title("TAPIR resolution Pareto: runtime vs quality")
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="lower right", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(os.path.join(fig_dir, "resolution_pareto.png"), dpi=150,
+                bbox_inches="tight")
+    plt.close(fig)
+    print(f"Wrote {os.path.join(fig_dir, 'resolution_pareto.png')}")
 
 
 if __name__ == "__main__":

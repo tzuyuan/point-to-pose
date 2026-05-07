@@ -110,6 +110,8 @@ def run_ho3d_runtime(
     num_points: int,
     max_frames: int | None = None,
     run_mesh_eval: bool = True,
+    resize_height: int | None = None,
+    resize_width: int | None = None,
 ):
     video_path = os.path.join(data_path, "evaluation", video_name)
     reader = Ho3dReader(video_path, data_path)
@@ -126,6 +128,14 @@ def run_ho3d_runtime(
     OmegaConf.update(
         cfg, "sampler.params.num_points", int(num_points), force_add=True
     )
+    if resize_height is not None:
+        OmegaConf.update(
+            cfg, "tracker.params.resize_height", int(resize_height), force_add=True
+        )
+    if resize_width is not None:
+        OmegaConf.update(
+            cfg, "tracker.params.resize_width", int(resize_width), force_add=True
+        )
     cfg.pipeline.params.sdf_mesh_save_dir = mesh_folder
     # Suppress periodic mesh export during timing — only the final mesh matters.
     cfg.pipeline.params.sdf_mesh_save_every = 0
@@ -200,6 +210,8 @@ def run_ho3d_runtime(
         "video_name": video_name,
         "config_path": os.path.abspath(config_path),
         "num_points": int(num_points),
+        "resize_height": int(resize_height) if resize_height is not None else None,
+        "resize_width": int(resize_width) if resize_width is not None else None,
         "num_frames": len(out_poses),
         "max_frames": max_frames,
         "wall_total_s": wall_total,
@@ -290,6 +302,18 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip the final mesh CD evaluation (still saves predicted poses).",
     )
+    parser.add_argument(
+        "--resize_height",
+        type=int,
+        default=None,
+        help="Override tracker.params.resize_height. If unset, uses config default.",
+    )
+    parser.add_argument(
+        "--resize_width",
+        type=int,
+        default=None,
+        help="Override tracker.params.resize_width. If unset, uses config default.",
+    )
 
     args = parser.parse_args()
     run_ho3d_runtime(
@@ -300,4 +324,6 @@ if __name__ == "__main__":
         num_points=args.num_points,
         max_frames=args.max_frames,
         run_mesh_eval=not args.no_mesh_eval,
+        resize_height=args.resize_height,
+        resize_width=args.resize_width,
     )
