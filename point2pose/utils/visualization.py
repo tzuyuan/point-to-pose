@@ -819,10 +819,10 @@ def visualize_and_save_tracking_results(
             #   red   -> tentative / invalid (obj.valid=False or unmapped)
             n_tracks = int(len(track_table.track_2d))
             for obj in objects:
-                reg_idx = np.asarray(
-                    getattr(obj, "curr_frame_indices", np.array([], dtype=np.int64)),
-                    dtype=np.int64,
-                ).reshape(-1)
+                _idx = getattr(obj, "curr_frame_indices", None)
+                if _idx is None:
+                    continue
+                reg_idx = np.asarray(_idx, dtype=np.int64).reshape(-1)
                 if reg_idx.size == 0:
                     continue
                 reg_idx = reg_idx[(reg_idx >= 0) & (reg_idx < n_tracks)]
@@ -856,10 +856,10 @@ def visualize_and_save_tracking_results(
             n_tracks = int(len(track_table.track_2d))
             K = np.asarray(camera_intrinsics, dtype=float).reshape(3, 3)
             for obj in objects:
-                reg_idx = np.asarray(
-                    getattr(obj, "curr_frame_indices", np.array([], dtype=np.int64)),
-                    dtype=np.int64,
-                ).reshape(-1)
+                _idx = getattr(obj, "curr_frame_indices", None)
+                if _idx is None:
+                    continue
+                reg_idx = np.asarray(_idx, dtype=np.int64).reshape(-1)
                 if reg_idx.size == 0:
                     continue
 

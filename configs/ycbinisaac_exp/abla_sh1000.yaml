@@ -1,0 +1,434 @@
+
+
+pipeline:
+  type: modular
+  params:
+    max_num_obj: 1
+    estimate_init_pose: false
+
+    use_segmenter: false
+
+    # depth related
+    fill_missing_depth: true
+    fill_missing_depth_window_size: 5
+    fill_missing_depth_min_neighbors: 1
+    min_depth: 0.1
+    max_depth: 2
+
+    use_depth_estimate: false
+    depth_estimator_type: depth_anything
+    device: cuda
+    depth_encoder: vitl
+
+    max_rel_rotation_deg: 1000
+    max_rel_translation: 3
+    pose_jump_guard_enable: true
+    pose_jump_guard_trans_thres: 0.1
+    pose_jump_guard_rot_deg_thres: 30.0
+    pose_jump_guard_min_inliers: 6
+    pose_jump_guard_min_inlier_ratio: 0.05
+    pose_jump_guard_single_cluster_min_inliers: 8
+
+    kf_gating: false
+    anchor_rot_deg: 15.0
+    anchor_trans: 0.03
+    anchor_min_inliers: 4
+    anchor_min_inlier_ratio: 0.0
+    anchor_max_median_res: 0.01
+    anchor_vel_hist_len: 5
+    anchor_vel_rot_deg: 150.0
+    anchor_vel_trans: 1.00
+
+    sdf_kf_gate : false
+    sdf_kf_gate_thres: 0.05
+    sdf_kf_gate_percentile: 70.0
+    sdf_kf_gate_min_dense: 200
+
+
+    # frame-level growth gate
+    map_growth_gate: false
+    map_growth_cooldown_after_recovery: 3
+    map_growth_max_mean_residual: 0.007
+
+    # Frontend fallback: if confirmed valid correspondences are too few,
+    # temporarily use recent tentative points that pass quality checks.
+    tentative_fallback_min_valid_points: 12
+    tentative_fallback_max_points: 16
+    tentative_fallback_recent_frames: 20
+    tentative_fallback_uncer_scale: 1.5
+
+    # pending promotion geometry consistency
+    pending_obs_min_count: 3
+    pending_obs_max_keep: 8
+    pending_obj_spread_thres: 0.008          # meters
+    pending_use_view_diversity: false
+    pending_min_view_angle_deg: 5.0
+    pending_kf_min_promoted_ratio: 0.3
+    pending_kf_min_promoted_count: 8
+    pending_kf_ttl: 30
+    pending_kf_ttl_on_growth_frames: false
+    pending_kf_require_reg_quality: true
+    pending_kf_require_pose_stable: true
+    pending_kf_sdf_gate: false
+    pending_kf_sdf_gate_thres: 0.02
+
+    # pending promotion SDF gate (optional)
+    pending_sdf_gate: false
+    pending_sdf_gate_thres: 0.02
+    pending_sdf_gate_percentile: 100.0
+    pending_sdf_min_support: 1.0
+
+    # newly promoted point warmup trust
+    promoted_warmup_frames: 0
+    promoted_init_uncer: 0.2
+    promoted_min_uncer: 0.1
+    promoted_spread_to_uncer: 0.00
+    promoted_uncer_decay: 0.00
+
+    frame_reg_mode: f2m
+    use_dense_registration: false
+    use_local_graph: false
+
+    debug_level: 0
+    debug_dir: /home/justin/code/point-to-pose/debug/
+    save_pose: true
+    pose_save_path: /home/justin/code/point-to-pose/debug/poses
+    save_key_points: false
+    key_points_save_path: /home/justin/code/point-to-pose/debug/key_points
+    save_meta_data: true
+    meta_data_log_every: 5
+    meta_data_max_rows: -1
+    meta_data_save_path: /home/justin/code/point-to-pose/debug/pipeline/meta_data
+    save_cropped_pcd: false
+    cropped_pcd_dir: /home/justin/code/point-to-pose/debug/cropped_pcd
+    sdf_mesh_save_every: 0
+
+reconstructor:
+  type: sdf_builder
+  params:
+    build_sdf_after_global_opt: true
+    sdf_use_gpu: true
+    sdf_backend: python_tsdf
+    sdf_voxel_size: 0.005
+    sdf_bounds_padding: 0.05
+    sdf_max_voxels: 20000
+    sdf_max_extent_m: 1.0
+    sdf_min_points: 300
+    sdf_filter_max_radius: 0.25
+    sdf_filter_keep_percentile: 98.0
+    sdf_fuse_color: true
+
+
+
+# register:
+#   # svd_ransac, svd_residual_outlier, svd_uncertainty_outlier, svd_cluster_ransac
+#   type: svd_residual_outlier
+#   params:
+#     remove_outside_mask: true
+#     debug_level: 0
+#     max_iter: 15
+#     uncer_thres: 0.3
+#     threshold_method: mad
+#     inlier_thres: 0.01
+#     thres_reduce_factor: 0.005
+#     mad_scale: 5
+#     min_inliers: 3
+#     min_variance: 1e-2
+
+#     # outlier pose
+#     residual_thres: 0.007
+    
+register:
+  # type: svd_residual_outlier
+  type: svd_cluster_ransac
+  params:
+
+
+    threshold_method: mad
+
+    ransac_iters: 100
+    sample_size: 4
+    inlier_thres: 0.004 #0.004
+    min_inliers: 5
+    max_clusters: 10
+    use_uncertainty: true
+    min_variance: 1e-2
+    select_3d_dist_min_depth: 0.08
+    select_3d_dist_max_depth: 2
+    select_3d_dist_fill_missing_depth: true
+    select_3d_dist_window_size: 5
+    select_3d_dist_min_neighbors: 1
+    select_dense_map_close_margin: 0.01
+
+    # reproj_error, dist_to_prev, inlier_count, mean_residual, reproj_error_iou, 3d_dist,
+    # 3d_dist_prev_kf, 3d_dist_sparse_map, 3d_dist_dense_map, 3d_dist_dense_map_hybrid
+    select_method: 3d_dist_dense_map
+    select_support_guard_enable: true
+    select_support_guard_min_rel_ninliers: 0.25
+    select_support_guard_abs_min_ninliers: 8
+    select_support_guard_keep_rel_ninliers: 0.70
+    select_support_guard_pose_weight: 0.05
+    select_dense_map_hybrid_robust_percentile: 90.0
+    select_dense_map_hybrid_sdf_tau: 0.01
+    select_dense_map_hybrid_min_support: 0.05
+    select_dense_map_hybrid_min_inlier_ratio: 0.05
+    select_dense_map_hybrid_sdf_gate_margin: 0.005
+    select_dense_map_hybrid_w_sdf: 0.60
+    select_dense_map_hybrid_w_prev: 0.20
+    select_dense_map_hybrid_w_motion: 0.15
+    select_dense_map_hybrid_w_ransac: 0.05
+
+    # Optional post-selection pose refinement with SDF loss.
+    enable_sdf_refine: true
+    sdf_refine_iters: 8
+    sdf_refine_damping: 1e-4
+    sdf_refine_grad_eps: 0.5
+    sdf_refine_max_pts: 1500
+    sdf_refine_use_dense_cur: true
+    sdf_refine_min_pts: 30
+    sdf_trim_method: mad
+    sdf_mad_scale: 2.5
+    sdf_inlier_thres: 0.01
+    sdf_inlier_percentile: 80.0
+    sdf_kernel: huber
+    sdf_kernel_delta: 0.01
+    sdf_min_support_ratio: 0.15
+    sdf_bad_penalty: 0.05
+    sdf_refine_step_trans_clip: 0.02
+    sdf_refine_step_rot_clip: 0.2
+
+    # front end
+    remove_outside_mask: true
+    uncer_thres: 0.4
+    residual_thres: 0.01
+
+# register:
+#   type: svd_residual_outlier
+#   params:
+#     threshold_method: mad
+#     ransac_iters: 50
+#     sample_size: 4
+#     inlier_thres: 0.005
+#     min_inliers: 4
+#     max_clusters: 10
+#     use_uncertainty: false
+#     min_variance: 1e-3
+
+#     select_method: 3d_dist_dense_map
+#     select_3d_dist_min_depth: 0.08
+#     select_3d_dist_max_depth: 2
+#     select_3d_dist_fill_missing_depth: true
+#     select_3d_dist_window_size: 5
+#     select_3d_dist_min_neighbors: 1
+#     select_dense_map_close_margin: 0.007
+
+#     # sdf_optimize#     # Optional post-selection pose refinement with SDF loss.
+#     enable_sdf_refine: true
+#     sdf_refine_iters: 8
+#     sdf_refine_damping: 1e-4
+#     sdf_refine_grad_eps: 0.5
+#     sdf_refine_max_pts: 1500
+#     sdf_refine_use_dense_cur: true
+#     sdf_refine_min_pts: 30
+#     sdf_trim_method: mad
+#     sdf_mad_scale: 2.5
+#     sdf_inlier_thres: 0.01
+#     sdf_inlier_percentile: 80.0
+#     sdf_kernel: huber
+#     sdf_kernel_delta: 0.01
+#     sdf_min_support_ratio: 0.15
+#     sdf_bad_penalty: 0.05
+#     sdf_refine_step_trans_clip: 0.02
+#     sdf_refine_step_rot_clip: 0.2
+
+
+#     sdf_opt_max_iter: 25
+#     sdf_opt_percentile: 70.0
+#     sdf_opt_rot_bound: 0.15
+#     sdf_opt_trans_bound: 0.03
+#     sdf_opt_reg_lambda: 1e-3
+#     sdf_opt_reg_rot: 1.0
+#     sdf_opt_reg_trans: 1.0
+    
+#     # front end
+#     remove_outside_mask: true
+#     uncer_thres: 0.3
+#     residual_thres: 0.007
+
+
+# register:
+#   type: svd_ransac
+#   params:
+#     sample_size: 5     
+#     max_trials: 300
+#     inlier_thres: 0.01
+#     min_inliers: 5
+#     refine_iters: 1
+#     min_triangle_area: 1e-6
+#     min_pca_ratio: 1e-3
+#     # outlier pose
+#     residual_thres: 0.001
+
+dense_register:
+  type: cupoch_icp
+  params:
+    icp_type: point_to_plane
+    min_num_points: 5
+    max_num_points: 10000
+    max_correspondence_distance: 0.05
+    max_iterations: 30
+    epsilon: 1e-6
+    debug_level: 0
+    debug_dir: /home/justin/code/point-to-pose/debug/dense_register
+
+recovery:
+  type: recovery_manager
+  params:
+    max_lost_frames: 1
+    min_recovery_overlap: 10
+    # force f2m registration every n frames, set to -1 to disable
+    update_every: -1
+
+segmenter:
+  type: sam2
+  params:
+    model_cfg: configs/sam2.1/sam2.1_hiera_l.yaml
+    checkpoint: /home/justin/code/point-to-pose/checkpoints/sam2.1/sam2.1_hiera_large.pt
+    device: cuda
+
+tracker:
+  type: short_horizon
+  params:
+    K: 1000
+    inner:
+      type: tapir
+      params:
+        resize_height: 480
+        resize_width: 480
+        visible_threshold: 0.5
+        device: cuda
+        checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
+ 
+  
+# tracker:
+#   type: cotracker3_online
+#   params:
+#     img_height: 480
+#     img_width: 640
+#     resize_height: 480
+#     resize_width: 640
+#     device: cuda
+#     window_len: 16
+#     v2: False  
+#     checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
+#     debug: false
+
+sampler: 
+  type: super_point_balanced
+  params:
+    num_points: 30
+    density_per_kpx: -1
+    fps_oversample_factor: 2
+
+    min_points: 5
+    max_points: 50
+    edge_margin_px: 2
+    remove_convex_hull: false
+    inflate_points: false
+    inflate_radius_px: 20
+
+    cell_size: -1
+
+    crop_to_mask: true
+    crop_pad_px: 0
+
+    super_point_max_num_keypoints: 512
+
+    score_weight: 0.3
+    separation_penalty_weight: 0.5
+    min_separation_px: 5
+
+    sample_filter_enable: true
+    sample_require_depth_valid: true
+    sample_reject_depth_edge: true
+    sample_depth_edge_window: 2        # 3x3 patch
+    sample_depth_edge_thres: 0.01      # meters depth span
+    sample_min_pixel_dist_existing: 6.0
+    sample_min_pixel_dist_new: 4.0
+    sample_max_per_obj: 0              # 0 = no cap
+
+    debug_level: 0
+    debug_dir: /home/justin/code/point-to-pose/debug/sampler
+    debug_save_superpoint: false
+
+criterion:
+  ### criterion types: 
+  ###      iteration, registration_residual, 
+  ###      uncertainty_ratio, uncertainty_number, 
+  ###      rotation_grid, rotation_threshold
+  ###      mask_area
+  type: rotation_threshold_and_min_num
+  params:
+    # iteration criterion
+    update_per_iter: 1000000
+
+    # residual criterion
+    residual_thres: 0.02
+
+    # uncertainty criterion
+    uncer_thres: 0.4
+    min_num_pts: 10
+
+    # rotation threshold and min num criterion
+    # if it's smaller than this it will not trigger sampling
+    min_mask_area: 100  
+
+    # rotation grid criterion
+    discretization_angle: 60
+
+    # rotation threshold criterion
+    max_angle_deg: 15
+
+    # mask area criterion
+    fit_mode: convex
+    ratio_threshold: 0.6
+    debug_viz: false
+    debug_dir: /home/justin/code/point-to-pose/debug/criterion
+
+local_optimizer:
+  type: lm_graph
+  params:
+    local_graph_max_num_frames: 20
+    max_iterations: 20
+    relative_error_tol: 1e-5
+    absolute_error_tol: 1e-5
+    prior_noise_param: [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000]
+    uncertainty_thres: 0.3
+    uncertainty_min: 1e-2
+    use_between_factor: true
+    landmark_sigma_scale_by: none
+    landmark_sigma_min: 1e-3
+    landmark_huber_k: 1.0
+
+global_optimizer:
+  type: lm_graph
+  params:
+    relinearize_threshold: 0.1
+    relinearize_skip: 1
+    relative_error_tol: 1e-5
+    absolute_error_tol: 1e-5
+    prior_noise_param: [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000]
+    uncertainty_thres: 0.4
+    uncertainty_min: 1e-2
+    use_between_factor: true
+    landmark_sigma_scale_by: residual
+    landmark_sigma_min: 1e-3
+    landmark_huber_k: 1.0
+
+visualization:
+  params:
+    visualize_points: true
+    # uncertainty, visible, visible_valid, visible_uncertainty, registration_used_valid, registration_correspondence, frame_id
+    points_vis_method: visible_uncertainty
+    save_images: True
+    output_image_dir: /home/justin/code/point-to-pose/debug/output_images

@@ -1285,8 +1285,9 @@ class ModularPipeline:
         else:
             obj.curr_uncertainties = None
 
-        # 5. Compute mean residual
-        obj.mean_residual = fe_result.mean_residuals[obj_id]
+        # 5. Compute mean residual (may be missing if registration was skipped,
+        #    e.g. f2f mode with object marked lost).
+        obj.mean_residual = fe_result.mean_residuals.get(obj_id, float("nan"))
 
         # 6. Lost condition
         # obj.lost = obj.mean_residual > self.reg_residual_thres

@@ -25,14 +25,19 @@ import pandas as pd
 
 
 MODULE_COLUMNS = [
-    ("SAM2 (segmenter)", "segmenter_ms"),
+    ("SAM2", "segmenter_ms"),
     ("2D tracker (TAPIR)", "tracker_ms"),
     ("Register", "register_ms"),
-    ("Keypoint addition (keyframe)", "keyframe_ms"),
+    ("Keypoint addition", "keyframe_ms"),
     ("Local graph opt", "local_opt_ms"),
-    ("Global graph opt - TSDF", "graph_opt_only_ms"),
+    ("Graph optimization", "graph_opt_only_ms"),
     ("TSDF integration", "tsdf_ms"),
 ]
+
+# Modules omitted from the per-module box plot.
+# - 2D tracker dominates and squashes every other module on a shared y-axis.
+# - Local graph opt is always 0 (use_local_graph: false in eccv_final.yaml).
+BOXPLOT_EXCLUDE_COLS = {"tracker_ms", "local_opt_ms"}
 
 STACK_MODULES = [
     ("SAM2", "segmenter_ms"),
@@ -40,7 +45,7 @@ STACK_MODULES = [
     ("Register", "register_ms"),
     ("Keypoint addition", "keyframe_ms"),
     ("Local opt", "local_opt_ms"),
-    ("Global graph opt - TSDF", "graph_opt_only_ms"),
+    ("Graph optimization", "graph_opt_only_ms"),
     ("TSDF", "tsdf_ms"),
     ("Other", "other_ms"),
 ]
@@ -130,26 +135,39 @@ def write_summary_table(df: pd.DataFrame, out_path: str):
     print(f"Wrote {out_path} and {md_path}")
 
 
-def plot_module_breakdown(df: pd.DataFrame, out_path: str):
-    videos = sorted(df["video"].unique())
-    labels = list(videos) + ["aggregated"]
-    means = []
-    for v in videos:
-        means.append(df[df["video"] == v][[c for _, c in STACK_MODULES]].mean())
-    means.append(df[[c for _, c in STACK_MODULES]].mean())
-    means_df = pd.DataFrame(means, index=labels)
+def _title_case_preserving_acronyms(s: str) -> str:
+    """Capitalize the first letter of each word, but keep ALL-CAPS tokens
+    (e.g. 'SAM2', 'TSDF', '2D') intact."""
+    return " ".join(
+        w if w.isupper() else w[:1].upper() + w[1:].lower()
+        for w in s.split()
+    )
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    bottom = np.zeros(len(labels))
+
+def plot_module_breakdown(df: pd.DataFrame, out_path: str):
+    """Single stacked bar showing the aggregated mean per-frame breakdown
+    across all videos. Bar segments sum to the average total per-frame time."""
+    # Modules omitted from the stacked breakdown.
+    # - Local opt is always 0 (use_local_graph: false in eccv_final.yaml).
+    breakdown_modules = [(n, c) for n, c in STACK_MODULES if c != "local_opt_ms"]
+    means = df[[c for _, c in breakdown_modules]].mean()
+
+    fig, ax = plt.subplots(figsize=(6.5, 7))
+    bottom = 0.0
     cmap = plt.get_cmap("tab10")
-    for i, (name, col) in enumerate(STACK_MODULES):
-        vals = means_df[col].values
-        ax.bar(labels, vals, bottom=bottom, label=name, color=cmap(i % 10))
-        bottom = bottom + vals
-    ax.set_ylabel("Mean per-frame time (ms)")
-    ax.set_title("Per-module runtime breakdown — default config (num_points=30)")
-    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, fontsize=9)
-    ax.grid(axis="y", linestyle="--", alpha=0.5)
+    for i, (name, col) in enumerate(breakdown_modules):
+        val = float(means[col])
+        ax.bar([""], [val], bottom=[bottom],
+               label=_title_case_preserving_acronyms(name),
+               color=cmap(i % 10), edgecolor="none", linewidth=0)
+        bottom += val
+    ax.set_ylabel("Runtime (ms)", fontsize=22)
+    ax.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
+    ax.tick_params(axis="y", which="major", labelsize=20)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0,
+              fontsize=20, frameon=False)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -157,16 +175,42 @@ def plot_module_breakdown(df: pd.DataFrame, out_path: str):
 
 
 def plot_module_boxplot(df: pd.DataFrame, out_path: str):
-    cols = [c for _, c in MODULE_COLUMNS]
-    names = [n for n, _ in MODULE_COLUMNS]
-    data = [df[c].values for c in cols]
+    """Distribution of per-frame time, restricted to frames where each module
+    actually fired. Modules whose timer wraps a per-frame check but only does
+    real work on new keyframes (graph optimization, keypoint addition) are
+    gated on `tsdf_ms > 0` — TSDF is only integrated inside the per-keyframe
+    loop, so it cleanly indicates when a new KF was actually processed."""
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    # For event-driven modules, the timer is always >0 (a no-op branch costs a
+    # few µs). Use TSDF activation as the "real keyframe fired" indicator.
+    keyframe_fired = df["tsdf_ms"] > 0
+    activation_mask = {
+        "segmenter_ms":       df["segmenter_ms"] > 0,
+        "tracker_ms":         df["tracker_ms"] > 0,
+        "register_ms":        df["register_ms"] > 0,
+        "keyframe_ms":        keyframe_fired,
+        "local_opt_ms":       df["local_opt_ms"] > 0,
+        "graph_opt_only_ms":  keyframe_fired,
+        "tsdf_ms":            df["tsdf_ms"] > 0,
+    }
+
+    items = [(n, c) for n, c in MODULE_COLUMNS if c not in BOXPLOT_EXCLUDE_COLS]
+    cols = [c for _, c in items]
+    names = [_title_case_preserving_acronyms(n) for n, _ in items]
+
+    data = []
+    for c in cols:
+        mask = activation_mask.get(c, df[c] > 0)
+        active = df.loc[mask, c].values
+        data.append(active if len(active) > 0 else np.array([0.0]))
+
+    fig, ax = plt.subplots(figsize=(13, 8))
     ax.boxplot(data, tick_labels=names, showfliers=False)
-    ax.set_ylabel("Per-frame time (ms)")
-    ax.set_title("Per-module per-frame distribution — default config (num_points=30)")
+    ax.set_ylabel("Runtime (ms)", fontsize=22)
+    ax.tick_params(axis="both", which="major", labelsize=20)
     plt.setp(ax.get_xticklabels(), rotation=20, ha="right")
-    ax.grid(axis="y", linestyle="--", alpha=0.5)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -372,7 +416,7 @@ def plot_tracker_compare_resolutions(root: str, out_path: str, drop_warmup: int 
 
     from matplotlib.lines import Line2D
 
-    fig, ax = plt.subplots(figsize=(8, 5.5))
+    fig, ax = plt.subplots(figsize=(10, 7))
     cmap = plt.get_cmap("tab10")
     legend_handles = []
 
@@ -414,11 +458,13 @@ def plot_tracker_compare_resolutions(root: str, out_path: str, drop_warmup: int 
         sub = ct3_df[(ct3_df["num_active_tracks"] > 0) & (ct3_df["tracker_ms"] > 0)]
         _scatter_and_fit(sub, cmap(len(by_res)), "cotracker3 (480x640)")
 
-    ax.set_xlabel("Number of active tracked points (per frame)")
-    ax.set_ylabel("2D tracker time per frame (ms)")
-    ax.set_title("Tracker runtime v.s. Number of Tracks")
-    ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(handles=legend_handles, loc="upper left", fontsize=9)
+    ax.set_xlabel("Number of active tracked points per frame", fontsize=22)
+    ax.set_ylabel("2D tracker time per frame (ms)", fontsize=22)
+    ax.tick_params(axis="both", which="major", labelsize=20)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend(handles=legend_handles, loc="upper left", fontsize=20,
+              frameon=False)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)

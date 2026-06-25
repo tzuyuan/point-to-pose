@@ -44,8 +44,8 @@ LABEL_OFFSETS = {
         "AP14": (8, -12), "AP13": (8, 6),
     },
     "right": {  # AUC
-        "AP12": (8, 6), "AP10": (8, 6), "AP11": (-22, -16),
-        "AP14": (8, 6), "AP13": (8, -14),
+        "AP12": (8, 6), "AP10": (8, 6), "AP11": (-22, -28),
+        "AP14": (-22, 12), "AP13": (8, -14),
     },
 }
 
@@ -70,30 +70,27 @@ def compute_tx_grad_per_frame(video: str, data_root: Path, ksize: int) -> pd.Ser
 
 def render_scatter(summary: pd.DataFrame, x_col: str, x_label: str, out_path: Path):
     plt.rcParams.update({
-        "font.size": 12,
-        "axes.titlesize": 13,
-        "axes.labelsize": 12,
-        "xtick.labelsize": 11,
-        "ytick.labelsize": 11,
+        "font.size": 18,
+        "axes.titlesize": 22,
+        "axes.labelsize": 22,
+        "xtick.labelsize": 20,
+        "ytick.labelsize": 20,
     })
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.6))
-    for side, ax, ycol, ylabel, title in [
-        ("left",  axes[0], "mean_e2d_px", "Mean 2D tracking error (px)",
-         "2D point tracker error  ↓"),
-        ("right", axes[1], "add_auc",     "ADD AUC",
-         "Pose tracking AUC  ↑"),
+    fig, axes = plt.subplots(1, 2, figsize=(13, 6))
+    for side, ax, ycol, ylabel in [
+        ("left",  axes[0], "mean_e2d_px", "2D tracking error (px)"),
+        ("right", axes[1], "add_auc",     "ADD AUC"),
     ]:
         x = summary[x_col].values
         y = summary[ycol].values
-        ax.scatter(x, y, s=70, color=PT_COLOR, zorder=3)
+        ax.scatter(x, y, s=110, color=PT_COLOR, zorder=3)
         for _, r in summary.iterrows():
             xo, yo = LABEL_OFFSETS[side].get(r["video"], (8, 6))
             ax.annotate(r["video"], (r[x_col], r[ycol]),
-                        fontsize=11, fontweight="bold",
+                        fontsize=18, fontweight="bold",
                         xytext=(xo, yo), textcoords="offset points")
         ax.set_xlabel(x_label)
         ax.set_ylabel(ylabel)
-        ax.set_title(title)
         ax.grid(alpha=0.3)
         ax.set_axisbelow(True)
         for spine in ("top", "right"):
@@ -113,41 +110,44 @@ def main():
     parser.add_argument("--analysis-dir", default=DEFAULT_OUT_DIR)
     parser.add_argument("--data-root", default=DEFAULT_DATA_ROOT)
     parser.add_argument("--out-dir", default=None)
+    parser.add_argument("--recompute", action="store_true",
+                        help="Recompute Sobel features even if cached CSV exists.")
     args = parser.parse_args()
 
     analysis_dir = Path(args.analysis_dir)
     out_dir = Path(args.out_dir) if args.out_dir else analysis_dir / "ap_only"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # AP-only summary from the existing table.
     summary_full = pd.read_csv(analysis_dir / "summary.csv")
-    summary = summary_full[summary_full["video"].isin(AP_VIDEOS)].copy()
+    ksize_csv = out_dir / "AP_summary_with_ksizes.csv"
+    if ksize_csv.exists() and not args.recompute:
+        summary = pd.read_csv(ksize_csv)
+        print(f"Loaded cached {ksize_csv}")
+    else:
+        summary = summary_full[summary_full["video"].isin(AP_VIDEOS)].copy()
+        # Compute tx_grad at ksize 3 / 5 / 7 (per-frame mean over object mask).
+        for k in KSIZES:
+            col = f"tx_grad_k{k}"
+            means = []
+            for v in summary["video"]:
+                print(f"[ksize={k}] {v}")
+                s = compute_tx_grad_per_frame(v, Path(args.data_root), ksize=k)
+                means.append(s.mean())
+            summary[col] = means
+        summary = summary.sort_values("tx_grad_k3").reset_index(drop=True)
+        summary.to_csv(ksize_csv, index=False)
 
-    # Compute tx_grad at ksize 3 / 5 / 7 (per-frame mean over object mask).
-    for k in KSIZES:
-        col = f"tx_grad_k{k}"
-        means = []
-        for v in summary["video"]:
-            print(f"[ksize={k}] {v}")
-            s = compute_tx_grad_per_frame(v, Path(args.data_root), ksize=k)
-            means.append(s.mean())
-        summary[col] = means
-
-    summary = summary.sort_values("tx_grad_k3").reset_index(drop=True)
     print("\nAP-series tx_grad at multiple kernel sizes:")
     cols = ["video", "tx_grad_k3", "tx_grad_k5", "tx_grad_k7",
             "mean_e2d_px", "mean_add_cm", "add_auc"]
     print(summary[cols].to_string(index=False))
-
-    # Save augmented summary for reference.
-    summary.to_csv(out_dir / "AP_summary_with_ksizes.csv", index=False)
 
     # Render one scatter per kernel size.
     for k in KSIZES:
         render_scatter(
             summary,
             x_col=f"tx_grad_k{k}",
-            x_label="Mean Sobel magnitude (high means more texture)",
+            x_label="Sobel magnitude",
             out_path=out_dir / f"AP_scatter_tx_grad_vs_auc_k{k}.png",
         )
 

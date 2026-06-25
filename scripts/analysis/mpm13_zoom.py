@@ -19,16 +19,17 @@ import matplotlib.pyplot as plt
 
 
 def render_zoom(df_main: pd.DataFrame, df_counts: pd.DataFrame,
-                fmin: int, fmax: int, label: str, out_path: Path):
+                fmin: int, fmax: int, label: str, out_path: Path,
+                show_title: bool = True):
     main = df_main[(df_main["frame"] >= fmin) & (df_main["frame"] <= fmax)].copy()
     counts = df_counts[(df_counts["frame"] >= fmin) & (df_counts["frame"] <= fmax)].copy()
 
     plt.rcParams.update({
-        "font.size": 12,
-        "axes.titlesize": 13,
-        "axes.labelsize": 12,
-        "xtick.labelsize": 11,
-        "ytick.labelsize": 11,
+        "font.size": 16,
+        "axes.titlesize": 22,
+        "axes.labelsize": 18,
+        "xtick.labelsize": 18,
+        "ytick.labelsize": 18,
     })
 
     color_e2d = "#C44E52"      # red
@@ -36,13 +37,15 @@ def render_zoom(df_main: pd.DataFrame, df_counts: pd.DataFrame,
     color_sobel = "#5A8A4C"    # green
     color_add = "#8B3A3A"      # darker red
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 7), sharex=True,
+                                    constrained_layout=True)
+    fig.get_layout_engine().set(h_pad=0.2, w_pad=0.08)
 
     # Panel 1: mean e2d (left, red) + #well-tracked points (right, blue).
     lw = 1.6
     ax1.plot(counts["frame"], counts["mean_e2d_px"],
              color=color_e2d, linewidth=lw)
-    ax1.set_ylabel("Mean 2D tracking error (px)", color=color_e2d)
+    ax1.set_ylabel("2D tracking error (px)", color=color_e2d)
     ax1.tick_params(axis="y", which="both", labelcolor=color_e2d, color=color_e2d)
     ax1.grid(alpha=0.3, axis="x")
     for spine in ("top",):
@@ -53,7 +56,7 @@ def render_zoom(df_main: pd.DataFrame, df_counts: pd.DataFrame,
     if "n_e2d_lt_10" in counts.columns:
         ax1b.plot(counts["frame"], counts["n_e2d_lt_10"],
                   color=color_npts, linewidth=lw)
-    ax1b.set_ylabel("# well-tracked points  (e < 10 px)", color=color_npts)
+    ax1b.set_ylabel("# points with e < 10 px", color=color_npts)
     ax1b.tick_params(axis="y", labelcolor=color_npts)
     ax1b.spines["top"].set_visible(False)
     ax1b.spines["right"].set_color(color_npts)
@@ -61,25 +64,30 @@ def render_zoom(df_main: pd.DataFrame, df_counts: pd.DataFrame,
     # Panel 2: ADD (left, red) + mean Sobel (right, green).
     ax2.plot(main["frame"], main["add_cm"],
              color=color_add, linewidth=lw)
+    ax2.axhline(1.0, color="black", linestyle="--", linewidth=1.0,
+                alpha=0.4, zorder=1)
     ax2.set_ylabel("ADD error (cm)", color=color_add)
     ax2.tick_params(axis="y", which="both", labelcolor=color_add, color=color_add)
     ax2.grid(alpha=0.3, axis="x")
     for spine in ("top",):
         ax2.spines[spine].set_visible(False)
     ax2.spines["left"].set_color(color_add)
-    ax2.set_xlabel("frame")
+    # "frame" placed inline at the left of the tick row instead of centered.
+    ax2.set_xlabel("")
+    ax2.annotate("frame", xy=(-0.005, -0.01), xycoords="axes fraction",
+                 ha="right", va="top", fontsize=18)
 
     ax2b = ax2.twinx()
     ax2b.plot(main["frame"], main["tx_grad"],
               color=color_sobel, linewidth=lw)
-    ax2b.set_ylabel("Mean Sobel magnitude", color=color_sobel)
+    ax2b.set_ylabel("Sobel magnitude", color=color_sobel)
     ax2b.tick_params(axis="y", which="both", labelcolor=color_sobel, color=color_sobel)
     ax2b.spines["top"].set_visible(False)
     ax2b.spines["right"].set_color(color_sobel)
 
-    fig.suptitle("Texture Analysis on HO3D MPM13", fontsize=14, y=0.99)
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
-    fig.savefig(out_path, dpi=160, bbox_inches="tight")
+    if show_title:
+        fig.suptitle("Texture Analysis on HO3D MPM13", fontsize=22)
+    fig.savefig(out_path, dpi=160)
     plt.close(fig)
     print(f"Wrote {out_path}")
 
@@ -107,7 +115,8 @@ def main():
 
     # Zoom 3: tight focus on the onset of the main failure (~frames 380-450).
     render_zoom(df_main, df_counts, fmin=370, fmax=470, label="onset",
-                out_path=out_dir / "MPM13_zoom_main_onset.png")
+                out_path=out_dir / "MPM13_zoom_main_onset.png",
+                show_title=False)
 
 
 if __name__ == "__main__":

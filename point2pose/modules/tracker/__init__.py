@@ -3,3 +3,4 @@ from .tapnext_tracker import TapNextTracker
 from .cotracker import CoTrackerRealtimeTracker
 from .cotracker_offline import CoTrackerOfflineTracker
 from .alltracker_tracker import AllTrackerTracker
+from .short_horizon_wrapper import ShortHorizonWrapper

@@ -306,6 +306,10 @@ def run_ycbineoat_single(
         meta_data_folder = os.path.join(out_folder, "meta_data")
         cfg.pipeline.params.meta_data_save_path = meta_data_folder
 
+    # Per-run pose output so parallel/serial ablation runs don't collide.
+    if cfg.pipeline.params.get("save_pose", False):
+        cfg.pipeline.params.pose_save_path = os.path.join(out_folder, "poses")
+
     if cfg.pipeline.type == "single_process":
         pipeline = PipelineSingleProcess(cfg)
     elif cfg.pipeline.type == "modular":
