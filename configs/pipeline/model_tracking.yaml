@@ -1,0 +1,288 @@
+realsense:
+  params:
+    # rs_serial: 242422304947
+    rs_serial: 941322070969
+
+    # Live depth source: "realsense" (sensor z16 depth, default) or "foundation_stereo"
+    # (Fast-FoundationStereo run on the camera's own left/right IR streams every frame,
+    # replacing the sensor depth entirely -- see examples/model_based_tracking/
+    # foundation_stereo_depth.py). foundation_stereo_* params are only used in that mode.
+    depth_source: realsense
+    # depth_source: foundation_stereo
+    foundation_stereo_model_dir: /home/smkim/workspace/code/point-to-pose/Fast-FoundationStereo/weights/20-30-48/model_best_bp2_serialize.pth
+    foundation_stereo_valid_iters: 4
+    foundation_stereo_hiera: false
+
+# ---- Input viewport: crop a square window from the live frame, then resize to track_res ----
+# On the first frame you pick the crop CENTER with the mouse; crop_size is the window side in
+# ORIGINAL camera pixels. Everything downstream (map render, TAPIR, PnP) runs at track_res.
+input:
+  params:
+    crop_size: 480        # square viewport side, in original camera pixels
+    # crop_size: 256        # square viewport side, in original camera pixels
+    # track_res: 480        # everything (renders + live) is resized to this square resolution
+    track_res: 256        # everything (renders + live) is resized to this square resolution
+
+pipeline:
+  type: model_tracking
+  params:
+    max_num_obj: 1
+    device: cuda
+
+    # Segmentation is OPTIONAL for model-based tracking. When false, we rely on TAPIR + PnP
+    # RANSAC to reject background points (no SAM2 mask required, no user clicks needed).
+    use_segmenter: true
+
+    # When true (and use_segmenter), black out the background (outside the SAM mask) in the live
+    # frame BEFORE TAPIR, so the tracker can't drift onto background texture.
+    mask_background: true
+    mask_bg_dilate_px: 0       # keep a few px of margin around the object for boundary features
+
+    # depth range (meters) used for map-build backprojection gating and any live 2D->3D use
+    min_depth: 0.05
+    max_depth: 2.0
+
+    # correspondence selection / robustness
+    reg_uncertainty_thres: 0.3
+    min_correspondences: 6
+
+    # pose jump guard (hold last good pose on implausible jumps)
+    pose_jump_guard_enable: false
+    pose_jump_guard_trans_thres: 0.15
+    pose_jump_guard_rot_deg_thres: 100
+    map_growth_max_mean_residual: 0.01
+
+    debug_level: 1
+    debug_dir: /home/smkim/workspace/code/point-to-pose/debug/model_tracking
+
+# ---- Offline model map (rendered from the textured mesh, or a gaussian splat) ----
+model_tracking:
+  params:
+    # mesh_path: /home/smkim/workspace/code/point-to-pose/assets/ycb_006_mustard_bottle/textured_mesh.obj
+    # mesh_path: /home/smkim/workspace/code/point-to-pose/assets/ycb_005_tomato_soup_can/textured_mesh.obj
+    # mesh_path: /home/smkim/workspace/code/point-to-pose/assets/sloth/sloth.glb
+    # mesh_path: /home/smkim/workspace/code/point-to-pose/assets/toy/visual_model.obj
+
+    # Mapper backend: "nvdiffrast" (textured mesh, default) or "gsplat" (pretrained
+    # gaussian splat checkpoint, e.g. from kv_tracker's reconstruct.py). mesh_path above is
+    # ignored when renderer == "gsplat".
+    renderer: gsplat
+    # gsplat_path: /home/smkim/workspace/code/kv_tracker/results/0709_tomato_soup_can/gaussians.pt
+    gsplat_path: /home/smkim/workspace/code/kv_tracker/results/0710_train/gaussians.pt
+    gsplat_model: 2dgs       # "2dgs" (rasterization_2dgs) or "3dgs" (rasterization)
+    gsplat_sh_degree: null   # null = use the checkpoint's full SH degree
+    gsplat_depth_mode: median  # "median" (2DGS surface depth) or "accum" (alpha-accum)
+
+    map_path: /home/smkim/workspace/code/point-to-pose/debug/model_tracking/map.pkl
+    rebuild_map: true          # true to force re-render even if map_path exists
+    mesh_scale: 1.0             # scale factor applied on load (e.g. mm->m = 0.001)
+
+    # num_views: 12              # min viewpoints; rounded up to an icosphere subdivision level
+    # num_rotations: 4           # in-plane (camera roll) augmentations per viewpoint (1 = off)
+    num_views: 12              # min viewpoints; rounded up to an icosphere subdivision level
+    num_rotations: 4           # in-plane (camera roll) augmentations per viewpoint (1 = off)
+    max_map_points: 1000       # hard cap on total map points (TAPIR tracks all every frame)
+    render_radius: 0.3         # camera distance from origin (meters)
+    debug_save_views: true     # save per-view render+keypoint overlays under debug_dir/map_debug/
+
+    # Environment-map (IBL) shading for the render -- fixed in object frame, which doubles as
+    # world frame here since the object stays at the origin and the camera orbits it (see
+    # NvdiffrastRenderer docstring). Unset/null -> unlit (diffuse albedo only).
+    envmap_path: /home/smkim/workspace/code/point-to-pose/assets/envmaps/wooden_lounge_1k.hdr
+    envmap_intensity: 1.0      # tune against a real camera frame of the same object/lighting
+    envmap_cube_res: 256
+    envmap_ambient_term: 0.5  # Phong-style flat add-on so shadowed faces aren't pitch black
+    render_specular: false     # cheap mip-based specular term; leave off for matte objects
+    render_roughness: 0.8
+
+    min_depth: 0.05
+    max_depth: 2.0
+
+# # ---- Pose solver: PnP (2D live <-> 3D map) with RANSAC + cluster peeling ----
+# register:
+#   type: pnp_cluster_ransac
+#   params:
+#     ransac_iters: 200
+#     reproj_thres_px: 4.0
+#     ransac_confidence: 0.99
+#     min_inliers: 6
+#     max_clusters: 4
+#     refine: true
+#     refine_method: ITERATIVE
+#     pnp_ransac_method: EPNP
+#     T_convention: obj2cam
+#     debug_level: 0
+# register:
+#   type: svd_uncertainty_outlier
+#   params:
+#     remove_outside_mask: True
+#     debug_level: 0
+#     max_iter: 5
+#     threshold_method: mad
+#     inlier_thres: 0.01
+#     thres_reduce_factor: 0.005
+#     mad_scale: 1.0
+#     min_inliers: 3
+# register:
+#   # svd_ransac, svd_residual_outlier, svd_uncertainty_outlier, svd_cluster_ransac
+#   type: svd_residual_outlier
+#   params:
+#     remove_outside_mask: true
+#     debug_level: 0
+#     max_iter: 15
+#     uncer_thres: 0.3
+#     threshold_method: mad
+#     inlier_thres: 0.01
+#     thres_reduce_factor: 0.005
+#     mad_scale: 5
+#     min_inliers: 3
+#     min_variance: 1e-2
+
+#     # outlier pose
+#     residual_thres: 0.007
+  
+register:
+  type: svd_residual_outlier
+  # type: svd_uncertainty_outlier
+  params:
+    remove_outside_mask: True
+    debug_level: 0
+    max_iter: 5
+    threshold_method: mad
+    inlier_thres: 0.01
+    thres_reduce_factor: 0.005
+    mad_scale: 1.0
+    min_inliers: 3
+
+
+# ---- Point tracker (seeded from rendered views) ----
+# Keep resize_* == track_res so the tracker's internal normalize/resize is a no-op; a mismatch
+# vs the actual image size silently corrupts every correspondence.
+#
+# TAPNext++ alternative (fixed query set; seeds all views up front, then tracks live):
+# tracker:
+#   type: tapnext
+#   params:
+#     resize_width: 256      # TAPNext ckpt is trained at 256; use 256 here
+#     resize_height: 256
+#     seed_repeats: 3        # warm-up frames per view (>=2 needed for stable seeding)
+#     visible_threshold: 0.0 # visible if visible_logit > this
+#     device: cuda
+#     checkpoint_path: /home/smkim/workspace/code/point-to-pose/checkpoints/tapnextpp/tapnextpp_ckpt.pt
+#
+# CoTracker3-online alternative (supports adding query points mid-stream, like TAPIR):
+# tracker:
+#   type: cotracker3_online
+#   params:
+#     img_width: 256
+#     img_height: 256
+#     resize_height: 256
+#     resize_width: 256
+#     device: cuda
+#     window_len: 16
+#     v2: False
+#     checkpoint_path: /home/smkim/workspace/code/point-to-pose/checkpoints/cotracker/scaled_online.pth
+tracker:
+  type: tapir
+  params:
+    img_width: 256
+    img_height: 256
+    resize_height: 256
+    resize_width: 256
+    # img_width: 480
+    # img_height: 480
+    # resize_height: 480
+    # resize_width: 480
+    device: cuda
+    checkpoint_path: /home/smkim/workspace/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
+    # PIPs refinement iterations per tracked frame. Checkpoint trained with 4 (default);
+    # lower = faster (fewer refine_pips calls) but accuracy/stability vs this checkpoint is
+    # untested below 4 -- tune and check track quality yourself.
+    num_pips_iter: 1
+
+# ---- Feature sampler: SuperPoint + FPS (used only offline, for map building) ----
+# FPS (farthest-point sampling) spreads keypoints evenly over the surface instead of
+# clustering on the highest-scoring texture -- better spatial coverage for PnP.
+# sampler:
+#   type: super_point_fps
+#   params:
+#     num_points: 20
+#     fps_oversample_factor: 3
+#     density_per_kpx: -1
+#     min_points: 5
+#     max_points: 120
+#     edge_margin_px: 4
+#     remove_convex_hull: false
+#     inflate_points: false
+#     inflate_radius_px: 20
+#     cell_size: -1
+#     crop_to_mask: true
+#     crop_pad_px: 3
+#     super_point_max_num_keypoints: 1024
+#     device: cuda
+#     debug_level: 0
+# sampler: 
+#   type: super_point_fps
+#   params:
+#     num_points: 20
+#     density_per_kpx: -1
+#     fps_oversample_factor: 3
+
+#     min_points: 5
+#     max_points: 50
+#     edge_margin_px: 5
+#     remove_convex_hull: false
+#     inflate_points: False
+#     inflate_radius_px: 20
+
+#     cell_size: -1
+
+#     crop_to_mask: true
+#     crop_pad_px: 3
+
+#     super_point_max_num_keypoints: 512
+
+#     debug_level: 2
+#     debug_dir: /home/smkim/workspace/code/point-to-pose/debug/sampler
+#     debug_save_superpoint: false
+sampler: 
+  type: super_point_balanced
+  params:
+    num_points: 20
+    density_per_kpx: -1
+    fps_oversample_factor: 3
+
+    min_points: 5
+    max_points: 50
+    edge_margin_px: 5
+    remove_convex_hull: false
+    inflate_points: False
+    inflate_radius_px: 20
+
+    cell_size: -1
+
+    crop_to_mask: true
+    crop_pad_px: 3
+
+    super_point_max_num_keypoints: 512
+
+    debug_level: 2
+    debug_dir: /home/smkim/workspace/code/point-to-pose/debug/sampler
+    debug_save_superpoint: false
+
+# ---- Segmenter (only used when pipeline.use_segmenter: true) ----
+segmenter:
+  type: sam2
+  params:
+    # model_cfg: configs/sam2.1/sam2.1_hiera_s.yaml
+    model_cfg: configs/sam2.1/sam2.1_hiera_l.yaml
+    # checkpoint: /home/smkim/workspace/code/point-to-pose/checkpoints/sam2.1/sam2.1_hiera_small.pt
+    checkpoint: /home/smkim/workspace/code/point-to-pose/checkpoints/sam2.1/sam2.1_hiera_large.pt
+    device: cuda
+
+visualization:
+  params:
+    visualize_points: true
+    points_vis_method: visible
+    save_images: false
+    output_image_dir: /home/smkim/workspace/code/point-to-pose/debug/model_tracking/output_images

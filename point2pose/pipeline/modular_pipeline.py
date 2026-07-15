@@ -45,6 +45,10 @@ class ModularPipeline:
         self.objects = []
         self.num_obj = self.pipeline_cfg.get("max_num_obj", 1)
         self._initialized = False
+        # Keyframes created by the most recent step()/initialize_first_frame() call, so
+        # external callers (e.g. ReconstructionExporter) can react to new keyframes
+        # without reaching into KeyFrameManager internals.
+        self.last_new_keyframes = []
 
         # depth estimate related
         # TODO: Make this a class
@@ -141,7 +145,7 @@ class ModularPipeline:
     def initialize_first_frame(self, frame):
 
         # TODO: make this a class
-        if self.depth_estimator_type == "depth_anything":
+        if self.use_depth_estimate and self.depth_estimator_type == "depth_anything":
             # local import to avoid import-time CUDA/BLAS side-effects
             from third_party.depth_anything_v2_metric.dpt import DepthAnythingV2
 
@@ -154,7 +158,7 @@ class ModularPipeline:
             )
             m.load_state_dict(state)
             self.depth_estimator = m.to(self._device).eval()
-        elif self.depth_estimator_type == "promptda":
+        elif self.use_depth_estimate and self.depth_estimator_type == "promptda":
             from promptda.promptda import PromptDA
 
             self.depth_estimator = (
@@ -203,6 +207,7 @@ class ModularPipeline:
         new_kfs = self.kf_manager.initialize(
             frame, self.track_table, self.objects, self.frontend.tracker
         )
+        self.last_new_keyframes = new_kfs
 
         if self.use_key_frame_graph and self.kf_graph is not None:
             self.kf_graph.update(new_kfs)
@@ -521,6 +526,7 @@ class ModularPipeline:
             tracker=self.frontend.tracker,
             conservative=True,
         )
+        self.last_new_keyframes = new_keyframes
         module_times["keyframe"] = time.time() - t0
 
         # If new keyframe, reset local optimizer
@@ -950,7 +956,7 @@ class ModularPipeline:
             obj.curr_uncertainties = None
 
         # 5. Compute mean residual
-        obj.mean_residual = fe_result.mean_residuals[obj_id]
+        obj.mean_residual = fe_result.mean_residuals.get(obj_id, None)
 
         # 6. Lost condition
         # obj.lost = obj.mean_residual > self.reg_residual_thres

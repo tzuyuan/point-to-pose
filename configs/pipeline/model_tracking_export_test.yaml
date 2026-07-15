@@ -1,0 +1,134 @@
+realsense:
+  params:
+    # rs_serial: 242422304947
+    rs_serial: 941322070969
+
+    depth_source: realsense
+    foundation_stereo_model_dir: /home/smkim/workspace/code/point-to-pose/Fast-FoundationStereo/weights/20-30-48/model_best_bp2_serialize.pth
+    foundation_stereo_valid_iters: 4
+    foundation_stereo_hiera: false
+
+input:
+  params:
+    crop_size: 480
+    track_res: 256
+
+pipeline:
+  type: model_tracking
+  params:
+    max_num_obj: 1
+    device: cuda
+
+    use_segmenter: true
+    mask_background: true
+    mask_bg_dilate_px: 0
+
+    # object is ~8-10cm across (from reconstruct.py's init pointcloud spread) -- much
+    # smaller than the kv_tracker tomato-soup-can config this file was copied from.
+    min_depth: 0.02
+    max_depth: 0.5
+
+    reg_uncertainty_thres: 0.3
+    min_correspondences: 6
+
+    pose_jump_guard_enable: false
+    pose_jump_guard_trans_thres: 0.15
+    pose_jump_guard_rot_deg_thres: 100
+    map_growth_max_mean_residual: 0.01
+
+    debug_level: 1
+    debug_dir: /home/smkim/workspace/code/point-to-pose/debug/model_tracking_export_test
+
+# ---- Offline model map, pointed at reconstruct.py's freshly-trained checkpoint ----
+model_tracking:
+  params:
+    renderer: gsplat
+    gsplat_path: /home/smkim/workspace/code/point-to-pose/debug/export_test/gaussians.pt
+    gsplat_model: 2dgs
+    gsplat_sh_degree: null
+    gsplat_depth_mode: median
+
+    map_path: /home/smkim/workspace/code/point-to-pose/debug/model_tracking_export_test/map.pkl
+    rebuild_map: true
+    mesh_scale: 1.0
+
+    num_views: 12
+    num_rotations: 1
+    max_map_points: 1000
+    # object radius ~0.05-0.08m (see init pointcloud spread in reconstruct.py's log) --
+    # orbit close enough that the object actually fills the render, unlike the 0.3m
+    # radius tuned for kv_tracker's larger tomato-soup-can scene.
+    render_radius: 0.2
+    debug_save_views: true
+
+    envmap_path: /home/smkim/workspace/code/point-to-pose/assets/envmaps/wooden_lounge_1k.hdr
+    envmap_intensity: 1.0
+    envmap_cube_res: 256
+    envmap_ambient_term: 0.5
+    render_specular: false
+    render_roughness: 0.8
+
+    min_depth: 0.02
+    max_depth: 1.0
+
+register:
+  type: svd_residual_outlier
+  params:
+    remove_outside_mask: True
+    debug_level: 0
+    max_iter: 5
+    threshold_method: mad
+    inlier_thres: 0.01
+    thres_reduce_factor: 0.005
+    mad_scale: 1.0
+    min_inliers: 3
+
+tracker:
+  type: tapir
+  params:
+    img_width: 256
+    img_height: 256
+    resize_height: 256
+    resize_width: 256
+    device: cuda
+    checkpoint_path: /home/smkim/workspace/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
+    num_pips_iter: 1
+
+sampler:
+  type: super_point_balanced
+  params:
+    num_points: 20
+    density_per_kpx: -1
+    fps_oversample_factor: 3
+
+    min_points: 5
+    max_points: 50
+    edge_margin_px: 5
+    remove_convex_hull: false
+    inflate_points: False
+    inflate_radius_px: 20
+
+    cell_size: -1
+
+    crop_to_mask: true
+    crop_pad_px: 3
+
+    super_point_max_num_keypoints: 512
+
+    debug_level: 2
+    debug_dir: /home/smkim/workspace/code/point-to-pose/debug/sampler
+    debug_save_superpoint: false
+
+segmenter:
+  type: sam2
+  params:
+    model_cfg: configs/sam2.1/sam2.1_hiera_l.yaml
+    checkpoint: /home/smkim/workspace/code/point-to-pose/checkpoints/sam2.1/sam2.1_hiera_large.pt
+    device: cuda
+
+visualization:
+  params:
+    visualize_points: true
+    points_vis_method: visible
+    save_images: false
+    output_image_dir: /home/smkim/workspace/code/point-to-pose/debug/model_tracking_export_test/output_images
