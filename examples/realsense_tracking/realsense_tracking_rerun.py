@@ -30,6 +30,9 @@ import pyrealsense2 as rs
 import rerun as rr
 from omegaconf import OmegaConf
 
+from sam2.build_sam import build_sam2
+from sam2.sam2_image_predictor import SAM2ImagePredictor
+
 from point2pose.pipeline.pipeline_single_process import PipelineSingleProcess
 from point2pose.pipeline.modular_pipeline import ModularPipeline
 from point2pose.pipeline.components.reconstruction_exporter import ReconstructionExporter
@@ -81,6 +84,7 @@ class RealSenseRerunTracker:
         self.track_res = int(ip.get("track_res", self.crop_size)) if self.crop_size else None
         self.crop_xy = None  # set by pick_viewport(); (x0,y0) top-left of the locked crop
         self._mouse_xy = (self.img_w // 2, self.img_h // 2)
+        self._viewport_lock_requested = False
 
         # "Live" intrinsics/resolution actually fed to the pipeline -- equal to the full
         # sensor frame's until pick_viewport() locks a crop, at which point they become the
@@ -96,6 +100,20 @@ class RealSenseRerunTracker:
         self.frame_count = 0
         self.current_poses = None
 
+        # Separate, stateless SAM2 image predictor used only for the live mask preview
+        # during point-picking (below) -- independent of the pipeline's own
+        # Sam2RealTimeSegmenter, whose camera-predictor session is stateful video
+        # tracking and isn't meant for repeated try-a-prompt/see-result calls.
+        seg_params = self.cfg.segmenter.params
+        preview_model = build_sam2(
+            seg_params.get("model_cfg", "configs/sam2.1/sam2.1_hiera_l.yaml"),
+            seg_params.get("checkpoint", "checkpoints/sam2.1/sam2.1_hiera_large.pt"),
+            device=seg_params.get("device", "cuda"),
+        )
+        self._preview_predictor = SAM2ImagePredictor(preview_model)
+        self._preview_mask = None
+        self._preview_dirty = False
+
         # per-object camera-center trajectory (world == object frame), for the rerun path
         self.cam_traj = {}
         # per-object rolling point traces (camera-fixed panel), keyed by object id
@@ -103,7 +121,8 @@ class RealSenseRerunTracker:
         self._fps_hist = []
 
         cv2.startWindowThread()
-        cv2.namedWindow(WIN, cv2.WINDOW_AUTOSIZE)
+        cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(WIN, self.img_w, self.img_h)
         cv2.setMouseCallback(WIN, self.mouse_callback)
 
         if self.cfg.pipeline.type == "single_process":
@@ -116,7 +135,7 @@ class RealSenseRerunTracker:
         rr_init("point2pose live tracking")
 
         print("Instructions:")
-        print("- Left click: Add positive point")
+        print("- Left click: Add positive point (live SAM2 mask preview, single object)")
         print("- Right click: Add negative point")
         print("- Press 's': Start tracking")
         print("- Press 'q': Quit")
@@ -152,16 +171,18 @@ class RealSenseRerunTracker:
         if event == cv2.EVENT_LBUTTONDOWN:
             self.click_points.append([x, y])
             self.click_labels.append(1)
+            self._preview_dirty = True
             print(f"Added positive point: ({x}, {y})")
         elif event == cv2.EVENT_RBUTTONDOWN:
             self.click_points.append([x, y])
             self.click_labels.append(0)
+            self._preview_dirty = True
             print(f"Added negative point: ({x}, {y})")
 
     def _viewport_cb(self, event, x, y, _flags, _param):
         self._mouse_xy = (x, y)
         if event == cv2.EVENT_LBUTTONDOWN:
-            self.crop_xy = self._clamped_crop_xy(x, y)
+            self._viewport_lock_requested = True
 
     def _clamped_crop_xy(self, cx, cy):
         half = self.crop_size // 2
@@ -176,9 +197,11 @@ class RealSenseRerunTracker:
             return
         print(f"[viewport] aim the {self.crop_size}px crop with the mouse, "
               "LEFT click to lock ('q' to quit)")
+        cv2.resizeWindow(WIN, self.img_w, self.img_h)
         cv2.setMouseCallback(WIN, self._viewport_cb)
         self.crop_xy = None
-        while self.crop_xy is None:
+        self._viewport_lock_requested = False
+        while True:
             frames = self.rs_pipeline.wait_for_frames()
             color_frame = frames.get_color_frame()
             if not color_frame:
@@ -194,12 +217,21 @@ class RealSenseRerunTracker:
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 raise KeyboardInterrupt("viewport selection cancelled")
+            if self._viewport_lock_requested:
+                # Lock the exact crop that was drawn in this display iteration. Keeping
+                # this write out of the mouse callback avoids stale/queued mouse events
+                # nudging the crop when OpenCV resizes the window for the next phase.
+                self.crop_xy = (x0, y0)
+                break
 
         self.K = self._cropped_resized_K(self.camera_intrinsics, self.crop_xy,
                                          self.crop_size, self.track_res)
         self.live_w = self.live_h = self.track_res
         print(f"[viewport] locked crop_xy={self.crop_xy}, size={self.crop_size} "
               f"-> {self.track_res}px")
+        cv2.resizeWindow(WIN, self.track_res, self.track_res)
+        self._mouse_xy = (self.track_res // 2, self.track_res // 2)
+        self._viewport_lock_requested = False
         cv2.setMouseCallback(WIN, self.mouse_callback)  # switch to SAM +/- click phase
 
     def _crop_resize(self, img, interp):
@@ -228,6 +260,8 @@ class RealSenseRerunTracker:
         self.current_poses = None
         self.cam_traj = {}
         self.point_traces = {}
+        self._preview_mask = None
+        self._preview_dirty = False
 
         if self.cfg.pipeline.type == "single_process":
             self.pipeline = PipelineSingleProcess(self.cfg)
@@ -282,6 +316,28 @@ class RealSenseRerunTracker:
         print(f"Started tracking with {len(self.click_points)} points")
         print(f"Number of objects: {len(self.current_poses)}")
         return True
+
+    def _update_preview_mask(self, rgb):
+        """Recomputes the single-object SAM2 preview mask from the current click
+        points (see self._preview_predictor) -- only called when points changed
+        (self._preview_dirty), since set_image() re-runs the image encoder."""
+        if not self._preview_dirty or len(self.click_points) == 0:
+            return
+        self._preview_predictor.set_image(rgb)
+        masks, scores, _ = self._preview_predictor.predict(
+            point_coords=np.array(self.click_points, dtype=np.float32),
+            point_labels=np.array(self.click_labels, dtype=np.int32),
+            multimask_output=False,
+        )
+        self._preview_mask = masks[0] > 0
+        self._preview_dirty = False
+
+    def _draw_preview_overlay(self, disp):
+        if self._preview_mask is None:
+            return disp
+        overlay = disp.copy()
+        overlay[self._preview_mask] = (0, 255, 255)  # cyan wash, BGR
+        return cv2.addWeighted(overlay, 0.4, disp, 0.6, 0)
 
     # ------------------------------------------------------------------ #
     # 2D overlay (cv2 window) -- tracked points only; pose boxes are shown in rerun instead.
@@ -396,6 +452,10 @@ class RealSenseRerunTracker:
                     display_frame = np.asanyarray(color_frame.get_data()).copy()
                     if self.crop_xy is not None:
                         display_frame = self._crop_resize(display_frame, cv2.INTER_LINEAR)
+
+                    self._update_preview_mask(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
+                    display_frame = self._draw_preview_overlay(display_frame)
+
                     for i, (point, label) in enumerate(zip(self.click_points, self.click_labels)):
                         color = (0, 255, 0) if label == 1 else (0, 0, 255)
                         cv2.circle(display_frame, (int(point[0]), int(point[1])), 5, color, -1)

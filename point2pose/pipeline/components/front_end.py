@@ -1,6 +1,7 @@
 import time
 import os
 import numpy as np
+from numpy.linalg import LinAlgError
 import torch
 import torch.nn.functional as F
 import open3d as o3d
@@ -90,6 +91,9 @@ class FrontEnd:
                 "pose_jump_guard_single_cluster_min_inliers",
                 max(self.pose_jump_guard_min_inliers, reg_min_inliers + 2),
             )
+        )
+        self.pose_jump_guard_reject_big_jump_always = bool(
+            self.pipeline_cfg.get("pose_jump_guard_reject_big_jump_always", False)
         )
 
         # -------------- registration mode --------------
@@ -852,6 +856,8 @@ class FrontEnd:
         info = {
             "enabled": bool(self.pose_jump_guard_enable),
             "rejected": False,
+            "invalid_pose": False,
+            "reject_big_jump_always": bool(self.pose_jump_guard_reject_big_jump_always),
             "dt": -1.0,
             "ddeg": -1.0,
             "used": 0,
@@ -868,6 +874,7 @@ class FrontEnd:
             return T_candidate, False, info
 
         dt, ddeg = self._se3_delta(T_candidate, T_prev)
+        invalid_pose = (not np.isfinite(dt)) or (not np.isfinite(ddeg))
         inliers = np.asarray(stats.get("inliers", np.array([])), dtype=bool)
         used = int(inliers.shape[0])
         ninliers = int(np.sum(inliers)) if used > 0 else 0
@@ -882,10 +889,13 @@ class FrontEnd:
                 "ninliers": int(ninliers),
                 "inlier_ratio": float(inlier_ratio),
                 "num_clusters": int(num_clusters),
+                "invalid_pose": bool(invalid_pose),
             }
         )
 
-        if obj.lost:
+        if invalid_pose:
+            big_jump = True
+        elif obj.lost:
             big_jump = (dt > self.pose_jump_guard_trans_thres) or (
                 ddeg > self.pose_jump_guard_rot_deg_thres
             )
@@ -900,13 +910,26 @@ class FrontEnd:
             ninliers < self.pose_jump_guard_single_cluster_min_inliers
         )
 
-        if big_jump and (weak_support or weak_single_hypothesis):
+        should_reject = big_jump and (
+            self.pose_jump_guard_reject_big_jump_always
+            or weak_support
+            or weak_single_hypothesis
+        )
+
+        if should_reject:
             info["rejected"] = True
-            print(
-                f"[FrontEnd] Pose jump guard rejected candidate "
-                f"(dT={dt:.3f}m, dR={ddeg:.2f}deg, "
-                f"inliers={ninliers}/{used}, clusters={num_clusters})."
-            )
+            if invalid_pose:
+                print(
+                    f"[FrontEnd] Pose jump guard rejected invalid candidate pose "
+                    f"(dT={dt}, dR={ddeg}, inliers={ninliers}/{used}, "
+                    f"clusters={num_clusters})."
+                )
+            else:
+                print(
+                    f"[FrontEnd] Pose jump guard rejected candidate "
+                    f"(dT={dt:.3f}m, dR={ddeg:.2f}deg, "
+                    f"inliers={ninliers}/{used}, clusters={num_clusters})."
+                )
             return T_prev, True, info
 
         return T_candidate, False, info
@@ -1748,8 +1771,21 @@ class FrontEnd:
         return T_opt, stats
 
     def _se3_delta(self, T_new, T_old):
+        if T_new is None or T_old is None:
+            return np.inf, np.inf
+        T_new = np.asarray(T_new)
+        T_old = np.asarray(T_old)
+        if T_new.shape != (4, 4) or T_old.shape != (4, 4):
+            return np.inf, np.inf
+        if not (np.all(np.isfinite(T_new)) and np.all(np.isfinite(T_old))):
+            return np.inf, np.inf
         dT = T_new @ inverse_SE3(T_old)
+        if not np.all(np.isfinite(dT)):
+            return np.inf, np.inf
         dt = float(np.linalg.norm(dT[:3, 3]))
-        dR = scipy_R.from_matrix(dT[:3, :3]).magnitude()
+        try:
+            dR = scipy_R.from_matrix(dT[:3, :3]).magnitude()
+        except (ValueError, LinAlgError):
+            return np.inf, np.inf
         ddeg = float(np.degrees(dR))
         return dt, ddeg

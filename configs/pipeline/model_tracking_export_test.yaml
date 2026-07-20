@@ -1,7 +1,7 @@
 realsense:
   params:
-    # rs_serial: 242422304947
-    rs_serial: 941322070969
+    rs_serial: 242422304947
+    # rs_serial: 941322070969
 
     depth_source: realsense
     foundation_stereo_model_dir: /home/smkim/workspace/code/point-to-pose/Fast-FoundationStereo/weights/20-30-48/model_best_bp2_serialize.pth
@@ -10,7 +10,7 @@ realsense:
 
 input:
   params:
-    crop_size: 480
+    crop_size: 256
     track_res: 256
 
 pipeline:
@@ -53,7 +53,7 @@ model_tracking:
     mesh_scale: 1.0
 
     num_views: 12
-    num_rotations: 1
+    num_rotations: 4
     max_map_points: 1000
     # object radius ~0.05-0.08m (see init pointcloud spread in reconstruct.py's log) --
     # orbit close enough that the object actually fills the render, unlike the 0.3m
@@ -125,6 +125,7 @@ segmenter:
     model_cfg: configs/sam2.1/sam2.1_hiera_l.yaml
     checkpoint: /home/smkim/workspace/code/point-to-pose/checkpoints/sam2.1/sam2.1_hiera_large.pt
     device: cuda
+    single_object: true
 
 visualization:
   params:

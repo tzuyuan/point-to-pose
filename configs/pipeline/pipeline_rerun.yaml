@@ -1,7 +1,20 @@
 realsense:
   params:
     # rs_serial: 941322070969
-    rs_serial: 242422304947
+    rs_serial: 927522071026
+
+# ---- Viewport crop (examples/realsense_tracking/realsense_tracking_rerun.py) ----
+# When crop_size is set, the demo asks you to aim+lock a square crop of the full 640x480
+# sensor frame before SAM/tracking starts, then runs everything (SAM clicks, TAPIR,
+# rerun) on that cropped+resized frame instead. This matters because tracker.params.
+# resize_height/width below resizes the WHOLE live frame before TAPIR sees it -- if the
+# object only fills a small part of the frame, cropping first keeps it at full effective
+# resolution. Remove/comment out input.params.crop_size to fall back to full-frame
+# (same behavior as pipeline_test2.yaml).
+input:
+  params:
+    crop_size: 480        # square viewport side, in original camera pixels
+    track_res: 256         # crop is resized to this square resolution (== tracker resize_*)
 
 
 pipeline:
@@ -41,11 +54,11 @@ pipeline:
     # Reject only on genuinely large jumps; default trans thres (=max_rel_translation)
     # was 0.05m and rejected normal 0.12m handheld motion.
     max_rel_translation: 0.15
-    max_rel_rotation_deg: 30
+    max_rel_rotation_deg: 45
     pose_jump_guard_trans_thres: 0.15
     pose_jump_guard_rot_deg_thres: 30
     pose_jump_guard_min_inliers: 5
-    pose_jump_guard_single_cluster_min_inliers: 5
+    pose_jump_guard_single_cluster_min_inliers: 20
     pose_jump_guard_enable: true
 
 reconstructor:
@@ -98,8 +111,8 @@ tracker:
     num_pips_iter: 1
     device: cuda
     checkpoint_path: /home/smkim/workspace/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
- 
-  
+
+
   # type: cotracker3_online
   # params:
   #   img_height: 480
@@ -111,10 +124,10 @@ tracker:
   #   v2: False  # keep False unless you specifically use v2 weights
   #   checkpoint_path: /home/smkim/workspace/code/co-tracker-realtime/checkpoints/scaled_online.pth
 
-sampler: 
+sampler:
   type: super_point_balanced
   params:
-    num_points: 20
+    num_points: 50
     density_per_kpx: -1
     fps_oversample_factor: 3
 
@@ -137,9 +150,9 @@ sampler:
     debug_save_superpoint: false
 
 criterion:
-  ### criterion types: 
-  ###      iteration, registration_residual, 
-  ###      uncertainty_ratio, uncertainty_number, 
+  ### criterion types:
+  ###      iteration, registration_residual,
+  ###      uncertainty_ratio, uncertainty_number,
   ###      rotation_grid, rotation_threshold
   ###      mask_area
   type: rotation_threshold
@@ -181,7 +194,7 @@ global_optimizer:
     relinearize_threshold: 0.1
     relinearize_skip: 1
     prior_noise_param: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
-    
+
 visualization:
   params:
     visualize_points: true

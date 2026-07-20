@@ -334,10 +334,15 @@ class KeyFrameManager:
 
             # If object is lost, avoid sampling
             if getattr(obj, "lost", False):
+                print(f"[KFM DEBUG] Frame {cur_frame.id} obj {obj_id}: SKIP (object lost)")
                 continue
 
             frame_growth_ok, frame_growth_reason = self._frame_allows_map_growth(
                 obj_id=obj_id, frame_id=int(cur_frame.id), fe_result=cur_fe_result
+            )
+            print(
+                f"[KFM DEBUG] Frame {cur_frame.id} obj {obj_id}: "
+                f"frame_growth_ok={frame_growth_ok} reason={frame_growth_reason}"
             )
 
             if conservative:
@@ -376,7 +381,12 @@ class KeyFrameManager:
             #         continue
 
             # Decide whether this frame is a keyframe for this object
-            if not self.criterion.check_sample_criterion(self.crit_ctx, obj_id):
+            crit_ok = self.criterion.check_sample_criterion(self.crit_ctx, obj_id)
+            print(
+                f"[KFM DEBUG] Frame {cur_frame.id} obj {obj_id}: "
+                f"criterion called -> {crit_ok}"
+            )
+            if not crit_ok:
                 continue
 
             if self.kf_gating:

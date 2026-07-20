@@ -279,6 +279,7 @@ segmenter:
     # checkpoint: /home/smkim/workspace/code/point-to-pose/checkpoints/sam2.1/sam2.1_hiera_small.pt
     checkpoint: /home/smkim/workspace/code/point-to-pose/checkpoints/sam2.1/sam2.1_hiera_large.pt
     device: cuda
+    single_object: true
 
 visualization:
   params:

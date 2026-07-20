@@ -40,7 +40,7 @@ class RotationThresholdCriterion(SampleCriterion):
         angle = np.arccos(inner_product)
         angle_deg = np.rad2deg(angle)
 
-        # print(f"[Criterion] angle_deg: {angle_deg}")
+        print(f"[Criterion] angle_deg: {angle_deg}")
 
         if np.any(angle_deg < self._max_angle_deg):
             return False

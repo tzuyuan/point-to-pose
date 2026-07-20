@@ -269,6 +269,26 @@ def apply_alignment_to_gaussians(splats: dict, T_align: np.ndarray) -> dict:
     return out
 
 
+def remove_floater_gaussians(splats: dict, nb_neighbors: int = 20, std_ratio: float = 2.5) -> dict:
+    """Statistical-outlier removal on gaussian means to drop floaters left over after
+    training -- out-of-view/behind-camera gaussians the rendering loss never sees, so
+    densification/pruning can't clean them up on its own. Filters every per-gaussian
+    param by the same keep mask. nb_neighbors <= 0 disables."""
+    if o3d is None or nb_neighbors <= 0:
+        return splats
+    means_np = splats["means"].detach().cpu().numpy()
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(means_np)
+    _, inlier_idx = pcd.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+    keep = np.zeros(means_np.shape[0], dtype=bool)
+    keep[inlier_idx] = True
+    n_dropped = int((~keep).sum())
+    if n_dropped > 0:
+        print(f"Removed {n_dropped}/{means_np.shape[0]} floater gaussians (statistical outlier removal)")
+    keep_t = torch.from_numpy(keep).to(splats["means"].device)
+    return {k: v[keep_t] for k, v in splats.items()}
+
+
 def relative_pose_delta(T_a: np.ndarray, T_b: np.ndarray):
     """Translation distance (meters) and rotation angle (degrees) of the relative
     transform between two cam-to-world poses."""
@@ -483,6 +503,8 @@ class KeyframeDataset(torch.utils.data.Dataset):
                 )
             chosen = chosen[view_keep]
 
+        self.source_indices = np.asarray(chosen)
+
         # Mask GT RGB at load time so self.images is the masked GT everywhere it's
         # used (training target, preview GT|Render comparison).
         images = torch.from_numpy(all_images[chosen]).float() / 255.0  # [N, H, W, 3]
@@ -692,6 +714,7 @@ def extract_mesh(
     sh_degree: int,
     out_path: Path,
     pose_adjust: "CameraOptModule" = None,
+    active_view_ids=None,
     voxel_size: float = 0.0015,
     sdf_trunc: float = None,
     depth_trunc: float = 3.0,
@@ -723,7 +746,8 @@ def extract_mesh(
         if pose_adjust is not None:
             camtoworlds = pose_adjust(camtoworlds, all_ids).float()
 
-        for i in range(len(dataset)):
+        view_ids = list(range(len(dataset))) if active_view_ids is None else list(active_view_ids)
+        for i in view_ids:
             out = render_splats(
                 model,
                 splats,
@@ -798,6 +822,7 @@ def extract_mesh_poisson(
     sh_degree: int,
     out_path: Path,
     pose_adjust: "CameraOptModule" = None,
+    active_view_ids=None,
     depth_trunc: float = 3.0,
     poisson_depth: int = 9,
     density_trim_quantile: float = 0.02,
@@ -826,7 +851,8 @@ def extract_mesh_poisson(
             camtoworlds = pose_adjust(camtoworlds, all_ids).float()
 
         Ks_render = torch.from_numpy(K).float().to(device)[None].repeat(len(dataset), 1, 1)
-        for i in range(len(dataset)):
+        view_ids = list(range(len(dataset))) if active_view_ids is None else list(active_view_ids)
+        for i in view_ids:
             out = render_splats(
                 model, splats, camtoworlds[i : i + 1], Ks_render[i : i + 1],
                 width, height, sh_degree, render_mode="RGB+ED",
@@ -838,7 +864,8 @@ def extract_mesh_poisson(
                 if out["median_depth"] is not None
                 else render_colors[0, ..., 3].cpu().numpy().astype(np.float32)
             )
-            valid = (render_alphas[0, ..., 0].cpu().numpy() > 0.5) & (depth > 0) & (depth < depth_trunc)
+            # valid = (render_alphas[0, ..., 0].cpu().numpy() > 0.5) & (depth > 0) & (depth < depth_trunc)
+            valid = (render_alphas[0, ..., 0].cpu().numpy() > 0.1) & (depth > 0) & (depth < depth_trunc)
             if not np.any(valid):
                 continue
 
@@ -869,7 +896,8 @@ def extract_mesh_poisson(
     pcd.normals = o3d.utility.Vector3dVector(np.concatenate(all_normals, axis=0))
     pcd.colors = o3d.utility.Vector3dVector(np.concatenate(all_colors, axis=0))
     n_before_downsample = len(pcd.points)
-    print(f"Pooled {n_before_downsample} points (with normals) from {len(dataset)} views for Poisson")
+    n_views_used = len(dataset) if active_view_ids is None else len(list(active_view_ids))
+    print(f"Pooled {n_before_downsample} points (with normals) from {n_views_used} views for Poisson")
 
     if pool_voxel_size > 0:
         pcd = pcd.voxel_down_sample(pool_voxel_size)
@@ -997,6 +1025,32 @@ def main():
         "gaussians are frozen and densification disabled. 0 disables.",
     )
     parser.add_argument("--pose_opt_lr_phase2_mult", default=2.0, type=float)
+    parser.add_argument(
+        "--drop_stuck_views_every", default=500, type=int,
+        help="Every N optimization steps, deactivate views whose masked per-view L1 "
+        "is still high but whose best L1 did not improve enough since the previous "
+        "check. 0 disables.",
+    )
+    parser.add_argument(
+        "--drop_stuck_views_after", default=-1, type=int,
+        help="Start stuck-view dropping after this step. -1 means after "
+        "--pose_warmup_steps, so pose-only correction gets a chance first.",
+    )
+    parser.add_argument(
+        "--drop_stuck_views_l1_thresh", default=0.08, type=float,
+        help="Only drop a stuck view if its best masked L1 is still at least this "
+        "large. Prevents dropping good views just because they converged.",
+    )
+    parser.add_argument(
+        "--drop_stuck_views_min_delta", default=1e-3, type=float,
+        help="Minimum best-L1 improvement over a check interval required to keep a "
+        "high-loss view active.",
+    )
+    parser.add_argument(
+        "--drop_stuck_views_min_samples", default=2, type=int,
+        help="A view must be sampled at least this many times in the current check "
+        "interval before it can be considered stuck.",
+    )
     parser.add_argument("--port", default=8080, type=int)
     parser.add_argument("--viewer_every", default=10, type=int)
     parser.add_argument("--disable_viewer", default=False, action="store_true")
@@ -1016,7 +1070,7 @@ def main():
         "detail but slower/more memory.",
     )
     parser.add_argument(
-        "--poisson_density_trim_quantile", default=0.02, type=float,
+        "--poisson_density_trim_quantile", default=0.0, type=float,
         help="Drop the lowest-density fraction of Poisson-reconstructed vertices "
         "(usually hallucinated surface at sparse/noisy edges). 0 disables.",
     )
@@ -1043,6 +1097,14 @@ def main():
         "poses (optimized_kf_poses.npy) stay in the original frame regardless. The "
         "alignment transform is saved to pca_alignment.npy.",
     )
+    parser.add_argument(
+        "--floater_outlier_nb_neighbors", default=20, type=int,
+        help="Post-training statistical outlier removal on the gaussian means, "
+        "to drop out-of-view floaters the rendering loss never penalized (see "
+        "remove_floater_gaussians). Runs before mesh extraction and PCA "
+        "alignment. 0 disables.",
+    )
+    parser.add_argument("--floater_outlier_std_ratio", default=2.5, type=float)
     parser.add_argument(
         "--init_voxel_size", default=0.002, type=float,
         help="Voxel size (meters) to downsample the init pointcloud before "
@@ -1224,6 +1286,7 @@ def main():
 
     gui_step = server.gui.add_text("Step", initial_value="0 / " + str(args.max_steps))
     gui_loss = server.gui.add_text("Loss", initial_value="-")
+    gui_dropped_views = server.gui.add_text("Dropped views", initial_value="none")
 
     gui_view_slider = server.gui.add_slider(
         "Preview view", min=0, max=len(dataset) - 1, step=1, initial_value=0
@@ -1328,6 +1391,24 @@ def main():
         )
 
     trainloader_iter = iter(trainloader)
+    active_views = torch.ones(len(dataset), dtype=torch.bool)
+    best_view_l1 = torch.full((len(dataset),), float("inf"))
+    best_view_l1_at_check = torch.full((len(dataset),), float("inf"))
+    view_samples_since_check = torch.zeros(len(dataset), dtype=torch.int64)
+    dropped_view_ids = []
+    drop_stuck_views_after = (
+        args.pose_warmup_steps if args.drop_stuck_views_after < 0 else args.drop_stuck_views_after
+    )
+
+    def dropped_views_label() -> str:
+        if not dropped_view_ids:
+            return "none"
+        source_ids = dataset.source_indices[np.array(dropped_view_ids, dtype=np.int64)].tolist()
+        pairs = [f"{did}->{sid}" for did, sid in zip(dropped_view_ids, source_ids)]
+        if len(pairs) > 12:
+            pairs = pairs[:6] + ["..."] + pairs[-5:]
+        return f"{len(dropped_view_ids)} dropped (dataset->source): " + ", ".join(pairs)
+
     for step in range(args.max_steps):
         if args.pose_warmup_steps > 0 and step == args.pose_warmup_steps:
             print(f"\nPhase 2: unfreezing gaussians at step {step}, "
@@ -1337,17 +1418,73 @@ def main():
             for g in pose_optimizer.param_groups:
                 g["lr"] *= args.pose_opt_lr_phase2_mult
 
+        if (
+            args.drop_stuck_views_every > 0
+            and step > 0
+            and step >= drop_stuck_views_after
+            and step % args.drop_stuck_views_every == 0
+        ):
+            active_count = int(active_views.sum().item())
+            finite_now = torch.isfinite(best_view_l1)
+            finite_prev = torch.isfinite(best_view_l1_at_check)
+            improvement = best_view_l1_at_check - best_view_l1
+            stuck = (
+                active_views
+                & finite_now
+                & finite_prev
+                & (view_samples_since_check >= args.drop_stuck_views_min_samples)
+                & (best_view_l1 >= args.drop_stuck_views_l1_thresh)
+                & (improvement < args.drop_stuck_views_min_delta)
+            )
+            if active_count - int(stuck.sum().item()) <= 0 and active_count > 0:
+                worst_active = torch.where(active_views, best_view_l1, torch.tensor(-1.0)).argmax()
+                stuck[worst_active] = False
+            if stuck.any():
+                drop_ids = torch.nonzero(stuck, as_tuple=False).flatten()
+                active_views[drop_ids] = False
+                dropped_view_ids.extend(int(i) for i in drop_ids.tolist())
+                source_ids = dataset.source_indices[drop_ids.cpu().numpy()].tolist()
+                print(
+                    f"\nstep {step}: dropped {len(drop_ids)} stuck high-L1 view(s); "
+                    f"{int(active_views.sum().item())}/{len(dataset)} active. "
+                    f"dataset ids={drop_ids.cpu().tolist()}, source frame ids={source_ids}"
+                )
+                np.save(results_path / "dropped_stuck_view_dataset_ids.npy", np.array(dropped_view_ids))
+                np.save(
+                    results_path / "dropped_stuck_view_source_indices.npy",
+                    dataset.source_indices[np.array(dropped_view_ids, dtype=np.int64)],
+                )
+                gui_dropped_views.value = dropped_views_label()
+            best_view_l1_at_check.copy_(best_view_l1)
+            view_samples_since_check.zero_()
+
+        if not active_views.any():
+            print("\nAll training views were dropped; stopping early.")
+            break
+
+        for _ in range(max(1, len(dataset) * 2)):
+            try:
+                data = next(trainloader_iter)
+            except StopIteration:
+                trainloader_iter = iter(trainloader)
+                data = next(trainloader_iter)
+            image_ids_cpu = data["image_id"].view(-1)
+            if bool(active_views[int(image_ids_cpu[0])]):
+                break
+        else:
+            active_ids = torch.nonzero(active_views, as_tuple=False).flatten()
+            forced_idx = int(active_ids[torch.randint(len(active_ids), (1,))].item())
+            data = dataset[forced_idx]
+            data = {
+                k: v.unsqueeze(0) if torch.is_tensor(v) else torch.tensor([v])
+                for k, v in data.items()
+            }
+
         if viewer is not None:
             while viewer.state == "paused":
                 time.sleep(0.01)
             viewer.lock.acquire()
             tic = time.time()
-
-        try:
-            data = next(trainloader_iter)
-        except StopIteration:
-            trainloader_iter = iter(trainloader)
-            data = next(trainloader_iter)
 
         camtoworlds = data["camtoworld"].to(device)  # [1, 4, 4]
         Ks = data["K"].to(device)  # [1, 3, 3]
@@ -1380,6 +1517,13 @@ def main():
         target = pixels * masks[..., None]
 
         l1loss = F.l1_loss(rendered, target)
+        with torch.no_grad():
+            mask_denom = masks.float().sum(dim=(1, 2)).clamp_min(1.0) * rendered.shape[-1]
+            per_view_l1 = (rendered - target).abs().sum(dim=(1, 2, 3)) / mask_denom
+            image_ids_cpu = image_ids.detach().cpu().long()
+            best_view_l1[image_ids_cpu] = torch.minimum(best_view_l1[image_ids_cpu], per_view_l1.cpu())
+            view_samples_since_check[image_ids_cpu] += 1
+
         ssimloss = 1.0 - ssim_fn(
             rendered.permute(0, 3, 1, 2), target.permute(0, 3, 1, 2), data_range=1.0
         )
@@ -1430,9 +1574,17 @@ def main():
             gui_preview_view.image = render_preview_view(gui_view_slider.value)
 
             print(f"step {step}/{args.max_steps} loss={loss.item():.4f} "
+                  f"view_l1={per_view_l1.mean().item():.4f} "
+                  f"active_views={int(active_views.sum().item())}/{len(dataset)} "
                   f"n_gaussians={splats['means'].shape[0]}", end="\r")
 
     print("\nTraining done.")
+    active_view_ids = torch.nonzero(active_views, as_tuple=False).flatten().cpu().tolist()
+    if dropped_view_ids:
+        print(
+            f"Skipped {len(dropped_view_ids)} stuck view(s) after optimization; "
+            f"{len(active_view_ids)}/{len(dataset)} views remain active."
+        )
 
     if pose_opt:
         with torch.no_grad():
@@ -1443,6 +1595,10 @@ def main():
         # only the gaussians/mesh get the object-centric frame.
         np.save(results_path / "optimized_kf_poses.npy", optimized_poses)
         print(f"Saved optimized poses to {results_path / 'optimized_kf_poses.npy'}")
+
+    splats = remove_floater_gaussians(
+        splats, nb_neighbors=args.floater_outlier_nb_neighbors, std_ratio=args.floater_outlier_std_ratio,
+    )
 
     mesh = None
     if args.extract_mesh:
@@ -1458,6 +1614,7 @@ def main():
                 args.sh_degree,
                 mesh_out_path,
                 pose_adjust=pose_adjust if pose_opt else None,
+                active_view_ids=active_view_ids,
                 poisson_depth=args.poisson_depth,
                 density_trim_quantile=args.poisson_density_trim_quantile,
                 pool_voxel_size=args.poisson_pool_voxel_size,
@@ -1481,6 +1638,7 @@ def main():
                 args.sh_degree,
                 mesh_out_path,
                 pose_adjust=pose_adjust if pose_opt else None,
+                active_view_ids=active_view_ids,
                 voxel_size=args.mesh_voxel_size,
                 sdf_trunc=args.mesh_sdf_trunc,
             )

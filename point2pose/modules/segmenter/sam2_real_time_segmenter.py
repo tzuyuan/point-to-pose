@@ -31,6 +31,11 @@ class Sam2RealTimeSegmenter(Segmenter):
             model_cfg,
             checkpoint,
         )
+        # When True, every accumulated point (regardless of label) prompts a SINGLE
+        # object instead of _add_all_points_to_predictor's default "each positive
+        # point starts a new object" grouping -- for single-object interactive
+        # picking flows where multiple positive clicks are meant to refine one mask.
+        self.single_object = config.get("single_object", False)
 
         self.input_points = []
         self.input_labels = []
@@ -179,6 +184,20 @@ class Sam2RealTimeSegmenter(Segmenter):
         Add all points to SAM2 predictor.
         Return True if at least one object is added.
         """
+        if self.single_object:
+            # All accumulated points (any label) refine ONE object.
+            obj_id = self.num_obj
+            self.predictor.add_new_prompt(
+                frame_idx=0,
+                obj_id=obj_id,
+                points=np.array(self.input_points, dtype=np.float32),
+                labels=np.array(self.input_labels, dtype=np.int32),
+            )
+            self.num_obj += 1
+            print(f"[SAM2] Added 1 object (single_object mode) with "
+                  f"{len(self.input_points)} points; total objects: {self.num_obj}")
+            return True
+
         # Add points for each object (grouping points by consecutive positive labels)
         obj_id = self.num_obj
         start_obj_id = obj_id
