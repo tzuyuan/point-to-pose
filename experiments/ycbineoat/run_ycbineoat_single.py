@@ -14,7 +14,6 @@ import numpy as np
 import trimesh
 
 from point2pose.io.sources.dataset.datareader import YcbineoatReader
-from point2pose.pipeline.pipeline_single_process import PipelineSingleProcess
 from point2pose.pipeline.modular_pipeline import ModularPipeline
 from point2pose.data_types.frame import Frame
 from point2pose.utils.transform import inverse_SE3
@@ -117,12 +116,11 @@ def run_ycbineoat_single(
         meta_data_folder = os.path.join(out_folder, "meta_data")
         cfg.pipeline.params.meta_data_save_path = meta_data_folder
 
-    if cfg.pipeline.type == "single_process":
-        pipeline = PipelineSingleProcess(cfg)
-    elif cfg.pipeline.type == "modular":
-        pipeline = ModularPipeline(cfg)
-    else:
-        raise ValueError(f"Invalid pipeline type: {cfg.pipeline.type}")
+    if cfg.pipeline.type != "modular":
+        raise ValueError(
+            f"Only 'modular' pipeline is supported, got: {cfg.pipeline.type}"
+        )
+    pipeline = ModularPipeline(cfg)
 
     # Load mesh using helper instead of reader.get_gt_mesh()
     mesh = load_ycb_mesh(reader, model_path)

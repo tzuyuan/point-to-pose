@@ -22,7 +22,6 @@ from point2pose.pipeline.components.front_end import FrontEnd
 from point2pose.pipeline.components.key_frame_manager import KeyFrameManager
 from point2pose.pipeline.components.local_optimizer import LocalOptimizer
 from point2pose.pipeline.components.key_frame_graph import KeyFrameGraph
-from point2pose.pipeline.components.recovery_manager import RecoveryManager
 from point2pose.modules.reconstruction import SDFBuilder
 
 
@@ -37,7 +36,6 @@ class ModularPipeline:
         self.kf_manager = KeyFrameManager(cfg)
         self.local_optimizer = LocalOptimizer(cfg)
         self.kf_graph = KeyFrameGraph(cfg) if self.use_key_frame_graph else None
-        self.recovery_manager = RecoveryManager(cfg)
         self.sdf_builder = SDFBuilder(cfg.reconstructor.params)
 
         # State
@@ -385,7 +383,6 @@ class ModularPipeline:
         module_times = {
             "frontend": 0.0,
             "track_table": 0.0,
-            "recovery": 0.0,
             "local_opt": 0.0,
             "keyframe": 0.0,
             "global_opt": 0.0,
@@ -425,21 +422,6 @@ class ModularPipeline:
         # update history
         self._update_history_frames(frame, fe_result, self.track_table)
         module_times["track_table"] = time.time() - t0
-
-        #################################################################
-        ##                      Recovery Manager                       ##
-        #################################################################
-        # perform frame to map registration if the object is marked as lost
-        t0 = time.time()
-        # self.recovery_manager.update(
-        #     frame,
-        #     fe_result,
-        #     self.objects,
-        #     self.track_table,
-        #     self.kf_manager.keyframes,
-        #     self.frontend.register,
-        # )
-        module_times["recovery"] = time.time() - t0
 
         #################################################################
         ##                     Local Optimization                      ##
@@ -598,7 +580,6 @@ class ModularPipeline:
             f"Frame {frame.id}: "
             f"frontend={module_times['frontend']:.4f}s, "
             f"track_table={module_times['track_table']:.4f}s, "
-            f"recovery={module_times['recovery']:.4f}s, "
             f"local_opt={module_times['local_opt']:.4f}s, "
             f"keyframe={module_times['keyframe']:.4f}s, "
             f"global_opt={module_times['global_opt']:.4f}s, "
@@ -629,7 +610,7 @@ class ModularPipeline:
 
         if self.save_meta_data:
             # ---------------- log meta data ----------------
-            # Assuming logging for obj_id=0 as in pipeline_single_process.py
+            # Assuming logging for obj_id=0
             # TODO: Extend to support multi-object logging if needed
             obj_id = 0
             all_obj_init_pose = np.stack(

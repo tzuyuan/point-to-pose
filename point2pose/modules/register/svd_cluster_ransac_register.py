@@ -1,5 +1,4 @@
 import numpy as np
-import cupoch as cph
 import copy
 
 from scipy.spatial import cKDTree

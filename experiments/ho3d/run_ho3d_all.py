@@ -19,7 +19,6 @@ import torch
 import numpy as np
 
 from point2pose.io.sources.dataset.datareader import Ho3dReader
-from point2pose.pipeline.pipeline_single_process import PipelineSingleProcess
 from point2pose.pipeline.modular_pipeline import ModularPipeline
 from point2pose.data_types.frame import Frame
 from point2pose.utils.transform import inverse_SE3
@@ -116,12 +115,11 @@ def run_ho3d_single(data_path: str, video_name: str, out_dir: str, config_path: 
 
     pipeline = None
     try:
-        if cfg.pipeline.type == "single_process":
-            pipeline = PipelineSingleProcess(cfg)
-        elif cfg.pipeline.type == "modular":
-            pipeline = ModularPipeline(cfg)
-        else:
-            raise ValueError(f"Invalid pipeline type: {cfg.pipeline.type}")
+        if cfg.pipeline.type != "modular":
+            raise ValueError(
+                f"Only 'modular' pipeline is supported, got: {cfg.pipeline.type}"
+            )
+        pipeline = ModularPipeline(cfg)
 
         gt_bbox_minmax = gt_bbox_minmax_from_mesh(reader)
         out_poses = []

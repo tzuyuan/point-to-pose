@@ -19,21 +19,52 @@ pipeline:
     depth_encoder: vitl
 
     use_graph_optimization: false
-    use_local_graph: true
+    use_local_graph: false
 
-    debug_level: 2
+    debug_level: 0
     debug_dir: /home/justin/code/point-to-pose/debug/
     save_pose: true
     pose_save_path: /home/justin/code/point-to-pose/debug/poses
-    save_key_points: true
+    save_key_points: false
     key_points_save_path: /home/justin/code/point-to-pose/debug/key_points
-    save_meta_data: true
+    save_meta_data: false
     meta_data_save_path: /home/justin/code/point-to-pose/debug/pipeline/meta_data
-    save_cropped_pcd: True
+    save_cropped_pcd: false
     cropped_pcd_dir: /home/justin/code/point-to-pose/debug/cropped_pcd
 
+    # --- Map growth gate (RealSense stereo depth has larger residuals) ---
+    # Default 0.0007 (0.7mm) is too tight; observed residuals ~3mm.
+    map_growth_max_mean_residual: 0.006
+
+    # --- Pose jump guard (relaxed for handheld RealSense) ---
+    # Reject only on genuinely large jumps; default trans thres (=max_rel_translation)
+    # was 0.05m and rejected normal 0.12m handheld motion.
+    max_rel_translation: 0.15
+    max_rel_rotation_deg: 30
+    pose_jump_guard_trans_thres: 0.15
+    pose_jump_guard_rot_deg_thres: 30
+    pose_jump_guard_min_inliers: 5
+    pose_jump_guard_single_cluster_min_inliers: 5
+    pose_jump_guard_enable: true
+
+reconstructor:
+  type: sdf_builder
+  params:
+    build_sdf_after_global_opt: true
+    sdf_use_gpu: true
+    sdf_backend: python_tsdf
+    sdf_voxel_size: 0.005
+    sdf_bounds_padding: 0.2
+    sdf_max_voxels: 20000000
+    sdf_max_extent_m: 1.0
+    sdf_min_points: 300
+    sdf_filter_max_radius: 0.25
+    sdf_filter_keep_percentile: 98.0
+    sdf_fuse_color: true
+
 register:
-  type: svd_uncertainty_outlier
+  type: svd_residual_outlier
+  # type: svd_uncertainty_outlier
   params:
     remove_outside_mask: True
     debug_level: 0
@@ -47,7 +78,7 @@ register:
 recovery:
   type: recovery_manager
   params:
-    max_lost_frames: 1
+    max_lost_frames: 5
     min_recovery_overlap: 10
 
 segmenter:
@@ -62,6 +93,7 @@ tracker:
   params:
     resize_height: 256
     resize_width: 256
+    num_pips_iter: 11
     device: cuda
     checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
  
@@ -78,7 +110,7 @@ tracker:
   #   checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
 
 sampler: 
-  type: super_point_fps
+  type: super_point_balanced
   params:
     num_points: 20
     density_per_kpx: -1

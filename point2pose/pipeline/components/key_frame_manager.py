@@ -106,6 +106,15 @@ class KeyFrameManager:
         self.pending_stable_trans = self.pipeline_cfg.get(
             "pending_stable_trans", 0.01
         )  # meters
+
+        # Sampling cool-down after a pose jump: number of consecutive non-jump
+        # (pose-jump-guard-accepted) frames required before new-keypoint sampling
+        # resumes. 0 = resume as soon as the guard stops rejecting.
+        self.sample_stabilize_frames = int(
+            self.pipeline_cfg.get("sample_stabilize_frames", 5)
+        )
+        self._sample_stable_count = {}  # obj_id -> stable-frame counter
+
         self.pending_use_geom_check = self.pipeline_cfg.get(
             "pending_use_geom_check", False
         )
@@ -332,8 +341,24 @@ class KeyFrameManager:
             obj = objects[obj_id]
             self.is_key_frame[obj_id] = False
 
-            # If object is lost, avoid sampling
-            if getattr(obj, "lost", False):
+            # Suppress sampling during a pose jump and for a short stabilization window
+            # afterwards, then resume. This uses the per-frame pose-jump-guard signal
+            # instead of the sticky obj.lost flag, so sampling always resumes once the
+            # pose settles for `sample_stabilize_frames` frames -- avoiding the
+            # lost -> no-sampling -> weak-support -> stays-lost deadlock, while still
+            # waiting for the pose to stabilize after a jump before adding keypoints.
+            jump_info = cur_fe_result.reg_stats.get(obj_id, {}).get(
+                "pose_jump_guard_info", {}
+            )
+            if jump_info.get("rejected", False):
+                self._sample_stable_count[obj_id] = 0
+                continue
+            self._sample_stable_count[obj_id] = min(
+                self.sample_stabilize_frames,
+                self._sample_stable_count.get(obj_id, self.sample_stabilize_frames) + 1,
+            )
+            if self._sample_stable_count[obj_id] < self.sample_stabilize_frames:
+                # Pose has not been stable long enough after a recent jump.
                 continue
 
             frame_growth_ok, frame_growth_reason = self._frame_allows_map_growth(
