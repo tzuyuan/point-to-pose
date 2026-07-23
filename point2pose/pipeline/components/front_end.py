@@ -1157,6 +1157,18 @@ class FrontEnd:
             selected_is_tentative = selected_is_tentative[rows_ok]
         key_points = obj.key_points[rows].copy()
         correspond_curr3d = cur_pts_3d[idx].copy()
+        # Drop correspondences with non-finite 3D on either side (e.g. tentative
+        # map points that were sampled where depth was invalid) so downstream
+        # registration never sees NaNs.
+        finite_3d = np.isfinite(key_points).all(axis=1) & np.isfinite(
+            correspond_curr3d
+        ).all(axis=1)
+        n_nonfinite_dropped = int(np.sum(~finite_3d))
+        if n_nonfinite_dropped > 0:
+            idx = idx[finite_3d]
+            key_points = key_points[finite_3d]
+            correspond_curr3d = correspond_curr3d[finite_3d]
+            selected_is_tentative = selected_is_tentative[finite_3d]
         n_tentative_used = int(np.sum(selected_is_tentative))
         n_confirmed_used = int(selected_is_tentative.shape[0] - n_tentative_used)
 
@@ -1188,6 +1200,7 @@ class FrontEnd:
             "extract_selected_is_tentative_mask": selected_is_tentative,
             "extract_tentative_used_count": n_tentative_used,
             "extract_confirmed_used_count": n_confirmed_used,
+            "extract_nonfinite_dropped_count": n_nonfinite_dropped,
         }
 
         return idx, key_points, correspond_curr3d, cur_visible, valid_stats

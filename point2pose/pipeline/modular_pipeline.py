@@ -3,6 +3,7 @@ import time
 import numpy as np
 import torch
 import copy
+import cv2 as cv
 from collections import deque
 import open3d as o3d
 from scipy.spatial.transform import Rotation as scipy_R
@@ -126,15 +127,31 @@ class ModularPipeline:
             )
 
     # -------- one-time init with user clicks ----------
-    def add_user_points(self, obj_points: list[list[int]], labels: list[int]):
+    def add_user_points(self, objects_points, objects_labels):
         """
-        points (List[List[int]]): List of points, each defined by [x, y].
-            labels (List[int]): List of labels, each defined by 1 or 0.
-                                1 means positive point, 0 means negative point.
+        Register user prompt points grouped per object.
+
+        Args:
+            objects_points (List[List[List[int]]]): one [[x, y], ...] list per object.
+            objects_labels (List[List[int]]): one [1/0, ...] label list per object
+                                (1 = positive, 0 = negative).
         """
         # forward to segmenter; it will start tracking objects internally
+        for points, labels in zip(objects_points, objects_labels):
+            self.frontend.segmenter.add_input_object(points, labels)
 
-        self.frontend.segmenter.add_input_points(obj_points, labels)
+    def preview_user_masks(self, image, objects_points, objects_labels):
+        """
+        Return SAM2 preview masks ([num_obj, 1, H, W] logits, >0 = foreground) for the
+        given per-object prompt points on `image`, without starting tracking. Returns
+        None if segmentation is disabled or there are no valid points.
+        """
+        if not self.frontend.use_segmenter:
+            return None
+        preview_fn = getattr(self.frontend.segmenter, "preview", None)
+        if preview_fn is None:
+            return None
+        return preview_fn(image, objects_points, objects_labels)
 
     def initialize_first_frame(self, frame):
 
@@ -175,9 +192,14 @@ class ModularPipeline:
             ):
                 self.num_obj = self.frontend.segmenter.num_obj
             else:
-                self.num_obj = np.sum(
-                    np.asarray(self.frontend.segmenter.input_labels) == 1
+                self.num_obj = len(
+                    getattr(self.frontend.segmenter, "input_objects", [])
                 )
+            # keep the components' per-object loops in sync with the actual
+            # object count (their own num_obj comes from max_num_obj in config,
+            # which the live click-to-track flow can exceed)
+            self.frontend.num_obj = self.num_obj
+            self.kf_manager.num_obj = self.num_obj
         print(f"Initialized with {self.num_obj} objects based on segmenter output.")
         for obj_id in range(self.num_obj):
             self.objects.append(Object(obj_id))
@@ -930,8 +952,9 @@ class ModularPipeline:
         else:
             obj.curr_uncertainties = None
 
-        # 5. Compute mean residual
-        obj.mean_residual = fe_result.mean_residuals[obj_id]
+        # 5. Compute mean residual (keep previous value if the frontend
+        # skipped this object, e.g. lost or not yet initialized)
+        obj.mean_residual = fe_result.mean_residuals.get(obj_id, obj.mean_residual)
 
         # 6. Lost condition
         # obj.lost = obj.mean_residual > self.reg_residual_thres

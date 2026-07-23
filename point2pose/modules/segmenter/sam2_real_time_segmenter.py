@@ -32,22 +32,65 @@ class Sam2RealTimeSegmenter(Segmenter):
             checkpoint,
         )
 
-        self.input_points = []
-        self.input_labels = []
+        # Pending prompt objects. Each entry groups the clicks for a single object,
+        # e.g. {"points": [[x, y], ...], "labels": [1/0, ...]}. Multiple positive
+        # points may belong to the same object.
+        self.input_objects = []
         self.num_obj = 0
         self.tracking_started = False
         self.frame_count = 0
 
-    def add_input_points(self, points, labels):
+    def add_input_object(self, points, labels):
         """
-        Add new points to be tracked.
+        Register the prompt points for ONE object. Multiple positive/negative points
+        may be provided for the same object.
+
         Args:
-            points (List[List[int]]): List of points, each defined by [x, y].
-            labels (List[int]): List of labels, each defined by 1 or 0.
-                                1 means positive point, 0 means negative point.
+            points (List[List[int]]): [[x, y], ...] for this object.
+            labels (List[int]): 1 (positive) or 0 (negative) per point.
         """
-        self.input_points.extend(points)
-        self.input_labels.extend(labels)
+        pts = [[int(p[0]), int(p[1])] for p in points]
+        lbls = [int(l) for l in labels]
+        if len(pts) == 0:
+            return
+        self.input_objects.append({"points": pts, "labels": lbls})
+
+    def clear_input_objects(self):
+        """Drop any pending prompt objects (does not affect an active track)."""
+        self.input_objects = []
+
+    def preview(self, image, objects_points, objects_labels):
+        """
+        Run SAM2 on the given per-object prompt points and return their masks for
+        `image`, WITHOUT starting real-time tracking. Intended for UI preview only:
+        the predictor state is reset on the next `initialize()`/`load_first_frame()`.
+
+        Args:
+            image (np.ndarray): RGB image to segment.
+            objects_points (List[List[List[int]]]): one [[x, y], ...] list per object.
+            objects_labels (List[List[int]]): one [1/0, ...] label list per object.
+
+        Returns:
+            torch.Tensor of mask logits ([num_obj, 1, H, W], >0 = foreground), or
+            None if there are no valid prompt points.
+        """
+        groups = [
+            (pts, lbls)
+            for pts, lbls in zip(objects_points, objects_labels)
+            if len(pts) > 0
+        ]
+        if not groups:
+            return None
+        self.predictor.load_first_frame(image)
+        video_res_masks = None
+        for i, (pts, lbls) in enumerate(groups):
+            _, _, video_res_masks = self.predictor.add_new_prompt(
+                frame_idx=0,
+                obj_id=i,
+                points=np.array(pts, dtype=np.float32),
+                labels=np.array(lbls, dtype=np.int32),
+            )
+        return video_res_masks
 
     def initialize(self, image, mask=None):
         """
@@ -99,14 +142,14 @@ class Sam2RealTimeSegmenter(Segmenter):
 
         # Add points to predictor if any exist
         # Return True if at least one object is added.
-        if len(self.input_points) > 0:
+        if len(self.input_objects) > 0:
             self.tracking_started = self._add_all_points_to_predictor()
         else:
             self.tracking_started = self.num_obj > 0
 
         if not self.tracking_started:
             print(
-                "[SAM2] No objects added. Please call add_input_points() or provide a mask."
+                "[SAM2] No objects added. Please call add_input_object() or provide a mask."
             )
 
     def _extract_object_masks(self, mask):
@@ -176,53 +219,37 @@ class Sam2RealTimeSegmenter(Segmenter):
 
     def _add_all_points_to_predictor(self) -> bool:
         """
-        Add all points to SAM2 predictor.
+        Add all pending input objects to the SAM2 predictor, one object per group
+        (each group may contain multiple positive/negative points).
         Return True if at least one object is added.
         """
-        # Add points for each object (grouping points by consecutive positive labels)
+        start_obj_id = self.num_obj
         obj_id = self.num_obj
-        start_obj_id = obj_id
-        current_points = []
-        current_labels = []
 
-        for point, label in zip(self.input_points, self.input_labels):
-            if label == 1:  # Positive point: start new object
-                if current_points:  # Save previous object if exists
-                    self.predictor.add_new_prompt(
-                        frame_idx=0,
-                        obj_id=obj_id,
-                        points=np.array(current_points, dtype=np.float32),
-                        labels=np.array(current_labels, dtype=np.int32),
-                    )
-                    obj_id += 1
-                    current_points = []
-                    current_labels = []
-
-                current_points.append(point)
-                current_labels.append(label)
-            else:  # Negative point: add to current object
-                current_points.append(point)
-                current_labels.append(label)
-
-        # Add the last object
-        if current_points:
+        for group in self.input_objects:
+            points = group["points"]
+            labels = group["labels"]
+            if not points:
+                continue
             self.predictor.add_new_prompt(
                 frame_idx=0,
                 obj_id=obj_id,
-                points=np.array(current_points, dtype=np.float32),
-                labels=np.array(current_labels, dtype=np.int32),
+                points=np.array(points, dtype=np.float32),
+                labels=np.array(labels, dtype=np.int32),
             )
             obj_id += 1
 
         added_obj = obj_id - start_obj_id
         self.num_obj += added_obj
         if self.num_obj > 0:
+            total_points = sum(len(g["points"]) for g in self.input_objects)
             print(
-                f"[SAM2] Added {added_obj} object(s) with {len(self.input_points)} points; total objects: {self.num_obj}"
+                f"[SAM2] Added {added_obj} object(s) with {total_points} points; "
+                f"total objects: {self.num_obj}"
             )
             return True
-        else:
-            print(
-                "[SAM2] No objects added. Please call add_input_points() to add prompt points before calling initialize()"
-            )
-            return False
+        print(
+            "[SAM2] No objects added. Please call add_input_object() to add prompt "
+            "points before calling initialize()"
+        )
+        return False

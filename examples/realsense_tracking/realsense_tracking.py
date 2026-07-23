@@ -61,12 +61,30 @@ class RealSensePipelineTracker:
         # Initialize RealSense camera
         self._init_realsense(rs_serial)
 
-        # Mouse click storage
-        self.click_points = []
-        self.click_labels = []
+        # Per-object prompt-point storage. Each entry holds one object's clicked
+        # points/labels. Start with a single (empty) object; press 'n' to begin the
+        # next object.
+        self.object_points = [[]]
+        self.object_labels = [[]]
+        self.current_obj = 0
         self.tracking_started = False
         self.frame_count = 0
         self.current_poses = None
+
+        # SAM2 mask preview (recomputed only when the point set changes)
+        self._preview_masks = None
+        self._preview_dirty = False
+        # Distinct BGR colors used to draw points/overlays per object
+        self._obj_palette = [
+            (0, 255, 0),
+            (255, 128, 0),
+            (255, 0, 255),
+            (0, 255, 255),
+            (128, 0, 255),
+            (0, 128, 255),
+            (255, 255, 0),
+            (128, 255, 0),
+        ]
 
         # Cache for consistent, distinctive frame-based point colors
         self._frame_color_lookup = {}
@@ -84,11 +102,12 @@ class RealSensePipelineTracker:
         self.pipeline = ModularPipeline(self.cfg)
 
         print("Instructions:")
-        print("- Left click: Add positive point")
-        print("- Right click: Add negative point")
-        print("- Press 's': Start tracking")
-        print("- Press 'q': Quit")
-        print("- Press 'r': Reset points")
+        print("- Left click:  Add positive point to the CURRENT object")
+        print("- Right click: Add negative point to the CURRENT object")
+        print("- Press 'n':   Start a NEW object (query the next object)")
+        print("- Press 's':   Start tracking")
+        print("- Press 'r':   Reset points")
+        print("- Press 'q':   Quit")
 
     def _init_realsense(self, rs_serial):
         """Initialize RealSense camera"""
@@ -126,26 +145,89 @@ class RealSensePipelineTracker:
         print(f"  Principal point: cx={intrinsics.ppx:.2f}, cy={intrinsics.ppy:.2f}")
 
     def mouse_callback(self, event, x, y, _flags, _param):
-        """Handle mouse clicks for point collection"""
+        """Collect prompt points for the object currently being annotated."""
+        if self.tracking_started:
+            return
         if event == cv2.EVENT_LBUTTONDOWN:
-            # Left click - positive point
-            self.click_points.append([x, y])
-            self.click_labels.append(1)
-            print(f"Added positive point: ({x}, {y})")
+            # Left click - positive point for the current object
+            self.object_points[self.current_obj].append([x, y])
+            self.object_labels[self.current_obj].append(1)
+            self._preview_dirty = True
+            print(f"[obj {self.current_obj}] +positive point: ({x}, {y})")
 
         elif event == cv2.EVENT_RBUTTONDOWN:
-            # Right click - negative point
-            self.click_points.append([x, y])
-            self.click_labels.append(0)
-            print(f"Added negative point: ({x}, {y})")
+            # Right click - negative point for the current object
+            self.object_points[self.current_obj].append([x, y])
+            self.object_labels[self.current_obj].append(0)
+            self._preview_dirty = True
+            print(f"[obj {self.current_obj}] -negative point: ({x}, {y})")
+
+    def next_object(self):
+        """Finish the current object and start collecting points for a new one."""
+        if len(self.object_points[self.current_obj]) == 0:
+            print(
+                f"[obj {self.current_obj}] no points yet; click before pressing 'n'."
+            )
+            return
+        if not any(lbl == 1 for lbl in self.object_labels[self.current_obj]):
+            print(
+                f"[obj {self.current_obj}] add at least one positive (left-click) "
+                "point first."
+            )
+            return
+        self.object_points.append([])
+        self.object_labels.append([])
+        self.current_obj += 1
+        self._preview_dirty = True
+        print(
+            f"Started object {self.current_obj}. Click its points, "
+            "or press 's' to start tracking."
+        )
+
+    def _draw_mask_overlay(self, display_bgr, masks):
+        """Overlay per-object SAM2 masks (logits [N,1,H,W], >0 = fg) onto a BGR image."""
+        if masks is None or len(masks) == 0:
+            return display_bgr
+
+        height, width = display_bgr.shape[:2]
+        overlay = np.zeros((height, width, 3), dtype=np.uint8)
+        overlay[..., 1] = 255  # green base (HSV)
+        any_mask = False
+
+        num_obj = len(masks)
+        for i in range(num_obj):
+            obj_mask = masks[i, 0] > 0.0
+            if hasattr(obj_mask, "cpu"):
+                obj_mask = obj_mask.cpu().numpy()
+            obj_mask = np.asarray(obj_mask)
+            if obj_mask.shape != (height, width):
+                obj_mask = cv2.resize(
+                    obj_mask.astype(np.uint8),
+                    (width, height),
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype(bool)
+            if np.any(obj_mask):
+                any_mask = True
+                hue = int((i + 3) / (num_obj + 3) * 255)
+                overlay[obj_mask, 0] = hue
+                overlay[obj_mask, 2] = 255
+
+        if not any_mask:
+            return display_bgr
+
+        overlay = cv2.cvtColor(overlay, cv2.COLOR_HSV2BGR)
+        return cv2.addWeighted(display_bgr, 1, overlay, 0.5, 0)
 
     def reset_points(self):
         """Reset collected points and restart tracking"""
-        self.click_points = []
-        self.click_labels = []
+        self.object_points = [[]]
+        self.object_labels = [[]]
+        self.current_obj = 0
         self.tracking_started = False
         self.frame_count = 0
         self.current_poses = None
+        self._preview_masks = None
+        self._preview_dirty = False
 
         # Reset pipeline
         # self.pipeline = Pipeline(self.cfg)
@@ -198,7 +280,13 @@ class RealSensePipelineTracker:
 
     def start_tracking(self):
         """Initialize pipeline tracking with collected points"""
-        if len(self.click_points) == 0:
+        # Keep only objects that actually have points.
+        groups = [
+            (pts, lbls)
+            for pts, lbls in zip(self.object_points, self.object_labels)
+            if len(pts) > 0
+        ]
+        if len(groups) == 0:
             print("No points collected! Please click on objects first.")
             return False
 
@@ -233,8 +321,10 @@ class RealSensePipelineTracker:
             timestamp=time.time(),
         )
 
-        # Add user points to pipeline
-        self.pipeline.add_user_points(self.click_points, self.click_labels)
+        # Add user points to pipeline, grouped per object
+        objects_points = [pts for pts, _ in groups]
+        objects_labels = [lbls for _, lbls in groups]
+        self.pipeline.add_user_points(objects_points, objects_labels)
 
         # Initialize pipeline with first frame
         self.current_poses = self.pipeline.step(frame)
@@ -242,7 +332,11 @@ class RealSensePipelineTracker:
         self.tracking_started = True
         self.frame_count = 1
 
-        print(f"Started tracking with {len(self.click_points)} points")
+        total_points = sum(len(pts) for pts in objects_points)
+        print(
+            f"Started tracking with {len(objects_points)} object(s), "
+            f"{total_points} points"
+        )
         print(f"Number of objects: {len(self.current_poses)}")
 
         return True
@@ -477,47 +571,69 @@ class RealSensePipelineTracker:
                     if not color_frame:
                         continue
 
-                    # Convert to display format
+                    # Convert to display format (BGR)
                     frame = np.asanyarray(color_frame.get_data())
                     display_frame = frame.copy()
 
-                    # Show collected points
-                    for i, (point, label) in enumerate(
-                        zip(self.click_points, self.click_labels)
-                    ):
-                        color = (
-                            (0, 255, 0) if label == 1 else (0, 0, 255)
-                        )  # Green for positive, red for negative
-                        cv2.circle(
-                            display_frame, (int(point[0]), int(point[1])), 5, color, -1
-                        )
-                        cv2.putText(
-                            display_frame,
-                            f"{i+1}",
-                            (int(point[0]) + 10, int(point[1]) - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5,
-                            color,
-                            1,
-                        )
+                    # Recompute the SAM2 preview mask only when the point set changed.
+                    if self._preview_dirty:
+                        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        try:
+                            self._preview_masks = self.pipeline.preview_user_masks(
+                                rgb, self.object_points, self.object_labels
+                            )
+                        except Exception as exc:  # preview is best-effort
+                            print(f"[preview] SAM2 preview failed: {exc}")
+                            self._preview_masks = None
+                        self._preview_dirty = False
 
-                    # Show instructions
+                    # Overlay the SAM2 mask preview for the clicked points
+                    display_frame = self._draw_mask_overlay(
+                        display_frame, self._preview_masks
+                    )
+
+                    # Show collected points, colored per object
+                    total_points = 0
+                    for obj_idx, (pts, lbls) in enumerate(
+                        zip(self.object_points, self.object_labels)
+                    ):
+                        obj_color = self._obj_palette[obj_idx % len(self._obj_palette)]
+                        for point, label in zip(pts, lbls):
+                            total_points += 1
+                            px, py = int(point[0]), int(point[1])
+                            if label == 1:
+                                # positive: filled circle in the object's color
+                                cv2.circle(display_frame, (px, py), 5, obj_color, -1)
+                            else:
+                                # negative: red cross
+                                cv2.drawMarker(
+                                    display_frame,
+                                    (px, py),
+                                    (0, 0, 255),
+                                    cv2.MARKER_TILTED_CROSS,
+                                    12,
+                                    2,
+                                )
+
+                    # Show instructions + status
                     cv2.putText(
                         display_frame,
-                        "Left click: +, Right click: -, Press 's' to start",
+                        "L-click +, R-click -, 'n' next obj, 's' start, 'r' reset",
                         (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
+                        0.6,
                         (255, 255, 255),
                         2,
                     )
+                    num_objects = sum(1 for pts in self.object_points if pts)
                     cv2.putText(
                         display_frame,
-                        f"Points: {len(self.click_points)}",
-                        (10, 60),
+                        f"Object {self.current_obj} | objects: {num_objects} | "
+                        f"points: {total_points}",
+                        (10, 58),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (255, 255, 255),
+                        0.6,
+                        self._obj_palette[self.current_obj % len(self._obj_palette)],
                         2,
                     )
 
@@ -578,6 +694,8 @@ class RealSensePipelineTracker:
                         print("Pipeline tracking started!")
                     else:
                         print("Failed to start pipeline tracking!")
+                elif key == ord("n") and not self.tracking_started:
+                    self.next_object()
                 elif key == ord("r"):
                     self.reset_points()
 
