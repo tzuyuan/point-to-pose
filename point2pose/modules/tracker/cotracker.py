@@ -68,7 +68,15 @@ class CoTrackerRealtimeTracker(Tracker):
             new_query_points, dtype=torch.float32, device=self._device
         )
         self._query_points = torch.cat((self._query_points, new_query_points), axis=0)
-        self._new_query_points = new_query_points
+        # Accumulate pending queries: multiple add_query_points calls can happen
+        # before the next track_once (e.g. multi-object initialization), and
+        # overwriting would silently drop the earlier objects' points.
+        if self._need_commit and self._new_query_points.numel() > 0:
+            self._new_query_points = torch.cat(
+                (self._new_query_points, new_query_points), axis=0
+            )
+        else:
+            self._new_query_points = new_query_points
         self._need_commit = True
 
         return np.arange(

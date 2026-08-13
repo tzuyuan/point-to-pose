@@ -33,6 +33,9 @@ def get_all_video_names(data_path):
 
         rgb_path = os.path.join(item_path, "rgb")
         if not os.path.isdir(rgb_path):
+            # jpg-only layout (e.g. YCBMultiTrack_recalib)
+            rgb_path = os.path.join(item_path, "jpg")
+        if not os.path.isdir(rgb_path):
             continue
 
         if len(os.listdir(rgb_path)) == 0:
@@ -306,6 +309,17 @@ def evaluate_sequence_from_metadata(
     object_names = reader.get_object_names()
     if len(object_names) == 0:
         raise RuntimeError(f"No objects found for sequence: {video_name}")
+
+    # Guard against truncated runs: a crashed pipeline still saves metadata via
+    # its finally-block, which would otherwise be scored as a (misleadingly
+    # easy) short sequence.
+    _meta = np.load(meta_data_path, allow_pickle=True)
+    _n_meta = len(np.atleast_1d(_meta["frame_id"]))
+    if _n_meta < len(reader) - 5:
+        raise RuntimeError(
+            f"Metadata truncated for {video_name}: {_n_meta}/{len(reader)} "
+            "frames — the run likely crashed; rerun the sequence."
+        )
 
     expected_num_objects = len(object_names)
     per_object_results = {}

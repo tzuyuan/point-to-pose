@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader)"
+    ]
+  }
+}
