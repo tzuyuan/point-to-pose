@@ -1,0 +1,99 @@
+# 3D demo visualization (plug-in; consumed by Pose3DVisualizer in
+# point2pose/visualization/). Every key is optional — unset keys fall back to
+# the defaults in pose_3d_visualizer.py. You can also paste this section into
+# a pipeline config instead of keeping it as a separate file.
+visualization_3d:
+  enabled: true
+
+  # rerun    = Rerun viewer (kv_tracker-style native app: timeline scrubbing,
+  #            entity sidebar, .rrd session recording) — recommended
+  # web      = browser viewer via viser
+  # combined = one SLAM-style cv2 dashboard window
+  # windows  = two separate Open3D windows
+  ui_mode: rerun
+
+  # PNG capture for combined/windows modes (rerun: use save_rrd below).
+  save_images: false
+  output_image_dir: ./debug/viz3d
+
+  # SDF continuity filter (same filter_disconnected_components as the mesh
+  # visualizer script): keeps the largest connected components and drops
+  # marching-cubes debris before display. Applies to all UI modes.
+  mesh_filter:
+    enabled: true
+    keep_components: 1
+    min_component_triangles: 0
+
+  # Rerun UI.
+  rerun:
+    app_name: point2pose
+    spawn: true                  # launch the native Rerun viewer
+    save_rrd: null               # e.g. ./debug/session.rrd to record + replay
+    collapse_panels: true
+    image_width: 480             # streamed RGB overlay width
+    keyframe_images: true        # RGB thumbnails on keyframe frustums
+    keyframe_image_width: 160
+    map_color_mode: track_id     # track_id | frame_id | uncertainty | object
+    # inlier | track_id | frame_id | uncertainty | object
+    # (the pts:<mode> button on the control strip cycles this at runtime)
+    point_color_mode: inlier
+    point_radius: 0.003          # meters
+    trail_length: 8              # frames of trace history per point
+    trail_max_gap: 5             # drop a trace unseen for this many frames
+    # initial states of the show/hide buttons on the control strip
+    show:
+      map: true
+      mesh: true
+      kfs: true
+      traj: true
+      bbox: false
+      traces: true
+      2d: true
+      mask: false
+      reproj: true
+
+  # Web (viser) UI.
+  web:
+    host: 0.0.0.0
+    port: 8080
+    open_browser: true           # open the viewer in the default browser
+    image_width: 360             # streamed RGB width (frustum texture + panel)
+    keyframe_images: true        # RGB thumbnails on keyframe frustums
+    keyframe_image_width: 160
+    live_stage_offset: 0.8       # meters, camera-frame stage offset to the right
+    residual_plot: true          # registration-residual plot in the panel
+
+  # Combined-dashboard layout. Panel sizes override the per-view window
+  # sizes below; side panels (camera view + RGB) are 4:3.
+  combined:
+    main_panel_width: 880        # object-frame panel
+    side_panel_width: 440        # camera-frame and RGB panels
+    record_fps: 15               # fps stamped into recorded mp4 files
+
+  # Object-frame view: the keypoint map stays fixed at the origin while the
+  # camera trajectory, current/keyframe frustums, and SDF mesh move.
+  object_view:
+    obj_id: 0                    # which object's frame anchors this view
+    window_width: 800            # windows mode only
+    window_height: 600
+    window_left: 60
+    window_top: 80
+    point_color_mode: frame_id   # frame_id | uncertainty | object
+    show_keyframes: true         # small frustum at every keyframe camera
+    show_mesh: true              # live TSDF reconstruction
+    show_bbox: true              # needs pipeline estimate_init_pose: true
+    max_trajectory: 4000         # camera-trajectory vertices kept
+    frustum_scale: 0.06          # meters
+
+  # Camera-frame view: the sensor stays fixed at the origin while the
+  # tracked points on the object leave fading 3D trails.
+  camera_view:
+    window_width: 800            # windows mode only
+    window_height: 600
+    window_left: 880
+    window_top: 80
+    point_color_mode: object     # object | frame_id | uncertainty
+    trail_length: 30             # frames of trail history per point
+    show_trails: true
+    show_bbox: true
+    frustum_scale: 0.08          # meters
