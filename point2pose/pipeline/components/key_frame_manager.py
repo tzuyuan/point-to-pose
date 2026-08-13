@@ -107,12 +107,15 @@ class KeyFrameManager:
             "pending_stable_trans", 0.01
         )  # meters
 
-        # Sampling cool-down after a pose jump: number of consecutive non-jump
-        # (pose-jump-guard-accepted) frames required before new-keypoint sampling
-        # resumes. 0 = resume as soon as the guard stops rejecting.
-        self.sample_stabilize_frames = int(
-            self.pipeline_cfg.get("sample_stabilize_frames", 5)
-        )
+        # Sampling suppression after a pose jump. None (default) reproduces the
+        # ECCV behavior: skip sampling while the object's `lost` flag is set
+        # (cleared by the next good registration). An integer opts into a
+        # windowed cool-down instead: sampling resumes only after that many
+        # consecutive pose-jump-guard-accepted frames, which avoids the
+        # lost -> no-sampling -> weak-support -> stays-lost deadlock but delays
+        # re-sampling during occlusion recovery (~-4 ADD AUC on HO3D).
+        _ssf = self.pipeline_cfg.get("sample_stabilize_frames", None)
+        self.sample_stabilize_frames = None if _ssf is None else int(_ssf)
         self._sample_stable_count = {}  # obj_id -> stable-frame counter
 
         self.pending_use_geom_check = self.pipeline_cfg.get(
@@ -341,25 +344,31 @@ class KeyFrameManager:
             obj = objects[obj_id]
             self.is_key_frame[obj_id] = False
 
-            # Suppress sampling during a pose jump and for a short stabilization window
-            # afterwards, then resume. This uses the per-frame pose-jump-guard signal
-            # instead of the sticky obj.lost flag, so sampling always resumes once the
-            # pose settles for `sample_stabilize_frames` frames -- avoiding the
-            # lost -> no-sampling -> weak-support -> stays-lost deadlock, while still
-            # waiting for the pose to stabilize after a jump before adding keypoints.
-            jump_info = cur_fe_result.reg_stats.get(obj_id, {}).get(
-                "pose_jump_guard_info", {}
-            )
-            if jump_info.get("rejected", False):
-                self._sample_stable_count[obj_id] = 0
-                continue
-            self._sample_stable_count[obj_id] = min(
-                self.sample_stabilize_frames,
-                self._sample_stable_count.get(obj_id, self.sample_stabilize_frames) + 1,
-            )
-            if self._sample_stable_count[obj_id] < self.sample_stabilize_frames:
-                # Pose has not been stable long enough after a recent jump.
-                continue
+            if self.sample_stabilize_frames is None:
+                # ECCV behavior: suppress sampling while the object is flagged
+                # lost; the flag clears on the next good registration.
+                if getattr(obj, "lost", False):
+                    continue
+            else:
+                # Windowed cool-down: suppress sampling during a pose jump and
+                # for `sample_stabilize_frames` guard-accepted frames after it.
+                # Resumes even if `lost` stays set, avoiding the lost ->
+                # no-sampling -> weak-support -> stays-lost deadlock at the cost
+                # of delayed re-sampling during occlusion recovery.
+                jump_info = cur_fe_result.reg_stats.get(obj_id, {}).get(
+                    "pose_jump_guard_info", {}
+                )
+                if jump_info.get("rejected", False):
+                    self._sample_stable_count[obj_id] = 0
+                    continue
+                self._sample_stable_count[obj_id] = min(
+                    self.sample_stabilize_frames,
+                    self._sample_stable_count.get(obj_id, self.sample_stabilize_frames)
+                    + 1,
+                )
+                if self._sample_stable_count[obj_id] < self.sample_stabilize_frames:
+                    # Pose has not been stable long enough after a recent jump.
+                    continue
 
             frame_growth_ok, frame_growth_reason = self._frame_allows_map_growth(
                 obj_id=obj_id, frame_id=int(cur_frame.id), fe_result=cur_fe_result
