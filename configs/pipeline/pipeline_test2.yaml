@@ -89,13 +89,16 @@ segmenter:
     device: cuda
 
 tracker:
-  type: tapir
-  params:
-    resize_height: 256
-    resize_width: 256
-    num_pips_iter: 11
-    device: cuda
-    checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
+  # type: tapir
+  # params:
+  #   resize_height: 256
+  #   resize_width: 256
+  #   # PIPs refinement iterations (upstream tapnet default: 4). Note: this key
+  #   # was ignored before num_pips_iter was wired into TapirTracker, so all
+  #   # earlier runs effectively used 4.
+  #   num_pips_iter: 4
+  #   device: cuda
+  #   checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
  
   
   # type: cotracker3_online
@@ -107,6 +110,32 @@ tracker:
   #   device: cuda
   #   window_len: 16
   #   v2: False  # keep False unless you specifically use v2 weights
+  #   checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
+
+  # TAPNext++ (causal per-frame SSM tracker; see README "TAPNext++")
+  # type: tapnext
+  # params:
+  #   device: cuda
+  #   input_resolution: 256   # 512 with the tapnextpp_512.ckpt checkpoint
+  #   visible_threshold: 0.5
+  #   half_precision: true
+  #   checkpoint_path: /home/justin/code/point-to-pose/checkpoints/tapnext/tapnextpp_ckpt.pt
+
+  # Track-On2 (online tracker with memory + global re-detection; see README)
+  type: trackon
+  params:
+    device: cuda
+    vit_backbone: dinov2_s      # dinov3_s_plus needs gated HF access
+    visible_threshold: 0.8      # authors' delta_v
+    inference_memory_size: 72
+    checkpoint_path: /home/justin/code/point-to-pose/checkpoints/trackon/trackon2_dinov2_checkpoint.pt
+
+  # LiteTracker (causal CoTracker3 variant, reuses scaled_online.pth; see README)
+  # type: litetracker
+  # params:
+  #   device: cuda
+  #   window_len: 16
+  #   bf16: true
   #   checkpoint_path: /home/justin/code/co-tracker-realtime/checkpoints/scaled_online.pth
 
 sampler: 

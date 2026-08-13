@@ -1,0 +1,6 @@
+[submodule "third_party/lite-tracker"]
+	path = third_party/lite-tracker
+	url = https://github.com/ImFusionGmbH/lite-tracker.git
+[submodule "third_party/track_on"]
+	path = third_party/track_on
+	url = https://github.com/gorkaydemir/track_on.git

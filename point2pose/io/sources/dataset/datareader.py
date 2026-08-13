@@ -37,10 +37,15 @@ class YCBInIsaacReader:
         self.video_dir = video_dir
         self.downscale = downscale
         self.color_files = sorted(glob.glob(f"{self.video_dir}/rgb/*.png"))
+        self._color_subdir = "rgb"
+        if len(self.color_files) == 0:
+            # jpg-only layout (e.g. YCBMultiTrack_recalib)
+            self.color_files = sorted(glob.glob(f"{self.video_dir}/jpg/*.jpg"))
+            self._color_subdir = "jpg"
         self.K = np.loadtxt(f"{video_dir}/cam_K.txt").reshape(3, 3)
         self.id_strs = []
         for color_file in self.color_files:
-            id_str = os.path.basename(color_file).replace(".png", "")
+            id_str = os.path.splitext(os.path.basename(color_file))[0]
             self.id_strs.append(id_str)
         self.H, self.W = cv2.imread(self.color_files[0]).shape[:2]
 
@@ -221,12 +226,15 @@ class YCBInIsaacReader:
     def get_init_masks(self):
         return self.get_masks(i=0, use_init_mask=True)
 
+    def _sibling_file(self, i, subdir, ext=".png"):
+        """Path of the frame-i file in a sibling subdirectory (depth, masks_hand,
+        ...), robust to jpg color layouts."""
+        stem = os.path.splitext(os.path.basename(self.color_files[i]))[0]
+        return os.path.join(self.video_dir, subdir, stem + ext)
+
     def get_depth(self, i):
         depth = (
-            cv2.imread(
-                self.color_files[i].replace("rgb", "depth"), cv2.IMREAD_UNCHANGED
-            )
-            / 1e3
+            cv2.imread(self._sibling_file(i, "depth"), cv2.IMREAD_UNCHANGED) / 1e3
         )
         depth = cv2.resize(depth, (self.W, self.H), interpolation=cv2.INTER_NEAREST)
         # print(depth)
@@ -238,12 +246,12 @@ class YCBInIsaacReader:
         return xyz_map
 
     def get_occ_mask(self, i):
-        hand_mask_file = self.color_files[i].replace("rgb", "masks_hand")
+        hand_mask_file = self._sibling_file(i, "masks_hand")
         occ_mask = np.zeros((self.H, self.W), dtype=bool)
         if os.path.exists(hand_mask_file):
             occ_mask = occ_mask | (cv2.imread(hand_mask_file, -1) > 0)
 
-        right_hand_mask_file = self.color_files[i].replace("rgb", "masks_hand_right")
+        right_hand_mask_file = self._sibling_file(i, "masks_hand_right")
         if os.path.exists(right_hand_mask_file):
             occ_mask = occ_mask | (cv2.imread(right_hand_mask_file, -1) > 0)
 

@@ -47,12 +47,19 @@ class TapirTracker(Tracker):
         self._device = config.get("device", "cpu")
         # self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+        # Number of PIPs refinement iterations; 4 is the upstream tapnet default.
+        self._num_pips_iter = config.get("num_pips_iter", 4)
+
         checkpoint_path = config.get(
             "checkpoint_path", "causal_bootstapir_checkpoint.pt"
         )
 
         # TAPIR model
-        self._model = tapir_model.TAPIR(pyramid_level=1, use_casual_conv=True)
+        self._model = tapir_model.TAPIR(
+            pyramid_level=1,
+            use_casual_conv=True,
+            num_pips_iter=self._num_pips_iter,
+        )
         self._model.load_state_dict(torch.load(checkpoint_path))
         self._model = self._model.to(self._device)
         self._model = self._model.eval()
