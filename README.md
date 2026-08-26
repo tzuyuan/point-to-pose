@@ -138,41 +138,13 @@ git clone https://github.com/cvg/LightGlue.git && cd LightGlue
 python -m pip install -e .
 ```
 
-## Dependencies via pip install (TODO: Make requirements.txt)
-### cupoch (TODO: remove this dependency)
-```
-pip install cupoch
-```
-
-### tensorflow
-```
-pip install tensorflow
-pip install tensorflow-datasets
+## Dependencies via pip install
+```bash
+pip install -r requirements.txt
 ```
 
-### LCM (Optional)
-```
-pip install lcm
-```
-
-### Open3d
-```
-pip install open3d 
-```
-
-### gtsam
-```
-pip install gtsam-develop
-```
-
-### For SDF
-```
-pip install numba
-pip install trimesh
-pip install pycuda
-```
-
-### skimage
-```
-pip install scikit-image
+## Dependencies for demo
+```bash
+pip install -r requirements-demo.txt
+pip install git+https://github.com/NVlabs/nvdiffrast.git --no-build-isolation
 ```

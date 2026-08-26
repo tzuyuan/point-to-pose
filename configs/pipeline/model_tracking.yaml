@@ -1,7 +1,7 @@
 realsense:
   params:
     # rs_serial: 242422304947
-    rs_serial: 941322070969
+    rs_serial: 927522071026
 
     # Live depth source: "realsense" (sensor z16 depth, default) or "foundation_stereo"
     # (Fast-FoundationStereo run on the camera's own left/right IR streams every frame,
