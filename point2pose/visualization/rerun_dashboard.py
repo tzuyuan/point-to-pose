@@ -32,12 +32,19 @@ from point2pose.visualization.geometry import (
     uncertainty_colors,
 )
 
-_POINT_COLOR_MODES = ["inlier", "track_id", "frame_id", "uncertainty", "object"]
+_POINT_COLOR_MODES = ["track_id", "inlier", "frame_id", "uncertainty", "object"]
+_UNLIT_DIM = 0.18  # brightness of map points that are not currently visible
 
 _TRAJ_COLOR = (60, 130, 255)
 _CAM_COLOR = (26, 255, 90)
 _LOST_COLOR = (255, 60, 60)
 _KF_COLOR = (255, 140, 50)
+
+# Display-side recovery evidence: the pipeline's lost flag only clears once a
+# clean f2m registration passes the pose-jump guard, which can lag (or stall
+# while inlier support stays weak). Strong current evidence shows green.
+_RECOVERED_MIN_INLIERS = 5
+_RECOVERED_MAX_RESIDUAL = 0.02  # meters
 _BBOX_COLOR = (255, 200, 0)
 
 
@@ -139,7 +146,8 @@ class RerunDashboard:
 
         # runtime state
         self._traces = {}  # obj_id -> _TraceBuffer
-        self._traj = {}  # obj_id -> list of camera centers (object frame)
+        self._traj = {}  # obj_id -> list of camera-center segments
+        self._traj_break_pending = {}  # obj_id -> break trajectory on recovery
         self._kf_counts = {}  # obj_id -> keyframes seen so far
         self._lost_state = {}  # obj_id -> bool
         self._fps = None
@@ -198,7 +206,31 @@ class RerunDashboard:
                             ),
                             rrb.TextLogView(origin="events", name="Events"),
                         ),
-                        rrb.TimeSeriesView(origin="metrics", name="Health"),
+                        # residual gets its own pinned y-axis so one spike
+                        # (or the larger count series) can't drown it out
+                        rrb.Vertical(
+                            rrb.TimeSeriesView(
+                                origin="metrics",
+                                contents=["+ /metrics/residual_mm"],
+                                name="Residual [mm]",
+                                axis_y=rrb.ScalarAxis(
+                                    range=(
+                                        -1.0,
+                                        1.05 * float(self.cfg.rerun.residual_cap_mm),
+                                    ),
+                                    zoom_lock=False,
+                                ),
+                            ),
+                            rrb.TimeSeriesView(
+                                origin="metrics",
+                                contents=[
+                                    "+ /metrics/inliers",
+                                    "+ /metrics/tracked",
+                                    "+ /metrics/fps",
+                                ],
+                                name="Tracking",
+                            ),
+                        ),
                     ),
                     row_shares=[3, 2],
                 ),
@@ -306,7 +338,7 @@ class RerunDashboard:
                 width=int(round(w * scale)),
                 height=int(round(h * scale)),
                 image_plane_distance=1.3 * float(self.cfg.object_view.frustum_scale),
-                color=_LOST_COLOR if snap.lost else _CAM_COLOR,
+                color=_CAM_COLOR if self._tracking_ok(snap) else _LOST_COLOR,
             ),
         )
         if rgb is not None:
@@ -319,12 +351,16 @@ class RerunDashboard:
             self._log_image_annotations(snap, K, scale, mask_classes, ns)
 
         # trajectory through camera centers (full history each frame, so the
-        # timeline scrubber shows the trajectory as of that frame)
-        traj = self._traj_for(snap)
-        if len(traj) >= 2:
+        # timeline scrubber shows the trajectory as of that frame). The
+        # history pauses while the object is flagged lost and resumes in a
+        # NEW segment on recovery, so a re-acquired teleport is not drawn as
+        # travelled path; all segments share one color.
+        segments = self._traj_for(snap)
+        strips = [np.asarray(s, dtype=np.float32) for s in segments if len(s) >= 2]
+        if strips:
             rr.log(
                 f"{ns}/trajectory",
-                rr.LineStrips3D([np.asarray(traj, dtype=np.float32)], colors=[_TRAJ_COLOR]),
+                rr.LineStrips3D(strips, colors=[_TRAJ_COLOR] * len(strips)),
             )
 
         # bbox fixed at the origin of the object frame
@@ -356,6 +392,18 @@ class RerunDashboard:
                         color=_KF_COLOR,
                     ),
                 )
+
+    @staticmethod
+    def _tracking_ok(snap):
+        """Green/red state for the camera frustum: trust the pipeline's lost
+        flag, but treat strong current registration evidence as recovered
+        even while the (jump-guard-gated) flag lags behind."""
+        if not snap.lost:
+            return True
+        return (
+            snap.num_inliers >= _RECOVERED_MIN_INLIERS
+            and 0.0 < snap.mean_residual < _RECOVERED_MAX_RESIDUAL
+        )
 
     @staticmethod
     def _scaled_K(K, scale):
@@ -469,12 +517,16 @@ class RerunDashboard:
         good = np.isfinite(snap.track_points_cam).all(axis=1)
         pts = snap.track_points_cam[good]
         ids = snap.track_ids[good] if len(snap.track_ids) == len(good) else np.arange(good.sum())
-        if len(pts):
+
+        # the FULL keypoint map in the current camera frame; currently
+        # visible points light up, the rest stay dimmed
+        map_pts, map_colors = self._map_panel_points(snap, good)
+        if map_pts is not None:
             rr.log(
                 f"{ns}/points",
                 rr.Points3D(
-                    pts.astype(np.float32),
-                    colors=self._live_point_colors(snap, good),
+                    map_pts,
+                    colors=map_colors,
                     radii=float(rcfg.point_radius),
                 ),
             )
@@ -519,7 +571,10 @@ class RerunDashboard:
     # ------------------------------------------------------------------
     def _log_metrics(self, snap):
         rr = self._rr
-        rr.log("metrics/residual_mm", rr.Scalars(snap.mean_residual * 1000.0))
+        # clipped at the cap so a lost-frame spike pegs at the plot ceiling
+        # instead of stretching the whole residual history flat
+        cap = float(self.cfg.rerun.residual_cap_mm)
+        rr.log("metrics/residual_mm", rr.Scalars(min(snap.mean_residual * 1000.0, cap)))
         if snap.num_inliers >= 0:
             rr.log("metrics/inliers", rr.Scalars(float(snap.num_inliers)))
         n_vis = int(np.isfinite(snap.track_points_cam).all(axis=1).sum())
@@ -555,13 +610,33 @@ class RerunDashboard:
     # helpers
     # ------------------------------------------------------------------
     def _traj_for(self, snap):
-        lst = self._traj.setdefault(snap.obj_id, [])
+        """Camera-center history as a list of segments, following the same
+        rule as the camera frustum color (_tracking_ok): frozen while lost,
+        resuming in a new segment on recovery — where recovery is either the
+        lost flag clearing or strong current registration evidence (so a
+        stuck flag can't freeze the line forever). All other motion, however
+        fast, stays connected."""
+        segments = self._traj.setdefault(snap.obj_id, [[]])
+        if not self._tracking_ok(snap):
+            self._traj_break_pending[snap.obj_id] = True
+            return segments
+
         center = snap.T_obj_cam[:3, 3]
-        if not lst or np.linalg.norm(center - lst[-1]) > 1e-9:
-            lst.append(center.copy())
-            if len(lst) > int(self.cfg.object_view.max_trajectory):
-                lst.pop(0)
-        return lst
+        seg = segments[-1]
+        if seg and self._traj_break_pending.pop(snap.obj_id, False):
+            segments.append([center.copy()])
+        elif not seg:
+            seg.append(center.copy())
+        elif np.linalg.norm(center - seg[-1]) > 1e-9:
+            seg.append(center.copy())
+
+        total = sum(len(s) for s in segments)
+        while total > int(self.cfg.object_view.max_trajectory):
+            segments[0].pop(0)
+            if not segments[0]:
+                segments.pop(0)
+            total -= 1
+        return segments
 
     def _map_colors(self, snap):
         mode = str(self.cfg.rerun.map_color_mode)
@@ -608,6 +683,46 @@ class RerunDashboard:
         if len(snap.track_point_inlier) == len(snap.track_ids):
             status[found] = snap.track_point_inlier[rows[found]]
         return _u8(inlier_colors(status))
+
+    def _map_panel_points(self, snap, good):
+        """All map keypoints in the current camera frame, with colors lit for
+        currently visible points and dimmed otherwise.
+
+        Visible points with a fresh measurement are drawn at their *tracked*
+        3D position (so trails connect exactly); the rest sit at the map
+        position predicted through the current pose."""
+        if len(snap.map_points) == 0:
+            return None, None
+        pts = (
+            snap.map_points @ snap.T_cam_obj[:3, :3].T + snap.T_cam_obj[:3, 3]
+        ).astype(np.float32)
+
+        rows = self._rows_for_ids(snap.track_ids, snap.map_point_track_ids)
+        observed = rows >= 0
+        if len(good) == len(snap.track_ids):
+            observed[observed] = good[rows[observed]]
+            pts[observed] = snap.track_points_cam[rows[observed]].astype(np.float32)
+
+        vis = snap.map_point_visible
+        mode = str(self.cfg.rerun.point_color_mode)
+        if mode == "inlier":
+            status = np.full(len(pts), -1, dtype=np.int8)
+            ok = rows >= 0
+            if len(snap.track_point_inlier) == len(snap.track_ids):
+                status[ok] = snap.track_point_inlier[rows[ok]]
+            colors = inlier_colors(status)
+        elif mode == "frame_id":
+            colors = frame_id_colors(snap.map_point_frames)
+        elif mode == "uncertainty":
+            colors = uncertainty_colors(snap.map_point_uncertainties)
+        elif mode == "object":
+            colors = np.tile(object_color(snap.obj_id), (len(pts), 1))
+        else:  # track_id (default): stable hue per point, built-in dimming
+            return pts, _u8(track_id_colors(snap.map_point_track_ids, visible=vis))
+
+        colors = colors.copy()
+        colors[~vis] *= _UNLIT_DIM
+        return pts, _u8(colors)
 
     def _live_point_colors(self, snap, good):
         mode = str(self.cfg.rerun.point_color_mode)
@@ -693,6 +808,7 @@ class RerunDashboard:
             rr.log(root, rr.Clear(recursive=True))
         self._traces = {}
         self._traj = {}
+        self._traj_break_pending = {}
         self._kf_counts = {}
         self._lost_state = {}
         self._fps = None

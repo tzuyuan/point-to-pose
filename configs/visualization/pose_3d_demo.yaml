@@ -34,12 +34,16 @@ visualization_3d:
     keyframe_images: true        # RGB thumbnails on keyframe frustums
     keyframe_image_width: 160
     map_color_mode: track_id     # track_id | frame_id | uncertainty | object
-    # inlier | track_id | frame_id | uncertainty | object
-    # (the pts:<mode> button on the control strip cycles this at runtime)
-    point_color_mode: inlier
+    # track_id | inlier | frame_id | uncertainty | object
+    # (the pts:<mode> button on the control strip cycles this at runtime).
+    # The camera-frame panel always shows the FULL keypoint map; visible
+    # points are lit, the rest dimmed. track_id = stable color per point.
+    point_color_mode: track_id
     point_radius: 0.003          # meters
     trail_length: 8              # frames of trace history per point
     trail_max_gap: 5             # drop a trace unseen for this many frames
+    # residual plot: values clipped here, y-axis pinned to (-1, 1.05*cap)
+    residual_cap_mm: 20.0
     # initial states of the show/hide buttons on the control strip
     show:
       map: true

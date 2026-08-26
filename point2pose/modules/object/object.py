@@ -40,6 +40,9 @@ class Object:
             4
         )  # 4x4 transformation matrix from object frame to world frame
         self.lost = False
+        # Consecutive frames this object has been flagged lost. Maintained by the
+        # front end; used to decide when re-acquisition may relax the jump guard.
+        self.lost_streak = 0
 
         self.init_bbox = None
         self.bbox = (

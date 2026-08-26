@@ -78,14 +78,6 @@ dense_register:
     debug_level: 0
     debug_dir: /home/justin/code/point-to-pose/debug/dense_register
 
-recovery:
-  type: recovery_manager
-  params:
-    max_lost_frames: 1
-    min_recovery_overlap: 10
-    # force f2m registration every n frames, set to -1 to disable
-    update_every: -1
-
 segmenter:
   type: sam2
   params:

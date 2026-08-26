@@ -17,9 +17,22 @@ Curated layout (sent as a Rerun blueprint):
 | View | Fixed frame | Shows |
 |---|---|---|
 | **Object frame · map** | the tracked object | keypoint map (track-id colors), **continuity-filtered SDF mesh** (logged when it changes, so scrubbing shows the reconstruction grow), camera trajectory, current camera frustum textured with the live RGB (red when lost), keyframe frustums with RGB thumbnails, bbox |
-| **Camera frame · trails** | the RealSense sensor | sensor frustum, tracked points, fading per-point traces (stale traces auto-drop), object bbox at its current pose |
+| **Camera frame · trails** | the RealSense sensor | sensor frustum, the **full keypoint map** posed in the camera frame — currently visible points light up in their own stable color, untracked ones stay dimmed — plus fading per-point traces (stale traces auto-drop) and the object bbox at its current pose |
 | **RGB / Events** tabs | — | **fully annotated 2D view**: tracked points in track-id colors, SAM2 segmentation mask (labeled per object), and reprojection whiskers from each map point's predicted pixel to its tracked observation (green → red by pixel error); keyframe / lost / re-acquired events |
-| **Health** | — | time series: registration residual [mm], inliers, tracked points, FPS |
+| **Residual / Tracking** | — | residual [mm] in its own plot with a pinned y-axis (`rerun.residual_cap_mm`: values clipped at the cap so a lost-frame spike can't flatten the history); inliers / tracked points / FPS in a second plot |
+
+The camera frustum is green while tracking and red while lost; it turns
+green again on recovery — either when the pipeline clears the lost flag
+(successful f2m re-registration passing the jump guard) or as soon as the
+current frame shows strong registration evidence (≥5 inliers, residual
+< 20 mm), since the flag itself can lag recovery.
+
+The camera trajectory follows the same rule as the frustum color: it pauses
+while the camera is red (lost, no recovery evidence) and resumes in a new
+segment once it turns green again — whether the pipeline cleared the flag
+or the evidence rule kicked in — with the same color and earlier segments
+preserved. A lost→re-acquired teleport is never drawn as travelled path;
+motion while tracking always stays connected, however fast.
 
 The 2D annotations live under the camera entity, so they also appear
 projected on the frustum's image plane in 3D, and colors match the 3D points
@@ -39,11 +52,12 @@ log itself is untouched). The same toggles are also available natively via
 the eye icons in the viewer's entity sidebar; note that toggling from the
 strip resets any manual panel rearrangement, since it replaces the blueprint.
 
-The last strip button, **`pts:<mode>`**, cycles how tracked points are
-colored (3D + 2D consistently): `inlier` (default — green = registration
-inlier, red = outlier, gray = unused this frame) → `track_id` →
-`frame_id` → `uncertainty` → `object`. Unlike the show/hide buttons this
-changes what gets *logged*, so it applies from the next frame onward.
+The last strip button, **`pts:<mode>`**, cycles how points and traces are
+colored (3D + 2D consistently): `track_id` (default — stable distinct color
+per physical point, dimmed while not visible) → `inlier` (green =
+registration inlier, red = outlier, gray = unused) → `frame_id` →
+`uncertainty` → `object`. Unlike the show/hide buttons this changes what
+gets *logged*, so it applies from the next frame onward.
 
 What the Rerun viewer gives for free: **timeline scrubbing** (replay any part
 of the session, pause, step frame by frame), per-view camera controls, and

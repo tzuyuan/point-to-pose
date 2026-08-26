@@ -49,6 +49,14 @@ class FrontEnd:
         # -------------- registration params --------------
         self.reg_uncer_thres = self.cfg.register.params.get("uncer_thres", 0.3)
         self.reg_residual_thres = self.cfg.register.params.get("residual_thres", 0.0007)
+        if "residual_thres" not in self.cfg.register.params:
+            print(
+                f"[FrontEnd] WARNING: register.params.residual_thres is unset, falling "
+                f"back to {self.reg_residual_thres} m. This threshold is the only path "
+                f"that clears obj.lost, so on depth with larger residuals (RealSense "
+                f"stereo runs ~3 mm) a lost object never recovers and sampling stays "
+                f"off for the rest of the run. Set it explicitly."
+            )
         self.reg_mask_border_margin_px = int(
             self.cfg.register.params.get("mask_border_margin_px", 0)
         )
@@ -87,6 +95,33 @@ class FrontEnd:
             self.pipeline_cfg.get(
                 "pose_jump_guard_single_cluster_min_inliers",
                 max(self.pose_jump_guard_min_inliers, reg_min_inliers + 2),
+            )
+        )
+
+        # -------------- lost-recovery relaxation of the jump guard --------------
+        # While an object is lost its pose is frozen at the last accepted estimate,
+        # so "distance from the previous pose" stops being a valid motion prior: a
+        # correct re-acquisition reads as a large jump and gets rejected, which
+        # freezes the pose again. Because sampling is also suppressed while lost,
+        # the inlier count cannot grow either, and the object stays lost forever.
+        # When enabled, an object that has been lost for `max_lost_frames`
+        # consecutive frames drops the jump test and is gated on support alone,
+        # with a higher inlier bar to compensate for the missing motion prior.
+        # Default False keeps the ECCV behavior bit-for-bit.
+        self.pose_jump_guard_relax_when_lost = bool(
+            self.pipeline_cfg.get("pose_jump_guard_relax_when_lost", False)
+        )
+        self.max_lost_frames = int(self.pipeline_cfg.get("max_lost_frames", 5))
+        self.pose_jump_guard_lost_min_inliers = int(
+            self.pipeline_cfg.get(
+                "pose_jump_guard_lost_min_inliers",
+                self.pose_jump_guard_min_inliers + 3,
+            )
+        )
+        self.pose_jump_guard_lost_min_inlier_ratio = float(
+            self.pipeline_cfg.get(
+                "pose_jump_guard_lost_min_inlier_ratio",
+                self.pose_jump_guard_min_inlier_ratio,
             )
         )
 
@@ -266,8 +301,9 @@ class FrontEnd:
                 print(f"[FrontEnd] Object {obj_id} not initialized properly.")
                 continue
 
-            # skip registration if the object is marked as lost
-            # (recovery manager should take care of this by performing frame to map registration)
+            # In f2m the object keeps registering while lost: frame-to-map does not
+            # need the previous frame, so a good registration can clear the flag.
+            # f2f has no such path and skips below, which is a known dead end.
 
             # ----------- Registration Logic -----------
             stats_reg = {
@@ -496,6 +532,13 @@ class FrontEnd:
             rel_pose_for_result = T_rel if self.frame_reg_mode == "f2f" else None
             key_points_for_result = (
                 prev3d if self.frame_reg_mode == "f2f" else key_points
+            )
+
+            # Consecutive frames this object has been flagged lost. Updated once
+            # here, after every branch above has settled obj.lost, so a lost object
+            # whose registration is merely mediocre (flag untouched) still ages.
+            obj.lost_streak = (
+                int(getattr(obj, "lost_streak", 0)) + 1 if obj.lost else 0
             )
 
             self._update_results(
@@ -737,27 +780,39 @@ class FrontEnd:
             }
         )
 
-        if obj.lost:
-            big_jump = (dt > self.pose_jump_guard_trans_thres) or (
-                ddeg > self.pose_jump_guard_rot_deg_thres
+        relax_when_lost = (
+            self.pose_jump_guard_relax_when_lost
+            and bool(getattr(obj, "lost", False))
+            and int(getattr(obj, "lost_streak", 0)) >= self.max_lost_frames
+        )
+        info["relaxed_when_lost"] = bool(relax_when_lost)
+
+        if relax_when_lost:
+            # T_prev is frozen and stale, so the jump test carries no information.
+            # Gate on support alone, at a stricter inlier bar than normal tracking:
+            # re-acquiring should need more evidence than continuing, not less.
+            reject = (ninliers < self.pose_jump_guard_lost_min_inliers) or (
+                inlier_ratio < self.pose_jump_guard_lost_min_inlier_ratio
             )
         else:
             big_jump = (dt > self.pose_jump_guard_trans_thres) or (
                 ddeg > self.pose_jump_guard_rot_deg_thres
             )
-        weak_support = (ninliers < self.pose_jump_guard_min_inliers) or (
-            inlier_ratio < self.pose_jump_guard_min_inlier_ratio
-        )
-        weak_single_hypothesis = (num_clusters <= 1) and (
-            ninliers < self.pose_jump_guard_single_cluster_min_inliers
-        )
+            weak_support = (ninliers < self.pose_jump_guard_min_inliers) or (
+                inlier_ratio < self.pose_jump_guard_min_inlier_ratio
+            )
+            weak_single_hypothesis = (num_clusters <= 1) and (
+                ninliers < self.pose_jump_guard_single_cluster_min_inliers
+            )
+            reject = big_jump and (weak_support or weak_single_hypothesis)
 
-        if big_jump and (weak_support or weak_single_hypothesis):
+        if reject:
             info["rejected"] = True
             print(
                 f"[FrontEnd] Pose jump guard rejected candidate "
                 f"(dT={dt:.3f}m, dR={ddeg:.2f}deg, "
-                f"inliers={ninliers}/{used}, clusters={num_clusters})."
+                f"inliers={ninliers}/{used}, clusters={num_clusters}"
+                f"{', relaxed-when-lost' if relax_when_lost else ''})."
             )
             return T_prev, True, info
 

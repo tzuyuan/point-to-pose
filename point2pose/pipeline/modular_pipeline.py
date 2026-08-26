@@ -855,18 +855,41 @@ class ModularPipeline:
                     cam_intrinsics=frame.intrinsics,
                     cam2world=np.eye(4),
                     depth_factor=frame.depth_factor,
+                    min_depth=self.min_depth,
+                    max_depth=self.max_depth,
+                    fill_missing_depth=True,
                 )
-                # Calculate distances from clicked point to all points
-                points_array = initial_3d_points
-                distances = np.linalg.norm(points_array - mean_mask_pixel_world, axis=1)
+                if np.isfinite(mean_mask_pixel_world).all():
+                    # Calculate distances from clicked point to all points
+                    points_array = initial_3d_points
+                    distances = np.linalg.norm(
+                        points_array - mean_mask_pixel_world, axis=1
+                    )
 
-                # Keep points within a reasonable distance (e.g., 0.2 meters)
-                max_distance = pcd_radius_outlier_removal_radius
-                close_indices = np.where(distances <= max_distance)[0]
+                    # Keep points within a reasonable distance (e.g., 0.2 meters)
+                    max_distance = pcd_radius_outlier_removal_radius
+                    close_indices = np.where(distances <= max_distance)[0]
+                    # OBB needs >=4 points; an off-object reference point (mask
+                    # centroid on background / depth hole) can filter out
+                    # everything, so fall back to the unfiltered cloud
+                    if close_indices.size < 4:
+                        print(
+                            f"[InitBBox] obj {obj_id}: radius filter kept "
+                            f"{close_indices.size} points, skipping it"
+                        )
+                        close_indices = None
+                else:
+                    print(
+                        f"[InitBBox] obj {obj_id}: no valid depth at mask "
+                        f"centroid pixel {mean_mask_pixel}, skipping radius filter"
+                    )
 
             ind_union = None
             if pcd_stat_outlier_removal and pcd_radius_outlier_removal:
-                ind_union = np.intersect1d(ind_stat, close_indices)
+                if close_indices is not None:
+                    ind_union = np.intersect1d(ind_stat, close_indices)
+                else:
+                    ind_union = ind_stat
             elif pcd_stat_outlier_removal:
                 ind_union = ind_stat
             elif pcd_radius_outlier_removal:
@@ -876,6 +899,13 @@ class ModularPipeline:
                 pcd_world_clean = pcd.select_by_index(ind_union)
             else:
                 pcd_world_clean = pcd
+
+            if len(pcd_world_clean.points) < 4:
+                raise RuntimeError(
+                    f"Object {obj_id}: only {len(pcd_world_clean.points)} valid 3D "
+                    f"points from mask (depth range [{self.min_depth}, "
+                    f"{self.max_depth}] m); cannot estimate initial bbox"
+                )
 
             self.objects[obj_id].init_bbox = pcd_world_clean.get_oriented_bounding_box()
             # self.objects[obj_id].init_bbox = pcd.get_axis_aligned_bounding_box()
