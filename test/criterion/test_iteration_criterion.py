@@ -1,11 +1,11 @@
-from core.base_criterion import SampleCriterion
-from core.module_registry import CRITERION
-from data_types.criterion_context import CriterionContext
+from point2pose.core.base_criterion import SampleCriterion
+from point2pose.core.module_registry import CRITERION
+from point2pose.data_types.criterion_context import CriterionContext
 
 
 def test_default_returns_true_every_time():
     # Default return_every_n_iterations is 1
-    from modules.criterion.iteration_criterion import IterationCriterion
+    from point2pose.modules.criterion.iteration_criterion import IterationCriterion
 
     criterion = IterationCriterion()
     # Create empty context - should increment internal counter
@@ -16,7 +16,7 @@ def test_default_returns_true_every_time():
 
 
 def test_every_n_iterations_behavior():
-    from modules.criterion.iteration_criterion import IterationCriterion
+    from point2pose.modules.criterion.iteration_criterion import IterationCriterion
 
     criterion = IterationCriterion(return_every_n_iterations=3)
     context = CriterionContext()
@@ -26,7 +26,7 @@ def test_every_n_iterations_behavior():
 
 def test_registry_registration_and_usage():
     # Import ensures decorator runs and registers the class
-    from modules.criterion.iteration_criterion import IterationCriterion
+    from point2pose.modules.criterion.iteration_criterion import IterationCriterion
 
     registered_cls = CRITERION.get("iteration")
     assert registered_cls is IterationCriterion
@@ -40,7 +40,7 @@ def test_registry_registration_and_usage():
 
 
 def test_check_sample_criterion_with_cur_iter_argument():
-    from modules.criterion.iteration_criterion import IterationCriterion
+    from point2pose.modules.criterion.iteration_criterion import IterationCriterion
 
     criterion = IterationCriterion(return_every_n_iterations=4)
     # Directly set cur_iter via context; 4 % 4 == 0 -> True

@@ -1,0 +1,45 @@
+# Point2Pose runtime dependencies.
+#
+#   pip install -r requirements.txt
+#
+# Conda users: `conda env create -f environment.yml` does this in one step
+# (that file mirrors the pins below -- keep the two in sync).
+#
+# These are the exact versions the paper results were produced with, on
+# Ubuntu 22.04 / Python 3.11 / CUDA 12.1. Loosening them usually works; the one
+# constraint that matters is numpy, see below.
+#
+# For a CUDA build other than the PyPI default, add the matching index:
+#   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
+
+# --- core pipeline ---
+numpy==2.1.3                # must stay <2.3 for numba and >=2 for rerun-sdk
+scipy==1.15.2
+opencv-python==4.11.0.86
+omegaconf==2.3.0
+torch==2.4.0
+torchvision==0.19.0
+open3d==0.19.0
+trimesh==4.6.9
+scikit-image==0.25.2        # marching cubes for the TSDF mesh
+numba==0.61.2               # CPU TSDF fusion kernels
+matplotlib==3.10.0
+gtsam==4.3a0                # pose-graph optimization (pre-release; has cp311+ wheels)
+
+# --- live RealSense demo ---
+pyrealsense2==2.55.1.6486
+
+# --- 3D visualization dashboards (Rerun / viser / video export) ---
+rerun-sdk==0.36.0
+viser==1.0.8
+plotly==6.0.1
+imageio==2.37.0
+imageio-ffmpeg==0.6.0
+
+# --- optional, uncomment if you need them ---
+# pycuda==2025.1.2          # CUDA TSDF fusion (sdf_use_gpu: true); needs nvcc at install time
+# transformers==4.56.1      # required by the Track-On2 tracker backend
+# lcm==1.5.1                # LCM pose publishing
+#
+# Not installable from PyPI -- see requirements-third-party.txt for SAM2
+# real-time, tapnet (TAPIR) and LightGlue, and the README for mmcv (Track-On2).

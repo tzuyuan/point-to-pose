@@ -1,12 +1,12 @@
 import numpy as np
 
-from core.base_criterion import SampleCriterion
-from core.module_registry import CRITERION
-from data_types.criterion_context import CriterionContext
+from point2pose.core.base_criterion import SampleCriterion
+from point2pose.core.module_registry import CRITERION
+from point2pose.data_types.criterion_context import CriterionContext
 
 
 def test_ratio_computation_basic_true_and_false():
-    from modules.criterion.uncertainty_ratio_criterion import (
+    from point2pose.modules.criterion.uncertainty_ratio_criterion import (
         UncertaintyRatioCriterion,
     )
 
@@ -24,7 +24,7 @@ def test_ratio_computation_basic_true_and_false():
 
 
 def test_boundary_values_for_uncertainty_threshold():
-    from modules.criterion.uncertainty_ratio_criterion import (
+    from point2pose.modules.criterion.uncertainty_ratio_criterion import (
         UncertaintyRatioCriterion,
     )
 
@@ -41,7 +41,7 @@ def test_boundary_values_for_uncertainty_threshold():
 
 
 def test_all_low_uncertainty_triggers_true():
-    from modules.criterion.uncertainty_ratio_criterion import (
+    from point2pose.modules.criterion.uncertainty_ratio_criterion import (
         UncertaintyRatioCriterion,
     )
 
@@ -54,7 +54,7 @@ def test_all_low_uncertainty_triggers_true():
 
 
 def test_none_uncertainty_returns_false():
-    from modules.criterion.uncertainty_ratio_criterion import (
+    from point2pose.modules.criterion.uncertainty_ratio_criterion import (
         UncertaintyRatioCriterion,
     )
 
@@ -64,7 +64,7 @@ def test_none_uncertainty_returns_false():
 
 
 def test_empty_uncertainty_returns_false():
-    from modules.criterion.uncertainty_ratio_criterion import (
+    from point2pose.modules.criterion.uncertainty_ratio_criterion import (
         UncertaintyRatioCriterion,
     )
 
@@ -74,7 +74,7 @@ def test_empty_uncertainty_returns_false():
 
 
 def test_registry_registration_and_usage():
-    from modules.criterion.uncertainty_ratio_criterion import (
+    from point2pose.modules.criterion.uncertainty_ratio_criterion import (
         UncertaintyRatioCriterion,
     )
 

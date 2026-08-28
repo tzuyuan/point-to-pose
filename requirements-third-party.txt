@@ -1,0 +1,18 @@
+# Components Point2Pose needs that are not published on PyPI.
+# Install them into the activated environment, after requirements.txt/environment.yml
+# (they import torch while building, hence --no-build-isolation):
+#
+#   conda activate point2pose
+#   pip install --no-build-isolation -r requirements-third-party.txt
+#
+# Cloning them yourself works just as well and is preferable if you want to read
+# or patch their code -- the README lists the per-repo commands.
+
+# Real-time SAM2 fork used by the segmenter module.
+git+https://github.com/Gy920/segment-anything-2-real-time.git
+
+# SuperPoint keypoint detector used by the sampler modules.
+git+https://github.com/cvg/LightGlue.git
+
+# TAPIR / BootsTAPIR / TAPNext++ point trackers.
+git+https://github.com/google-deepmind/tapnet.git
