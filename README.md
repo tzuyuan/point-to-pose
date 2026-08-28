@@ -27,35 +27,42 @@
 
 ---
 
-**Point2Pose** is a *model-free* method for causal 6D pose tracking of **multiple rigid objects** from monocular RGB-D video. It is initialized from nothing but a few clicked image points — no CAD model, no category prior, no per-object training. A long-range 2D point tracker provides persistent correspondences, so an object that is **fully occluded or leaves the frame is re-localized the instant it comes back**. While tracking, the system incrementally fuses an online TSDF and reconstructs a textured mesh of each target.
+**Point2Pose** is a *model-free* method for causal 6D pose tracking of **multiple rigid objects** from RGB-D video, initialized from a few clicked image points. Long-range 2D point tracks keep correspondences alive, so a **fully occluded object is re-localized the instant it reappears** — and each target is reconstructed as a textured mesh while tracking.
 
 ## Disclaimer
-**The readme are AI-generated. Please submit an issue if you find any problem.**
+**The readme is AI-generated. Please submit an issue if you find any problem.**
 
 ## ✨ Highlights
 
-- **Model-free & category-agnostic** — click a few points, start tracking. No CAD model or object-specific training.
-- **Multi-object** — several objects tracked simultaneously through mutual occlusion and interaction.
-- **Instant recovery from complete occlusion** — long-range point identities survive the object disappearing entirely.
-- **Simultaneous 3D reconstruction** — online TSDF fusion produces a colored/textured mesh of each tracked object.
-- **Modular by construction** — segmenter, point tracker, sampler, registration, optimizer, and criterion are swappable via a registry and one YAML file.
-- **Live demo** — RealSense RGB-D demo with an interactive [Rerun](https://rerun.io) 3D viewer (map, keyframes, mesh growth, trajectory, metrics).
-- **New dataset** — `YCBMultiTrack`, a dynamic multi-object RGB-D benchmark with motion-capture ground truth (synthetic + real).
+- **Model-free** — click a few points. No CAD model, no training.
+- **Multi-object** — many objects at once, through mutual occlusion.
+- **Occlusion recovery** — re-localized the instant the object reappears.
+- **3D reconstruction** — online TSDF fusion, one textured mesh per object.
+- **Modular** — every stage swappable from one YAML file.
+- **Live demo** — RealSense, with an interactive [Rerun](https://rerun.io) 3D viewer.
+- **New dataset** — `YCBMultiTrack`: multi-object RGB-D with mocap ground truth.
 
-Runtime is **2–10 Hz** depending on tracker resolution and number of tracked points; the 2D point tracker is the dominant cost.
 
 ## 📰 News and Updates
+- **[08/2026]** Model-based Point2Pose is released along with Gaussian splats reconstruction! 
+- **[06/2026]** Point2Pose is accepted to **ECCV 2026**! 
 
-- **[ECCV 2026]** Point2Pose is accepted to **ECCV 2026**! 🎉
-- **[2026-08]** Live 3D visualization plug-in for the RealSense demo (Rerun / viser / Open3D UIs) — see [3D viewer](#3d-visualization-rerun).
-- **[2026-08]** Three additional point-tracker backends — **TAPNext++**, **Track-On2**, and **LiteTracker** — plus a benchmark harness to compare trackers on the same sequence. See [Swappable point trackers](#swappable-point-trackers).
-- **[2026-06]** [Project page](https://point2pose.github.io/) is live, with videos of real-world multi-object tracking and occlusion recovery.
-- **[2026-04]** Paper released on [arXiv](https://arxiv.org/abs/2604.10415).
-- **[Coming soon]** `YCBMultiTrack` dataset release (synthetic + real sequences with mocap ground truth).
+## 🆕 Model-Based Point2Pose
+
+We recently made a **model-based** variant of Point2Pose. The new framework supports:
+- **Model-based tracking.** Given a Gaussian or mesh model, the system can track its 6D pose. [README](examples/model_based_tracking/README.md)
+- **Gaussian Splats Reconstruction.** The new pipeline supports Gaussian splat reconstruction for higher visual modality. [README](examples/realsense_tracking/reconstruction/README.md)
+
+<div align="center">
+<img src="assets/videos/point-to-pose-gsplat-example.gif" width="70%" alt="Model-based tracking from a trained gaussian splat">
+</div>
+
+> Model-based tracking and the 3DGS reconstruction pipeline are contributed by **[Sang Min Kim](https://github.com/sangminkim-99)**. Sangmin is a great researcher on 3D vision and robotics! Check out [his other work](https://sangminkim-99.github.io/)
 
 ## 📑 Table of Contents
 
 - [Installation](#-installation)
+- [Model-Based Point2Pose](#-model-based-point2pose)
 - [RealSense Live Demo](#-realsense-live-demo)
 - [Running on Datasets](#-running-on-datasets)
 - [Configuration & Architecture](#-configuration--architecture)
