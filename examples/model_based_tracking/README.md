@@ -20,4 +20,4 @@ python examples/model_based_tracking/realsense_tracking_model.py \
     --config configs/pipeline/model_tracking_gsplat.yaml
 ```
 
-<video src="../../assets/videos/point-to-pose-gsplat-example.mp4" controls playsinline style="max-width: 100%;"></video>
+<img src="../../assets/videos/point-to-pose-gsplat-example.gif" alt="Model-based tracking demo" style="max-width: 100%;" />
