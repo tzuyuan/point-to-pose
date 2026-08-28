@@ -1,0 +1,3 @@
+clearance_threshold: 0.03
+palm_clearance_threshold: 0.03
+palm_clearance_safety: 0.005

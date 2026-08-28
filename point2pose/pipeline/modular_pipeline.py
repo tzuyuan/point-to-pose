@@ -156,7 +156,7 @@ class ModularPipeline:
     def initialize_first_frame(self, frame):
 
         # TODO: make this a class
-        if self.depth_estimator_type == "depth_anything":
+        if self.use_depth_estimate and self.depth_estimator_type == "depth_anything":
             # local import to avoid import-time CUDA/BLAS side-effects
             from third_party.depth_anything_v2_metric.dpt import DepthAnythingV2
 
@@ -169,7 +169,7 @@ class ModularPipeline:
             )
             m.load_state_dict(state)
             self.depth_estimator = m.to(self._device).eval()
-        elif self.depth_estimator_type == "promptda":
+        elif self.use_depth_estimate and self.depth_estimator_type == "promptda":
             from promptda.promptda import PromptDA
 
             self.depth_estimator = (
