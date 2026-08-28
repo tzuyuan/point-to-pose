@@ -553,18 +553,7 @@ class SVDResidualOutlierRegister(Register):
         # compute the covariance matrix
         H = P.T @ Q
         # compute the SVD
-        try:
-            U, _S, Vt = np.linalg.svd(H)
-        except np.linalg.LinAlgError:
-            # Degenerate correspondence set (e.g. near-collinear/coincident points ->
-            # rank-deficient H) -- SVD can fail to converge regardless of point count.
-            # Fall back to translation-only (identity rotation) rather than crashing the
-            # tracking loop; the residual/inlier logic in register() treats a bad fit like
-            # any other iteration and will reject it via the usual thresholds.
-            print("[Register] SVD did not converge in _svd_fit; falling back to identity rotation")
-            T = np.eye(4)
-            T[:3, 3] = cq - cp
-            return T
+        U, _S, Vt = np.linalg.svd(H)
         # rotation
         R = Vt.T @ U.T
         if np.linalg.det(R) < 0:

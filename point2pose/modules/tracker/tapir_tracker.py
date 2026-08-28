@@ -1,6 +1,7 @@
 import os
 import time
 import numpy as np
+import copy
 from typing import Optional
 
 import torch
@@ -10,7 +11,7 @@ import torch.nn.functional as F
 import cv2
 
 from tapnet.torch import tapir_model
-from tapnet.torch import utils as tapnet_utils
+from tapnet.utils import transforms
 from tapnet.utils import viz_utils
 
 from point2pose.data_types.query_feature import QueryFeatures
@@ -23,107 +24,6 @@ from point2pose.core.module_registry import TRACKER
 #         # turn on tfloat32 for Ampere GPUs
 #         torch.backends.cuda.matmul.allow_tf32 = True
 #         torch.backends.cudnn.allow_tf32 = True
-
-
-# tapnet.torch.tapir_model.TAPIR.refine_pips rebuilds a constant 7x7 neighborhood offset grid
-# (torch.meshgrid(-3..3, -3..3)) from scratch on every call -- once per pyramid level, num_iters+1
-# times per estimate_trajectories call, i.e. every single tracked frame (~13x/frame measured).
-# It never depends on any input, so cache it per-device instead of rebuilding it each time.
-# Patched in (not upstream, not our code) rather than reimplemented, since refine_pips is a big
-# function and this is the only line that's wasteful -- copy in the rest verbatim so a tapnet
-# upgrade that changes anything else here doesn't silently diverge from this patch.
-_REFINE_PIPS_CTX_CACHE = {}
-
-
-def _cached_refine_pips(
-    self, target_feature, frame_features, pyramid, pos_guess, occ_guess,
-    expd_guess, orig_hw, last_iter=None, mixer_iter=0.0, resize_hw=None,
-    causal_context=None, get_causal_context=False,
-):
-    del frame_features
-    del mixer_iter
-    orig_h, orig_w = orig_hw
-    resized_h, resized_w = resize_hw
-    corrs_pyr = []
-    assert len(target_feature) == len(pyramid)
-    for pyridx, (query, grid) in enumerate(zip(target_feature, pyramid)):
-        coords = tapnet_utils.convert_grid_coordinates(
-            pos_guess, (orig_w, orig_h), grid.shape[-2:-4:-1]
-        )
-        coords = torch.flip(coords, dims=(-1,))
-        last_iter_query = None
-        if last_iter is not None:
-            if pyridx == 0:
-                last_iter_query = last_iter[..., : self.highres_dim]
-            else:
-                last_iter_query = last_iter[..., self.highres_dim:]
-
-        ctx = _REFINE_PIPS_CTX_CACHE.get(coords.device)
-        if ctx is None:
-            ctxy, ctxx = torch.meshgrid(
-                torch.arange(-3, 4), torch.arange(-3, 4), indexing="ij"
-            )
-            ctx = torch.stack([ctxy, ctxx], dim=-1).reshape(-1, 2).to(coords.device)
-            _REFINE_PIPS_CTX_CACHE[coords.device] = ctx
-        coords2 = coords.unsqueeze(3) + ctx.unsqueeze(0).unsqueeze(0).unsqueeze(0)
-        neighborhood = tapnet_utils.map_coordinates_2d(grid, coords2)
-
-        if last_iter_query is None:
-            patches = torch.einsum("bnfsc,bnc->bnfs", neighborhood, query)
-        else:
-            patches = torch.einsum(
-                "bnfsc,bnfc->bnfs", neighborhood, last_iter_query
-            )
-        corrs_pyr.append(patches)
-    corrs_pyr = torch.concatenate(corrs_pyr, dim=-1)
-
-    corrs_chunked = corrs_pyr
-    pos_guess_input = pos_guess
-    occ_guess_input = occ_guess[..., None]
-    expd_guess_input = expd_guess[..., None]
-
-    if last_iter is None:
-        both_feature = torch.cat([target_feature[0], target_feature[1]], axis=-1)
-        mlp_input_features = torch.tile(
-            both_feature.unsqueeze(2), (1, 1, corrs_chunked.shape[-2], 1)
-        )
-    else:
-        mlp_input_features = last_iter
-
-    pos_guess_input = torch.zeros_like(pos_guess_input)
-
-    mlp_input = torch.cat(
-        [pos_guess_input, occ_guess_input, expd_guess_input, mlp_input_features, corrs_chunked],
-        axis=-1,
-    )
-    x = tapnet_utils.einshape("bnfc->(bn)fc", mlp_input)
-
-    if causal_context is not None:
-        for k, v in causal_context.items():
-            causal_context[k] = tapnet_utils.einshape("bn...->(bn)...", v)
-    res, new_causal_context = self.torch_pips_mixer(
-        x.float(), causal_context, get_causal_context
-    )
-    res = tapnet_utils.einshape("(bn)fc->bnfc", res, b=mlp_input.shape[0])
-    if get_causal_context:
-        for k, v in new_causal_context.items():
-            new_causal_context[k] = tapnet_utils.einshape(
-                "(bn)...->bn...", v, b=mlp_input.shape[0]
-            )
-
-    pos_update = tapnet_utils.convert_grid_coordinates(
-        res[..., :2], (resized_w, resized_h), (orig_w, orig_h),
-    )
-    return (
-        pos_update + pos_guess,
-        res[..., 2] + occ_guess,
-        res[..., 3] + expd_guess,
-        res[..., 4:] + (mlp_input_features if last_iter is None else last_iter),
-        new_causal_context,
-    )
-
-
-tapir_model.TAPIR.refine_pips = _cached_refine_pips
 
 
 @TRACKER.register_module("tapir")
@@ -147,10 +47,8 @@ class TapirTracker(Tracker):
         self._device = config.get("device", "cpu")
         # self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Number of PIPs refinement iterations per tracked frame; 4 is the upstream tapnet
-        # default (checkpoint trained with it). Lower = faster (fewer refine_pips calls) but
-        # accuracy/stability below 4 is untested against this checkpoint.
-        self._num_pips_iter = int(config.get("num_pips_iter", 4))
+        # Number of PIPs refinement iterations; 4 is the upstream tapnet default.
+        self._num_pips_iter = config.get("num_pips_iter", 4)
 
         checkpoint_path = config.get(
             "checkpoint_path", "causal_bootstapir_checkpoint.pt"
@@ -218,25 +116,16 @@ class TapirTracker(Tracker):
                     self._causal_state,
                 )
             )
-            # Do the (cheap) coordinate rescale on-GPU ourselves -- tapnet's
-            # convert_grid_coordinates multiplies by a numpy array internally, which forces a
-            # host sync on a CUDA tensor -- then pull tracks/uncertainty/visibles to host in
-            # ONE .cpu() call instead of three (each .cpu() is a CUDA stream sync, and this
-            # runs every tracked frame).
-            scale = tracks_resized.new_tensor(
-                [self._img_width / self._resize_width, self._img_height / self._resize_height]
-            )
-            tracks = (tracks_resized * scale).view(-1, 2)
-            n = tracks.shape[0]
-            packed = torch.cat(
-                [tracks.float(), uncertainty.float().view(-1, 1), visibles.float().view(-1, 1)],
-                dim=1,
-            ).cpu().numpy()
+            tracks = transforms.convert_grid_coordinates(
+                tracks_resized.cpu(),
+                (self._resize_width, self._resize_height),
+                (self._img_width, self._img_height),
+            ).view(-1, 2)
 
             return (
-                packed[:, :2],
-                packed[:, 2],
-                packed[:, 3].astype(bool),
+                tracks.float().numpy(),
+                uncertainty.cpu().float().numpy().reshape(-1),
+                visibles.cpu().numpy().reshape(-1),
             )
 
     def add_query_points(self, frame, new_points):
@@ -436,7 +325,7 @@ class TapirTracker(Tracker):
         tracks = trajectories["tracks"][-1]
         occlusions = trajectories["occlusion"][-1]
         expected_distance = trajectories["expected_dist"][-1]
-        uncertainty = F.sigmoid(expected_distance)
+        uncertainty = copy.deepcopy(F.sigmoid(expected_distance))
         visibles = self._postprocess_occlusions(occlusions, expected_distance)
 
         return tracks, uncertainty, visibles, causal_context

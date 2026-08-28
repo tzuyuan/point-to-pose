@@ -81,7 +81,7 @@ class ModelTrackingFrontEnd:
     def add_user_points(self, points, labels):
         """Forward click points to the segmenter (only meaningful when use_segmenter)."""
         if self.segmenter is not None:
-            self.segmenter.add_input_points(points, labels)
+            self.segmenter.add_input_object(points, labels)
 
     def initialize_segmenter(self, frame):
         """Init SAM2 from the collected click prompts on this frame; enables per-frame masks."""

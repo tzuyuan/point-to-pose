@@ -1,0 +1,109 @@
+realsense:
+  params:
+    rs_serial: 927522071026
+    depth_source: realsense
+
+# crop_size: viewport side in original camera pixels. track_res: everything downstream
+# (map render, TAPIR, PnP) is resized to this square resolution.
+input:
+  params:
+    crop_size: 480
+    track_res: 512
+
+pipeline:
+  type: model_tracking
+  params:
+    max_num_obj: 1
+    device: cuda
+    use_segmenter: true
+    mask_background: true
+    mask_bg_dilate_px: 0
+    min_depth: 0.05
+    max_depth: 2.0
+    reg_uncertainty_thres: 0.3
+    min_correspondences: 6
+    pose_jump_guard_enable: false
+    pose_jump_guard_trans_thres: 0.15
+    pose_jump_guard_rot_deg_thres: 100
+    map_growth_max_mean_residual: 0.01
+    debug_level: 1
+    debug_dir: debug/model_tracking_gsplat
+
+# Offline model map, rendered from a trained gaussian splat (see
+# examples/realsense_tracking/reconstruction/train_gaussians.py).
+model_tracking:
+  params:
+    renderer: gsplat
+    gsplat_path: debug/my_capture_0827/gaussians.pt
+    gsplat_model: 2dgs
+    gsplat_sh_degree: null
+    gsplat_depth_mode: median
+    map_path: debug/model_tracking_gsplat/map.pkl
+    rebuild_map: true
+    mesh_scale: 1.0
+    num_views: 12
+    num_rotations: 4
+    max_map_points: 1000
+    render_radius: 0.4
+    debug_save_views: true
+    min_depth: 0.05
+    max_depth: 2.0
+
+register:
+  type: svd_residual_outlier
+  params:
+    remove_outside_mask: True
+    debug_level: 0
+    max_iter: 5
+    threshold_method: mad
+    inlier_thres: 0.01
+    thres_reduce_factor: 0.005
+    mad_scale: 1.0
+    min_inliers: 3
+
+# Keep resize_* == track_res, or the tracker's internal resize silently corrupts correspondences.
+tracker:
+  type: tapir
+  params:
+    img_width: 512
+    img_height: 512
+    resize_height: 512
+    resize_width: 512
+    device: cuda
+    checkpoint_path: checkpoints/tapir/causal_bootstapir_checkpoint.pt
+    num_pips_iter: 1
+
+sampler:
+  type: super_point_balanced
+  params:
+    num_points: 20
+    density_per_kpx: -1
+    fps_oversample_factor: 3
+    min_points: 5
+    max_points: 50
+    edge_margin_px: 5
+    remove_convex_hull: false
+    inflate_points: False
+    inflate_radius_px: 20
+    cell_size: -1
+    crop_to_mask: true
+    crop_pad_px: 3
+    super_point_max_num_keypoints: 512
+    debug_level: 2
+    debug_dir: debug/sampler
+    debug_save_superpoint: false
+
+segmenter:
+  type: sam2
+  params:
+    model_cfg: configs/sam2.1/sam2.1_hiera_l.yaml
+    checkpoint: checkpoints/sam2.1/sam2.1_hiera_large.pt
+    device: cuda
+    single_object: true
+
+visualization:
+  params:
+    visualize_points: true
+    points_vis_method: visible
+    save_images: false
+    output_image_dir: debug/model_tracking_gsplat/output_images

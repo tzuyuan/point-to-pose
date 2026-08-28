@@ -1,0 +1,11 @@
+# Dependencies via pip install
+cupoch
+tensorflow
+tensorflow-datasets
+lcm
+open3d
+gtsam-develop
+numba
+trimesh
+pycuda
+scikit-image

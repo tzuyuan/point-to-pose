@@ -127,7 +127,6 @@ class PointTrackTable:
             return (
                 np.empty((0, 2), dtype=self.track_2d.dtype),
                 np.empty((0,), dtype=np.int64),
-                np.empty((0,), dtype=self.uncertainty.dtype),
             )
 
         keep = self.visible[obj_idx]

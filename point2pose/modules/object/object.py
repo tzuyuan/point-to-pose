@@ -54,9 +54,9 @@ class Object:
         self.sdf_num_integrated = 0
         self.sdf = None
 
-        omega = np.zeros(3)
-        v = np.zeros(3)
-        mean_residual = 0.0
+        self.omega = np.zeros(3)
+        self.v = np.zeros(3)
+        self.mean_residual = 0.0
 
     def add_key_points(
         self,

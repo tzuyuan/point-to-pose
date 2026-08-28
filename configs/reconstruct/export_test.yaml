@@ -1,16 +1,29 @@
-# python -m point2pose.model_tracking.reconstruct --config configs/reconstruct/export_test.yaml
-# Any of these can still be overridden on the command line, e.g.:
-#   python -m point2pose.model_tracking.reconstruct --config configs/reconstruct/export_test.yaml --max_steps 2000
 results_path: debug/export_test
-n_views: 100
-pose_warmup_steps: 1000
-max_steps: 5000
 model: 2dgs
-bg_alpha_lambda: 0.5
-extract_mesh: true
-init_opacity: 0.1
-pose_jump_max_trans: 0.05
-view_coverage_thresh: 0.5
-sh_degree: 0
+max_steps: 500
+sh_degree: 2
+init_scale: 1.0
+init_opacity: 0.5
 ssim_lambda: 0.0
-poisson_depth: 6
+bg_alpha_lambda: 1.0
+min_depth: 0.05
+max_depth: 1.0
+max_depth_jump: 0.03
+init_voxel_size: 0.003
+init_cluster_eps: 0.02
+init_cluster_min_points: 20
+n_views: 100
+view_coverage_thresh: 0.4
+pose_jump_max_trans: 0.1
+pose_jump_max_rot_deg: 15.0
+recenter_gaussians: true
+floater_outlier_nb_neighbors: 20
+floater_outlier_std_ratio: 2.5
+drop_stuck_views_every: 500
+drop_stuck_views_l1_thresh: 0.05
+drop_stuck_views_min_delta: 1e-3
+drop_stuck_views_min_samples: 1
+pose_opt_lr: 1e-4
+pose_opt_rot_lr_mult: 10.0
+pose_opt_reg: 1e-7
+means_lr_mult: 3.0

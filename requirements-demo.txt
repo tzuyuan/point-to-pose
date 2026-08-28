@@ -1,0 +1,11 @@
+pyrealsense2
+# for nvdiffrast
+setuptools
+wheel
+ninja
+
+# gsplat
+gsplat
+pytorch_msssim
+scikit-learn
+viser
