@@ -4,6 +4,7 @@ import os
 
 class Register(ABC):
     def __init__(self, config=None):
+        config = config if config is not None else {}
         self.config = config
         self.debug_level = config.get("debug_level", 0)
         self.debug_dir = config.get("debug_dir", None)

@@ -6,8 +6,8 @@ import os
 # Add the src directory to the path so we can import the modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../..", "src"))
 
-from modules.register.svd_register import SVDRegister
-from utils.transform import transform_pts
+from point2pose.modules.register.svd_register import SVDRegister
+from point2pose.utils.transform import transform_pts
 
 
 class TestSVDRegister:

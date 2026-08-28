@@ -1,7 +1,12 @@
+from __future__ import annotations
+
 import os
 from abc import ABC, abstractmethod
 
-from point2pose.data_types.sampler_context import SamplerContext
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # runtime import would be circular via point2pose.modules
+    from point2pose.data_types.sampler_context import SamplerContext
 
 
 class Sampler(ABC):

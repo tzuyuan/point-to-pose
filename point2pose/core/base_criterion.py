@@ -1,6 +1,10 @@
-from abc import ABC, abstractmethod
+from __future__ import annotations
 
-from point2pose.data_types.criterion_context import CriterionContext
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # runtime import would be circular via point2pose.modules
+    from point2pose.data_types.criterion_context import CriterionContext
 
 
 class SampleCriterion(ABC):

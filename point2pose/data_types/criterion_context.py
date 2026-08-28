@@ -1,10 +1,14 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 
 import numpy as np
 
-from point2pose.modules.object.object import Object
 from point2pose.data_types.frame import Frame
+
+if TYPE_CHECKING:  # runtime import would be circular via point2pose.modules
+    from point2pose.modules.object.object import Object
 
 
 @dataclass
