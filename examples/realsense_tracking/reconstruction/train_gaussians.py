@@ -16,6 +16,8 @@ Run:
 
 import argparse
 import math
+import os
+import sys
 import time
 from pathlib import Path
 
@@ -26,13 +28,24 @@ from omegaconf import OmegaConf
 from PIL import Image
 from pytorch_msssim import ssim as ssim_fn
 
+REPO = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO / "point2pose" / "model_tracking" / "gsplat_viewer"))
+from gsplat_viewer_2dgs import GsplatViewer, GsplatRenderTabState
+from nerfview import CameraState, apply_float_colormap
+
 from sklearn.neighbors import NearestNeighbors
 
 from gsplat.rendering import rasterization, rasterization_2dgs
 from gsplat.strategy import DefaultStrategy
 
-REPO = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG = REPO / "configs/reconstruct/export_test.yaml"
+
+
+def should_enable_live_viewer(requested: bool, env_var: str = "POINT2POSE_ENABLE_LIVE_VIEWER") -> bool:
+    if not requested:
+        return False
+    value = os.environ.get(env_var, "").strip().lower()
+    return value in {"1", "true", "yes", "on", "y"} or requested
 
 
 # ----------------------------------------------------------------------
@@ -645,18 +658,9 @@ def train(cfg, use_viewer=False):
     server = None
     gui_step = gui_loss = gui_preview_view = gui_preview = None
     frustum_handles = []
+    viewer = None
     if use_viewer:
         import viser
-
-        # Warm up gsplat's internal CUDA lazy wrappers (e.g. torch.inverse) on the
-        # MAIN thread -- calling them for the first time from viser's callback
-        # thread instead raises "lazy wrapper should be called at most once".
-        with torch.no_grad():
-            dummy_c2w = torch.eye(4, dtype=torch.float32, device=device).unsqueeze(0)
-            dummy_K = torch.tensor(
-                [[100.0, 0, 32], [0, 100.0, 32], [0, 0, 1]], dtype=torch.float32, device=device
-            ).unsqueeze(0)
-            render_splats(model, splats, dummy_c2w, dummy_K, 64, 64, sh_degree)
 
         server = viser.ViserServer()
         server.scene.set_up_direction("+z")
@@ -688,17 +692,7 @@ def train(cfg, use_viewer=False):
             )
         print(f"[viewer] viser running at http://localhost:{server.get_port()}")
 
-        # CUDA context is thread-local; viser fires connect/camera-update/slider callbacks
-        # on its own worker threads, and touching CUDA tensors from those threads crashes
-        # (either "lazy wrapper should be called at most once" or a CUDAGuard assert).
-        # So callbacks only enqueue a request; the render itself always runs on the MAIN
-        # thread (drained once per training-loop iteration, and in a dedicated loop once
-        # training is done).
-        pending_clients = set()
-        pending_preview = False
-
         def render_preview_view(view_idx: int) -> np.ndarray:
-            """Side-by-side GT | current-render for one training view. MAIN THREAD ONLY."""
             gt = (dataset.images[view_idx].numpy() * 255).astype(np.uint8)
             camtoworld = dataset.camtoworlds[view_idx : view_idx + 1].to(device)
             K = dataset.Ks[view_idx : view_idx + 1].to(device)
@@ -712,50 +706,58 @@ def train(cfg, use_viewer=False):
 
         @gui_preview_view.on_update
         def _(_) -> None:
-            nonlocal pending_preview
-            pending_preview = True
+            gui_preview.image = render_preview_view(gui_preview_view.value)
 
-        def render_for_client(client) -> None:
-            """Free-viewpoint render from this client's current camera. MAIN THREAD ONLY."""
-            cam = client.camera
-            aspect = cam.aspect
-            h = dataset.height
-            w = int(round(h * aspect))
-            fov = cam.fov
-            fy = h / (2 * math.tan(fov / 2))
-            fx = fy  # square pixels
-            K = torch.tensor(
-                [[fx, 0, w / 2], [0, fy, h / 2], [0, 0, 1]], dtype=torch.float32, device=device
-            ).unsqueeze(0)
-            c2w = np.eye(4, dtype=np.float32)
-            c2w[:3, :3] = viser.transforms.SO3(cam.wxyz).as_matrix()
-            c2w[:3, 3] = cam.position
-            camtoworld = torch.from_numpy(c2w).to(device).unsqueeze(0)
+        def viewer_render_fn(camera_state: CameraState, render_tab_state: GsplatRenderTabState):
+            if render_tab_state.preview_render:
+                width = render_tab_state.render_width
+                height = render_tab_state.render_height
+            else:
+                width = render_tab_state.viewer_width
+                height = render_tab_state.viewer_height
+            c2w = torch.from_numpy(camera_state.c2w).float().to(device)
+            K = torch.from_numpy(camera_state.get_K((width, height))).float().to(device)
             with torch.no_grad():
-                render = render_splats(
-                    model, splats, camtoworld, K, w, h, sh_degree,
-                )["colors"][0].clamp(0, 1).cpu().numpy()
-            client.scene.set_background_image((render * 255).astype(np.uint8))
+                out = render_splats(
+                    model,
+                    splats,
+                    c2w[None],
+                    K[None],
+                    width,
+                    height,
+                    min(render_tab_state.max_sh_degree, sh_degree),
+                    near_plane=render_tab_state.near_plane,
+                    far_plane=render_tab_state.far_plane,
+                    render_mode="RGB+ED",
+                )
+                render_colors, render_alphas, render_median, info = (
+                    out["colors"],
+                    out["alphas"],
+                    out["median_depth"],
+                    out["info"],
+                )
+                render_tab_state.total_gs_count = len(splats["means"])
+                render_tab_state.rendered_gs_count = (info["radii"] > 0).all(-1).sum().item()
 
-        def drain_render_queue() -> None:
-            """Call once per training-loop iteration (and in the post-training wait
-            loop) from the MAIN thread to actually perform any pending renders."""
-            nonlocal pending_preview
-            if pending_preview:
-                pending_preview = False
-                gui_preview.image = render_preview_view(gui_preview_view.value)
-            if pending_clients:
-                clients = list(pending_clients)
-                pending_clients.clear()
-                for client in clients:
-                    render_for_client(client)
+                if render_tab_state.render_mode == "depth(accumulated)":
+                    depth = render_colors[0, ..., 3]
+                    depth_norm = (depth - depth.min()) / (depth.max() - depth.min() + 1e-10)
+                    return apply_float_colormap(depth_norm[..., None], render_tab_state.colormap).cpu().numpy()
+                elif render_tab_state.render_mode == "depth(expected)":
+                    depth = render_median[0, ..., 0] if render_median is not None else render_colors[0, ..., 3]
+                    depth_norm = (depth - depth.min()) / (depth.max() - depth.min() + 1e-10)
+                    return apply_float_colormap(depth_norm[..., None], render_tab_state.colormap).cpu().numpy()
+                elif render_tab_state.render_mode == "alpha":
+                    return apply_float_colormap(render_alphas[0], render_tab_state.colormap).cpu().numpy()
+                else:
+                    return render_colors[0, ..., :3].clamp(0, 1).cpu().numpy()
 
-        @server.on_client_connect
-        def _(client: "viser.ClientHandle") -> None:
-            @client.camera.on_update
-            def _(_) -> None:
-                pending_clients.add(client)
-            pending_clients.add(client)
+        viewer = GsplatViewer(
+            server=server,
+            render_fn=viewer_render_fn,
+            output_dir=results_path,
+            mode="training",
+        )
 
     drop_stuck_views_every = int(cfg.get("drop_stuck_views_every", 0))
     drop_stuck_views_l1_thresh = float(cfg.get("drop_stuck_views_l1_thresh", 0.08))
@@ -873,6 +875,12 @@ def train(cfg, use_viewer=False):
             params=splats, optimizers=optimizers, state=strategy_state, step=step, info=info
         )
 
+        if viewer is not None:
+            while viewer.state == "paused":
+                time.sleep(0.01)
+            viewer.lock.acquire()
+            tic = time.perf_counter()
+
         if step % 100 == 0 or step == max_steps - 1:
             print(f"step {step}/{max_steps} loss={loss.item():.4f} "
                   f"n_gaussians={splats['means'].shape[0]}")
@@ -887,11 +895,15 @@ def train(cfg, use_viewer=False):
                     h.wxyz = viser.transforms.SO3.from_matrix(updated[i, :3, :3]).wxyz
                     h.position = updated[i, :3, 3]
                 gui_preview.image = render_preview_view(gui_preview_view.value)
-                for client in server.get_clients().values():
-                    pending_clients.add(client)
-                drain_render_queue()
-        if server is not None:
-            drain_render_queue()
+
+        if viewer is not None:
+            viewer.lock.release()
+            num_train_rays_per_step = dataset.width * dataset.height
+            num_train_steps_per_sec = 1.0 / max(time.perf_counter() - tic, 1e-10)
+            viewer.render_tab_state.num_train_rays_per_sec = (
+                num_train_rays_per_step * num_train_steps_per_sec
+            )
+            viewer.update(step, num_train_rays_per_step)
 
     print("Training done.")
 
@@ -916,7 +928,6 @@ def train(cfg, use_viewer=False):
         print(f"[viewer] training done, viser still running at "
               f"http://localhost:{server.get_port()} -- Ctrl+C to exit.")
         while True:
-            drain_render_queue()
             time.sleep(0.05)
 
 
@@ -929,10 +940,17 @@ def main():
                     help="live viser preview: camera frustums + current render")
     args = ap.parse_args()
 
+    use_viewer = should_enable_live_viewer(args.viewer)
+    if args.viewer and not use_viewer:
+        print(
+            "[viewer] Using the live viewer path. This follows the same render-loop pattern as "
+            "the working point2pose reconstruction viewer."
+        )
+
     cfg = OmegaConf.load(args.config)
     if args.results_path is not None:
         cfg.results_path = args.results_path
-    train(cfg, use_viewer=args.viewer)
+    train(cfg, use_viewer=use_viewer)
 
 
 if __name__ == "__main__":

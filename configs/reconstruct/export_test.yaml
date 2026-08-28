@@ -1,6 +1,6 @@
 results_path: debug/export_test
 model: 2dgs
-max_steps: 500
+max_steps: 5000
 sh_degree: 2
 init_scale: 1.0
 init_opacity: 0.5

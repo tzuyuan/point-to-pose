@@ -9,3 +9,5 @@ gsplat
 pytorch_msssim
 scikit-learn
 viser
+nerfview
+splines
