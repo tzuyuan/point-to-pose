@@ -4,7 +4,7 @@ Capture a live SLAM tracking session (SDF map, no pre-existing mesh needed --
 model-based tracking is not used here since it requires a mesh) and train a
 2DGS/3DGS reconstruction from it.
 
-<video src="../../assets/videos/point-to-pose-reconstruction-example.webm" controls playsinline style="max-width: 100%;"></video>
+<video src="../../assets/videos/point-to-pose-reconstruct-example.mp4" controls playsinline style="max-width: 100%;"></video>
 
 ```
 gsplat
