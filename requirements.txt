@@ -39,7 +39,7 @@ imageio-ffmpeg==0.6.0
 # --- optional, uncomment if you need them ---
 # pycuda==2025.1.2          # CUDA TSDF fusion (sdf_use_gpu: true); needs nvcc at install time
 # transformers==4.56.1      # required by the Track-On2 tracker backend
-# lcm==1.5.1                # LCM pose publishing
+# lcm==1.5.1                # LCM bridge: RGB-D input + pose output
 #
 # Not installable from PyPI -- see requirements-third-party.txt for SAM2
 # real-time, tapnet (TAPIR) and LightGlue, and the README for mmcv (Track-On2).

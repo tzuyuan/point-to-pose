@@ -40,6 +40,8 @@
 - **Simultaneous 3D reconstruction** — online TSDF fusion produces a colored/textured mesh of each tracked object.
 - **Modular by construction** — segmenter, point tracker, sampler, registration, optimizer, and criterion are swappable via a registry and one YAML file.
 - **Live demo** — RealSense RGB-D demo with an interactive [Rerun](https://rerun.io) 3D viewer (map, keyframes, mesh growth, trajectory, metrics).
+- **LCM bridge** — take RGB-D frames from an [LCM](https://lcm-proj.github.io/) bus and publish per-frame object poses back onto it, so the tracker drops into an existing robot stack.
+- **Mask-based pose fallback** — when the point tracks stop supporting a reliable registration, translation is re-derived from the SAM2 mask instead of freezing at the last good pose.
 - **New dataset** — `YCBMultiTrack`, a dynamic multi-object RGB-D benchmark with motion-capture ground truth (synthetic + real).
 
 Runtime is **2–10 Hz** depending on tracker resolution and number of tracked points; the 2D point tracker is the dominant cost.
@@ -47,6 +49,7 @@ Runtime is **2–10 Hz** depending on tracker resolution and number of tracked p
 ## 📰 News and Updates
 
 - **[ECCV 2026]** Point2Pose is accepted to **ECCV 2026**! 🎉
+- **[2026-09]** **LCM bridge** — subscribe to RGB-D over LCM and publish tracked object poses back onto the bus, plus a **mask-based pose fallback** for frames where the point tracks go unreliable. See [LCM Bridge](#-lcm-bridge).
 - **[2026-08]** Live 3D visualization plug-in for the RealSense demo (Rerun / viser / Open3D UIs) — see [3D viewer](#3d-visualization-rerun).
 - **[2026-08]** Three additional point-tracker backends — **TAPNext++**, **Track-On2**, and **LiteTracker** — plus a benchmark harness to compare trackers on the same sequence. See [Swappable point trackers](#swappable-point-trackers).
 - **[2026-06]** [Project page](https://point2pose.github.io/) is live, with videos of real-world multi-object tracking and occlusion recovery.
@@ -57,6 +60,7 @@ Runtime is **2–10 Hz** depending on tracker resolution and number of tracked p
 
 - [Installation](#-installation)
 - [RealSense Live Demo](#-realsense-live-demo)
+- [LCM Bridge](#-lcm-bridge)
 - [Running on Datasets](#-running-on-datasets)
 - [Configuration & Architecture](#-configuration--architecture)
 - [Outputs and Logging](#-outputs-and-logging)
@@ -102,7 +106,7 @@ The pins in [environment.yml](environment.yml) are the exact versions the paper
 results were produced with (Ubuntu 22.04 · Python 3.11 · CUDA 12.1 · RTX 4090).
 Three extras are commented out at the bottom of the file — uncomment what you
 need: `pycuda` (CUDA TSDF fusion, needs `nvcc` at install time), `transformers`
-(Track-On2 backend), `lcm` (LCM pose publishing).
+(Track-On2 backend), `lcm` (the [LCM bridge](#-lcm-bridge)).
 
 <details>
 <summary>Using pip / venv instead of conda</summary>
@@ -311,6 +315,73 @@ python examples/realsense_tracking/record_rgbd.py --out ~/data/my_take01 [--seri
 
 ---
 
+## 🔌 LCM Bridge
+
+The same tracker, wired to an [LCM](https://lcm-proj.github.io/) bus instead of a camera: it **subscribes** to RGB-D frames and camera info, and **publishes** one pose message per tracked frame. Use it to drop Point2Pose into an existing robot stack, or to run the camera and the tracker on different machines.
+
+Needs the optional `lcm` dependency (`pip install lcm==1.5.1`, or uncomment it in [environment.yml](environment.yml)).
+
+### Channels
+
+| Direction | Channel (config key) | Message | Payload |
+|---|---|---|---|
+| in | `lcm.rgbd_channel` | `rgbd_t` | RGB + depth images, timestamp |
+| in | `lcm.camera_info_channel` | `camera_info_t` | `fx fy cx cy`, 3×4 extrinsic mapping world → camera, depth factor |
+| out | `lcm.obj_pose_bb2world_channel` | `vec_list_t` | `[x y z qw qx qy qz sx sy sz]` — oriented box pose **and extents**, sorted descending |
+| out | `lcm.obj_pose_mesh2world_channel` | `vec_list_t` | `[x y z qw qx qy qz]` — object/mesh frame pose |
+
+Both outputs are in the **world frame** implied by `camera_info_t.extrinsic` (the tracker inverts it to lift camera-frame poses into world); send identity to get camera-frame poses. Each `vec_list_t` carries one row per object, named `obj_0`, `obj_1`, … The wire formats live in [point2pose/io/lcm/messages/](point2pose/io/lcm/messages/) and are reimplemented here, so no external LCM type package is needed.
+
+### Run it
+
+```bash
+# Terminal 1 — any RGB-D source on the bus (this one drives a RealSense)
+python examples/lcm_tracking/realsense_lcm_publisher.py \
+    --config configs/pipeline/lcm_tracking.yaml [--preview]
+
+# Terminal 2 — the tracker
+python examples/lcm_tracking/point2pose_lcm_tracking.py \
+    --config configs/pipeline/lcm_tracking.yaml
+```
+
+Run both from the repository root — some checkpoint paths are resolved relative to the working directory.
+
+Terminal 2 opens a window on the incoming stream and waits for prompts. Controls differ slightly from the RealSense demo:
+
+| Key / mouse | Action |
+|---|---|
+| **Left click** | Add a *positive* prompt point to the current object |
+| **Right click** | Add a *negative* prompt point |
+| **`s`** | Finish this object, start prompting the **next** one |
+| **`r`** | **Run** — start tracking with the collected prompts |
+| **`c`** | Clear all prompts and reset the pipeline |
+| **`q`** | Quit |
+
+Poses are published from the first tracked frame onward.
+
+### Consuming the poses
+
+```python
+from point2pose.io.lcm import NamedVecListLcmSubscriber
+
+sub = NamedVecListLcmSubscriber(channel="hw_obj_pose")
+sub.start()
+payload = sub.pop_latest()          # None until the first message arrives
+if payload is not None:
+    for name, vec in zip(payload.names, payload.vecs):
+        xyz, quat_wxyz, extent = vec[:3], vec[3:7], vec[7:]
+        print(name, xyz, quat_wxyz, extent)
+```
+
+`RgbdLcmPublisher` / `RgbdLcmSubscriber` are available the same way if you want to feed frames from your own source — see [examples/lcm_tracking/realsense_lcm_publisher.py](examples/lcm_tracking/realsense_lcm_publisher.py) for a complete producer.
+
+### Latency
+
+Subscriber and publisher each run on their own thread, and both coalesce to the newest message: with `lcm.drop_stale_frames: true` the tracker skips frames that piled up while the previous step was running, so it stays locked to the live stream rather than falling behind on a backlog. Set it to `false` to process every frame instead (the queue depth is `lcm.max_frame_drain`).
+
+
+---
+
 ## 📊 Running on Datasets
 
 Point2Pose is evaluated on [HO3D-v3](https://www.tugraz.at/index.php?id=40231), [YCBInEOAT](https://github.com/wenbowen123/iros20-6d-pose-tracking), and our own **YCBMultiTrack** (synthetic + real). Every runner takes `--data_path`, `--out_dir`, and `--config_path`; the paper settings live in `configs/ho3d_exp/eccv_final.yaml`, `configs/ycbineoat/eccv_final.yaml`, and `configs/ycbinisaac/eccv_final.yaml`.
@@ -364,6 +435,28 @@ Key pipeline parameters: `max_num_obj`, `frame_reg_mode` (`f2f` / `f2m` / `hybri
 
 Adding a new module is three steps: subclass the base class in [point2pose/core/](point2pose/core/), decorate it with `@TRACKER.register_module("my_tracker")` (or the relevant registry), and point the config's `type` at the new key.
 
+### Mask-based pose fallback
+
+Point tracks are the primary signal, but they degrade before SAM2 does: under fast motion, motion blur, or heavy partial occlusion the registration can be left with too few inliers to trust while the mask is still clean. The default behaviour is to reject the estimate and freeze the pose, which shows up as the box visibly lagging the object.
+
+`MaskPoseFallbackManager` fills that gap. When a frame's registration is **weak** it discards the registered translation and re-derives it from the mask: back-project the mask center to the mask's median depth, and place the object's box center there. **Rotation is never touched** — a silhouette carries no reliable orientation — so the fallback holds the last good rotation until the tracks recover.
+
+A frame counts as weak if *any* of these hold (`pipeline.params.mask_pose_fallback_*`):
+
+| Condition | Key |
+|---|---|
+| Too few valid correspondences | `weak_min_valid_points` |
+| Too few registration inliers | `weak_min_inliers` |
+| Mean residual above threshold | `weak_mean_residual` |
+| The pose-jump guard rejected this frame | `use_on_jump_reject` |
+| The object is flagged lost | `use_on_lost` |
+
+The correction is deliberately conservative: `gain` scales how far toward the mask estimate to move, `max_translation_step` caps the per-frame jump, and `depth_blend` trades off the previous depth against the mask's median depth (mask depth picks up the occluder whenever the mask bleeds past the object, so `0.5` is the default rather than `1.0`). `center_mode: bbox` uses the mask's bounding-box center, which is more stable under partial occlusion than the `centroid`.
+
+Enable it with `mask_pose_fallback_enable: true`; [configs/pipeline/lcm_tracking.yaml](configs/pipeline/lcm_tracking.yaml) has the full annotated block. To tune the thresholds before letting it act, set `mask_pose_fallback_compute_only: true` — every frame then reports what the fallback *would* have done, in `FrontEndResult.mask_fallback_stats`, without changing the pose. `mask_pose_fallback_debug: true` prints each application.
+
+Per-frame diagnostics land on `FrontEndResult`: `mask_fallback_triggered`, `mask_fallback_pose_before` / `_after`, and `mask_fallback_stats` (which carries the weak reason, mask area and center, depth estimate and its source, and the applied translation delta).
+
 ---
 
 ## 💾 Outputs and Logging
@@ -396,7 +489,7 @@ Full description: [doc/pose_logging.md](doc/pose_logging.md).
 point2pose/
 ├── core/           base classes + module registry
 ├── data_types/     Frame, KeyFrame, PointTrackTable, results
-├── io/             dataset readers, RealSense source, pose/point-cloud logging
+├── io/             dataset readers, RealSense source, LCM bridge, pose/point-cloud logging
 ├── modules/        segmenter · tracker · sampler · register · optimizer · criterion · reconstruction
 ├── pipeline/       ModularPipeline and its components
 ├── visualization/  Rerun / viser / Open3D dashboards
@@ -404,7 +497,7 @@ point2pose/
 
 configs/            per-dataset and per-experiment YAML (eccv_final.yaml = paper settings)
 environment.yml     conda environment (requirements.txt carries the same pins for pip/venv)
-examples/           RealSense live demo (2D, 3D viz, recorder)
+examples/           RealSense live demo (2D, 3D viz, recorder), LCM bridge
 experiments/        dataset runners, ablations, tracker sweep
 scripts/            benchmarks, debug visualization, paper/poster figures
 test/               pytest unit tests (`pytest`)

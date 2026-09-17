@@ -23,6 +23,9 @@ from point2pose.pipeline.components.front_end import FrontEnd
 from point2pose.pipeline.components.key_frame_manager import KeyFrameManager
 from point2pose.pipeline.components.local_optimizer import LocalOptimizer
 from point2pose.pipeline.components.key_frame_graph import KeyFrameGraph
+from point2pose.pipeline.components.mask_pose_fallback_manager import (
+    MaskPoseFallbackManager,
+)
 from point2pose.modules.reconstruction import SDFBuilder
 
 
@@ -94,6 +97,75 @@ class ModularPipeline:
         self.hist_frames = deque(maxlen=self.num_hist)
         self.hist_fe_results = deque(maxlen=self.num_hist)
         self.hist_track_tables = deque(maxlen=self.num_hist)
+
+        # Mask-based pose fallback: when the point tracks stop supporting a
+        # reliable registration (too few inliers, high residual, a rejected pose
+        # jump, or a lost object) the translation is re-derived from the SAM mask
+        # instead of freezing at the last accepted pose.
+        self.mask_pose_fallback_enable = bool(
+            self.pipeline_cfg.get("mask_pose_fallback_enable", False)
+        )
+        self.mask_pose_fallback_manager = MaskPoseFallbackManager(
+            enabled=self.mask_pose_fallback_enable,
+            only_when_weak=bool(
+                self.pipeline_cfg.get("mask_pose_fallback_only_when_weak", True)
+            ),
+            weak_min_valid_points=int(
+                self.pipeline_cfg.get("mask_pose_fallback_weak_min_valid_points", 3)
+            ),
+            weak_min_inliers=int(
+                self.pipeline_cfg.get(
+                    "mask_pose_fallback_weak_min_inliers",
+                    max(3, int(self.cfg.register.params.get("min_inliers", 3))),
+                )
+            ),
+            weak_mean_residual=float(
+                self.pipeline_cfg.get(
+                    "mask_pose_fallback_weak_mean_residual",
+                    self.reg_residual_thres,
+                )
+            ),
+            use_on_lost=bool(
+                self.pipeline_cfg.get("mask_pose_fallback_use_on_lost", True)
+            ),
+            use_on_jump_reject=bool(
+                self.pipeline_cfg.get("mask_pose_fallback_use_on_jump_reject", True)
+            ),
+            center_mode=str(
+                self.pipeline_cfg.get("mask_pose_fallback_center_mode", "bbox")
+            ),
+            use_mask_depth=bool(
+                self.pipeline_cfg.get("mask_pose_fallback_use_mask_depth", True)
+            ),
+            depth_blend=float(
+                self.pipeline_cfg.get("mask_pose_fallback_depth_blend", 0.5)
+            ),
+            min_mask_area=int(
+                self.pipeline_cfg.get("mask_pose_fallback_min_mask_area", 64)
+            ),
+            min_depth_samples=int(
+                self.pipeline_cfg.get("mask_pose_fallback_min_depth_samples", 16)
+            ),
+            max_mask_pixels=int(
+                self.pipeline_cfg.get("mask_pose_fallback_max_mask_pixels", 4096)
+            ),
+            gain=float(self.pipeline_cfg.get("mask_pose_fallback_gain", 1.0)),
+            max_translation_step=float(
+                self.pipeline_cfg.get(
+                    "mask_pose_fallback_max_translation_step",
+                    self.max_rel_translation,
+                )
+            ),
+            clear_lost_on_apply=bool(
+                self.pipeline_cfg.get("mask_pose_fallback_clear_lost_on_apply", True)
+            ),
+            min_depth=float(self.min_depth),
+            max_depth=float(self.max_depth),
+            debug=bool(self.pipeline_cfg.get("mask_pose_fallback_debug", False)),
+            compute_only=bool(
+                self.pipeline_cfg.get("mask_pose_fallback_compute_only", False)
+            ),
+        )
 
         # Logging
         self.save_pose = self.pipeline_cfg.get("save_pose", False)
@@ -415,6 +487,7 @@ class ModularPipeline:
         #################################################################
         t0 = time.time()
         fe_result = self.frontend.step(frame, self.track_table, self.objects)
+        self._apply_mask_pose_fallback(frame, fe_result)
         module_times["frontend"] = time.time() - t0
 
         # per-object update
@@ -956,6 +1029,10 @@ class ModularPipeline:
                     obb_ls,
                 )
         return out_pose
+
+    def _apply_mask_pose_fallback(self, frame, fe_result) -> None:
+        """Override weak per-object translations with a mask-derived estimate."""
+        self.mask_pose_fallback_manager.apply(frame, fe_result, self.objects)
 
     def _update_object_from_frontend(self, obj_id, fe_result):
         obj = self.objects[obj_id]

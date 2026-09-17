@@ -48,7 +48,7 @@ dependencies:
       - imageio==2.37.0
       - imageio-ffmpeg==0.6.0
 
-      # optional: CUDA TSDF fusion (needs nvcc), Track-On2 backend, LCM output
+      # optional: CUDA TSDF fusion (needs nvcc), Track-On2 backend, LCM bridge
       # - pycuda==2025.1.2
       # - transformers==4.56.1
       # - lcm==1.5.1
