@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import time
 
 import cv2
 import numpy as np
@@ -13,14 +12,10 @@ from point2pose.io.lcm.pose_export import (
     build_bbox_pose_vector,
     build_mesh_pose_vector,
     object_name_from_index,
-    resolve_bbox_center_pose,
-    resolve_visualization_box,
 )
 from point2pose.io.lcm.runtime import NamedVecListLcmPublisher, RgbdLcmSubscriber
 from point2pose.utils.transform import inverse_SE3
 from point2pose.utils.visualization import (
-    _resolve_pose_and_bbox,
-    draw_oriented_3d_box,
     draw_points_on_image,
     draw_posed_3d_box,
     draw_xyz_axis,
@@ -29,10 +24,18 @@ from point2pose.utils.visualization import (
 
 
 class LcmTrackingRunner:
+    """
+    LCM-driven twin of examples/realsense_tracking/realsense_tracking.py.
+
+    The prompt collection UI (including the SAM2 mask preview), the pipeline
+    calls and the tracking visualization are deliberately kept identical to that
+    demo; only the frame source (LCM instead of a directly opened RealSense) and
+    the pose publishing are different.
+    """
+
     def __init__(self, config_path: str = "configs/pipeline/lcm_tracking.yaml"):
         self.cfg = OmegaConf.load(config_path)
         self._lcm_cfg = self.cfg.get("lcm", {})
-        self._visual_cfg = self.cfg.get("visualization", {}).get("params", {})
 
         self._rgbd_channel = str(self._lcm_cfg.get("rgbd_channel", "d455_1"))
         self._camera_info_channel = str(
@@ -53,28 +56,19 @@ class LcmTrackingRunner:
         self._max_frame_drain = max(1, int(self._lcm_cfg.get("max_frame_drain", 8)))
         self._verbose = bool(self._lcm_cfg.get("verbose", False))
 
-        self._visualize_points = bool(self._visual_cfg.get("visualize_points", True))
-        self._points_vis_method = str(
-            self._visual_cfg.get("points_vis_method", "visible_uncertainty")
-        )
-        self._save_images = bool(self._visual_cfg.get("save_images", False))
-        self._output_image_dir = Path(
-            self._visual_cfg.get(
-                "output_image_dir", "/home/justin/code/point-to-pose/debug/output_images"
-            )
-        )
+        self._visualize_points = self.cfg.visualization.params.visualize_points
+        self._points_vis_method = self.cfg.visualization.params.points_vis_method
+        self._save_images = self.cfg.visualization.params.save_images
+        self._output_image_dir = Path(self.cfg.visualization.params.output_image_dir)
+
+        # Create output directory if saving images is enabled
         if self._save_images:
             self._output_image_dir.mkdir(parents=True, exist_ok=True)
-
-        bbox_mode = self.cfg.pipeline.params.get("bbox_estimation_mode", None)
-        if bbox_mode is None:
-            bbox_mode = (
-                "first_frame_dense"
-                if self.cfg.pipeline.params.get("estimate_init_pose", False)
-                else "continuous"
+            print(
+                f"Image saving enabled. Images will be saved to: {self._output_image_dir}"
             )
-        self._bbox_estimation_mode = str(bbox_mode).lower()
 
+        # LCM transport replaces the demo's direct RealSense handle.
         self.subscriber = RgbdLcmSubscriber(
             rgbd_channel=self._rgbd_channel,
             camera_info_channel=self._camera_info_channel,
@@ -94,213 +88,262 @@ class LcmTrackingRunner:
             verbose=self._verbose,
         )
 
-        self.click_point_groups = []
-        self.click_label_groups = []
-        self.current_click_points = []
-        self.current_click_labels = []
+        # Per-object prompt-point storage. Each entry holds one object's clicked
+        # points/labels. Start with a single (empty) object; press 'n' to begin the
+        # next object.
+        self.object_points = [[]]
+        self.object_labels = [[]]
+        self.current_obj = 0
         self.tracking_started = False
         self.frame_count = 0
-        self.pipeline = None
-        self._latest_frame_for_init = None
+        self.current_poses = None
+
+        # SAM2 mask preview (recomputed only when the point set changes)
+        self._preview_masks = None
+        self._preview_dirty = False
+        # Distinct BGR colors used to draw points/overlays per object
+        self._obj_palette = [
+            (0, 255, 0),
+            (255, 128, 0),
+            (255, 0, 255),
+            (0, 255, 255),
+            (128, 0, 255),
+            (0, 128, 255),
+            (255, 255, 0),
+            (128, 255, 0),
+        ]
+
+        # Cache for consistent, distinctive frame-based point colors
+        self._frame_color_lookup = {}
+        self._frame_color_used_hsv = set()
+
+        # Latest camera info, needed for intrinsics and for lifting poses to world
         self._latest_camera_info = None
 
+        # Create window and set mouse callback
         cv2.startWindowThread()
         cv2.namedWindow(self._window_name, cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback(self._window_name, self.mouse_callback)
-        self._show_status_screen("Waiting for LCM RGBD and camera info...")
 
-    def _initialize_pipeline(self):
-        if self.pipeline is not None:
-            return
-
-        self._show_status_screen("Initializing tracking pipeline...")
-        pipeline_type = str(self.cfg.pipeline.get("type", "modular"))
-        if pipeline_type != "modular":
+        if self.cfg.pipeline.type != "modular":
             raise ValueError(
-                f"Only the 'modular' pipeline is supported, got: {pipeline_type}"
+                f"Only 'modular' pipeline is supported, got: {self.cfg.pipeline.type}"
             )
+        self._show_status_screen("Loading SAM2 / tracker checkpoints...")
+        self.pipeline = self._build_pipeline()
 
+        print("Instructions:")
+        print("- Left click:  Add positive point to the CURRENT object")
+        print("- Right click: Add negative point to the CURRENT object")
+        print("- Press 'n':   Start a NEW object (query the next object)")
+        print("- Press 's':   Start tracking")
+        print("- Press 'r':   Reset points")
+        print("- Press 'q':   Quit")
+
+    def _build_pipeline(self):
         # Imported here rather than at module scope: the tracker/segmenter backends
         # pull in torchvision, which spins forever when imported before the first
         # cv2.namedWindow call (the window is created in __init__).
         from point2pose.pipeline.modular_pipeline import ModularPipeline
 
-        self.pipeline = ModularPipeline(self.cfg)
+        return ModularPipeline(self.cfg)
 
     def mouse_callback(self, event, x, y, _flags, _param):
+        """Collect prompt points for the object currently being annotated."""
         if self.tracking_started:
             return
         if event == cv2.EVENT_LBUTTONDOWN:
-            self.current_click_points.append([x, y])
-            self.current_click_labels.append(1)
-            print(
-                f"Added positive point for object {self._active_prompt_object_index()}: ({x}, {y})"
-            )
+            # Left click - positive point for the current object
+            self.object_points[self.current_obj].append([x, y])
+            self.object_labels[self.current_obj].append(1)
+            self._preview_dirty = True
+            print(f"[obj {self.current_obj}] +positive point: ({x}, {y})")
+
         elif event == cv2.EVENT_RBUTTONDOWN:
-            self.current_click_points.append([x, y])
-            self.current_click_labels.append(0)
+            # Right click - negative point for the current object
+            self.object_points[self.current_obj].append([x, y])
+            self.object_labels[self.current_obj].append(0)
+            self._preview_dirty = True
+            print(f"[obj {self.current_obj}] -negative point: ({x}, {y})")
+
+    def next_object(self):
+        """Finish the current object and start collecting points for a new one."""
+        if len(self.object_points[self.current_obj]) == 0:
+            print(f"[obj {self.current_obj}] no points yet; click before pressing 'n'.")
+            return
+        if not any(lbl == 1 for lbl in self.object_labels[self.current_obj]):
             print(
-                f"Added negative point for object {self._active_prompt_object_index()}: ({x}, {y})"
+                f"[obj {self.current_obj}] add at least one positive (left-click) "
+                "point first."
             )
+            return
+        self.object_points.append([])
+        self.object_labels.append([])
+        self.current_obj += 1
+        self._preview_dirty = True
+        print(
+            f"Started object {self.current_obj}. Click its points, "
+            "or press 's' to start tracking."
+        )
+
+    def _draw_mask_overlay(self, display_bgr, masks):
+        """Overlay per-object SAM2 masks (logits [N,1,H,W], >0 = fg) onto a BGR image."""
+        if masks is None or len(masks) == 0:
+            return display_bgr
+
+        height, width = display_bgr.shape[:2]
+        overlay = np.zeros((height, width, 3), dtype=np.uint8)
+        overlay[..., 1] = 255  # green base (HSV)
+        any_mask = False
+
+        num_obj = len(masks)
+        for i in range(num_obj):
+            obj_mask = masks[i, 0] > 0.0
+            if hasattr(obj_mask, "cpu"):
+                obj_mask = obj_mask.cpu().numpy()
+            obj_mask = np.asarray(obj_mask)
+            if obj_mask.shape != (height, width):
+                obj_mask = cv2.resize(
+                    obj_mask.astype(np.uint8),
+                    (width, height),
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype(bool)
+            if np.any(obj_mask):
+                any_mask = True
+                hue = int((i + 3) / (num_obj + 3) * 255)
+                overlay[obj_mask, 0] = hue
+                overlay[obj_mask, 2] = 255
+
+        if not any_mask:
+            return display_bgr
+
+        overlay = cv2.cvtColor(overlay, cv2.COLOR_HSV2BGR)
+        return cv2.addWeighted(display_bgr, 1, overlay, 0.5, 0)
 
     def reset_points(self):
-        self.click_point_groups = []
-        self.click_label_groups = []
-        self.current_click_points = []
-        self.current_click_labels = []
+        """Reset collected points and restart tracking"""
+        self.object_points = [[]]
+        self.object_labels = [[]]
+        self.current_obj = 0
         self.tracking_started = False
         self.frame_count = 0
-        self.pipeline = None
-        self._show_status_screen(
-            "Prompts reset. Add clicks for object 1, press 's' for next object, 'r' to run."
-        )
+        self.current_poses = None
+        self._preview_masks = None
+        self._preview_dirty = False
 
-    def _count_positive_labels(self, labels) -> int:
-        return int(np.sum(np.asarray(labels, dtype=np.int32) == 1))
-
-    def _active_prompt_object_index(self) -> int:
-        return len(self.click_point_groups) + 1
-
-    def _prompt_object_color(self, obj_idx: int):
-        palette = [
-            (0, 255, 0),
-            (255, 200, 0),
-            (255, 0, 255),
-            (0, 255, 255),
-            (255, 128, 0),
-            (0, 128, 255),
-        ]
-        return palette[obj_idx % len(palette)]
-
-    def _finalize_current_object(self) -> bool:
-        if len(self.current_click_points) == 0:
-            print("No points collected for the current object yet.")
-            return False
-        if self._count_positive_labels(self.current_click_labels) == 0:
-            print(
-                "The current object needs at least one positive click before it can be finalized."
+        # Reset pipeline
+        if self.cfg.pipeline.type != "modular":
+            raise ValueError(
+                f"Only 'modular' pipeline is supported, got: {self.cfg.pipeline.type}"
             )
+        self._show_status_screen("Resetting tracking pipeline...")
+        self.pipeline = self._build_pipeline()
+
+        print("Points reset. Click to add new points.")
+
+    def _generate_next_frame_color(self):
+        """Generate a new distinctive HSV-based color and convert it to BGR."""
+        golden_ratio_conjugate = 0.6180339887498949
+        base_index = len(self._frame_color_lookup)
+        saturation_cycle = (255, 230, 200, 180)
+        value_cycle = (255, 235, 215)
+
+        attempt = 0
+        while True:
+            idx = base_index + attempt
+            hue = int(round(((idx * golden_ratio_conjugate) % 1.0) * 179)) % 180
+            saturation = saturation_cycle[idx % len(saturation_cycle)]
+            value = value_cycle[(idx // len(saturation_cycle)) % len(value_cycle)]
+
+            hsv_tuple = (hue, saturation, value)
+            if hsv_tuple not in self._frame_color_used_hsv:
+                self._frame_color_used_hsv.add(hsv_tuple)
+                hsv = np.array([[[hue, saturation, value]]], dtype=np.uint8)
+                return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0]
+
+            attempt += 1
+
+    def _colors_for_frame_ids(self, frame_ids: np.ndarray) -> np.ndarray:
+        """Return consistent BGR colors for the provided frame ids."""
+        if frame_ids.size == 0:
+            return np.empty((0, 3), dtype=np.uint8)
+
+        colors = np.zeros((frame_ids.shape[0], 3), dtype=np.uint8)
+        unique_ids = np.unique(frame_ids.astype(np.int64))
+
+        for fid in unique_ids:
+            fid_int = int(fid)
+            if fid_int not in self._frame_color_lookup:
+                self._frame_color_lookup[fid_int] = self._generate_next_frame_color()
+
+            colors[frame_ids == fid] = self._frame_color_lookup[fid_int]
+
+        return colors
+
+    def start_tracking(self):
+        """Initialize pipeline tracking with collected points"""
+        # Keep only objects that actually have points.
+        groups = [
+            (pts, lbls)
+            for pts, lbls in zip(self.object_points, self.object_labels)
+            if len(pts) > 0
+        ]
+        if len(groups) == 0:
+            print("No points collected! Please click on objects first.")
             return False
 
-        self.click_point_groups.append([list(pt) for pt in self.current_click_points])
-        self.click_label_groups.append(
-            [int(label) for label in self.current_click_labels]
-        )
-        obj_idx = len(self.click_point_groups)
-        num_pos = self._count_positive_labels(self.current_click_labels)
-        num_neg = len(self.current_click_labels) - num_pos
-        self.current_click_points = []
-        self.current_click_labels = []
+        # Get current frame for initialization
+        frame = self.create_frame_from_lcm(0)
+        if frame is None:
+            print("Waiting for both RGBD and camera info before tracking can start.")
+            return False
+
+        # Add user points to pipeline, grouped per object
+        objects_points = [pts for pts, _ in groups]
+        objects_labels = [lbls for _, lbls in groups]
+        self.pipeline.add_user_points(objects_points, objects_labels)
+
+        # Initialize pipeline with first frame
+        self.current_poses = self.pipeline.step(frame)
+        self._publish_current_objects(frame.timestamp)
+
+        self.tracking_started = True
+        self.frame_count = 1
+
+        total_points = sum(len(pts) for pts in objects_points)
         print(
-            f"Finalized object {obj_idx} with {num_pos} positive and {num_neg} negative point(s)."
+            f"Started tracking with {len(objects_points)} object(s), "
+            f"{total_points} points"
         )
+        print(f"Number of objects: {len(self.current_poses)}")
+
         return True
 
-    def _prompt_groups_ready_for_tracking(self) -> bool:
-        return len(self.click_point_groups) > 0 or len(self.current_click_points) > 0
+    def create_frame_from_lcm(self, frame_id, rgbd_packet=None):
+        """Create Frame object from the newest LCM RGBD packet + camera info."""
+        if rgbd_packet is None:
+            rgbd_packet = self.subscriber.peek_latest_rgbd()
+        camera_info = self._latest_camera_info
+        if camera_info is None:
+            camera_info = self.subscriber.get_latest_camera_info()
 
-    def _prepare_prompt_groups_for_tracking(self):
-        if len(self.current_click_points) > 0:
-            if not self._finalize_current_object():
-                return None, None
-        if len(self.click_point_groups) == 0:
-            print("No object prompts collected yet. Click points before pressing 'r'.")
-            return None, None
+        if rgbd_packet is None or camera_info is None:
+            return None
 
-        prompt_points = [
-            [list(point) for point in point_group]
-            for point_group in self.click_point_groups
-        ]
-        prompt_labels = [
-            [int(label) for label in label_group]
-            for label_group in self.click_label_groups
-        ]
-        return prompt_points, prompt_labels
+        self._latest_camera_info = camera_info
 
-    def _draw_prompt_group(self, image, points, labels, obj_idx, is_current=False):
-        color = self._prompt_object_color(obj_idx)
-        label_prefix = f"O{obj_idx + 1}"
-        for point_idx, (point, label) in enumerate(zip(points, labels), start=1):
-            px = int(point[0])
-            py = int(point[1])
-            if int(label) == 1:
-                cv2.circle(image, (px, py), 6 if is_current else 5, color, -1)
-                cv2.circle(image, (px, py), 8 if is_current else 7, (255, 255, 255), 1)
-            else:
-                cv2.drawMarker(
-                    image,
-                    (px, py),
-                    (0, 0, 255),
-                    markerType=cv2.MARKER_TILTED_CROSS,
-                    markerSize=12 if is_current else 10,
-                    thickness=2,
-                )
-            cv2.putText(
-                image,
-                f"{label_prefix}:{point_idx}",
-                (px + 8, py - 8),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                color if int(label) == 1 else (0, 0, 255),
-                1,
-            )
+        # The publisher sends RGB, so no BGR->RGB conversion is needed here.
+        frame_rgb = self._normalize_rgb(rgbd_packet.rgb_image)
+        frame_depth = np.asarray(rgbd_packet.depth_image).astype(np.float32)
 
-    def _draw_prompt_collection_overlay(self, display_frame):
-        for obj_idx, (points, labels) in enumerate(
-            zip(self.click_point_groups, self.click_label_groups)
-        ):
-            self._draw_prompt_group(display_frame, points, labels, obj_idx=obj_idx)
-
-        if len(self.current_click_points) > 0:
-            self._draw_prompt_group(
-                display_frame,
-                self.current_click_points,
-                self.current_click_labels,
-                obj_idx=len(self.click_point_groups),
-                is_current=True,
-            )
-
-        lines = [
-            "L:+  R:-  s:next object  r:run  c:clear  q:quit",
-            f"Finalized objects: {len(self.click_point_groups)} | Active object: {self._active_prompt_object_index()}",
-            (
-                f"Current points: {len(self.current_click_points)}"
-                f" | Ready to run: {'yes' if self._prompt_groups_ready_for_tracking() else 'no'}"
-            ),
-        ]
-        for idx, line in enumerate(lines):
-            cv2.putText(
-                display_frame,
-                line,
-                (10, 30 + 30 * idx),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 255),
-                2,
-            )
-
-    def _show_status_screen(self, message: str):
-        frame = np.zeros((480, 640, 3), dtype=np.uint8)
-        lines = [
-            message,
-            "L:+  R:-  s:next object  r:run  c:clear  q:quit",
-        ]
-        if self._bbox_estimation_mode == "manual":
-            lines.append("Press 'b' during tracking to estimate the bounding box")
-        y = 180
-        for line in lines:
-            cv2.putText(
-                frame,
-                line,
-                (20, y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 255),
-                2,
-            )
-            y += 40
-        cv2.imshow(self._window_name, frame)
-        cv2.waitKey(1)
+        return Frame(
+            id=frame_id,
+            rgb=frame_rgb,
+            depth=frame_depth,
+            intrinsics=np.asarray(camera_info.intrinsics, dtype=np.float64).copy(),
+            depth_factor=float(camera_info.depth_factor),
+            timestamp=float(rgbd_packet.timestamp),
+        )
 
     def _normalize_rgb(self, rgb: np.ndarray) -> np.ndarray:
         rgb = np.asarray(rgb)
@@ -320,51 +363,21 @@ class LcmTrackingRunner:
             return rgb.astype(np.uint8)
         return np.clip(rgb, 0, 255).astype(np.uint8)
 
-    def _build_frame(self, rgbd_packet, camera_info, frame_id: int) -> Frame:
-        rgb = self._normalize_rgb(rgbd_packet.rgb_image)
-        depth = np.asarray(rgbd_packet.depth_image).copy()
-        return Frame(
-            id=frame_id,
-            rgb=rgb,
-            depth=depth,
-            intrinsics=np.asarray(camera_info.intrinsics, dtype=np.float64).copy(),
-            depth_factor=float(camera_info.depth_factor),
-            timestamp=float(rgbd_packet.timestamp),
-        )
+    def _mask_fallback_object_ids(self) -> set:
+        """Objects whose pose came from the SAM mask fallback on the last step."""
+        hist = getattr(self.pipeline, "hist_fe_results", None)
+        if not hist:
+            return set()
+        triggered = getattr(hist[-1], "mask_fallback_triggered", None) or {}
+        return {obj_id for obj_id, hit in triggered.items() if hit}
 
-    def start_tracking(self):
-        prompt_points, prompt_labels = self._prepare_prompt_groups_for_tracking()
-        if prompt_points is None or prompt_labels is None:
-            return False
-
-        rgbd_packet = self.subscriber.peek_latest_rgbd()
-        camera_info = self.subscriber.get_latest_camera_info()
-        if rgbd_packet is None or camera_info is None:
-            print("Waiting for both RGBD and camera info before tracking can start.")
-            return False
-
-        self._initialize_pipeline()
-        frame = self._build_frame(rgbd_packet, camera_info, frame_id=0)
-        self.pipeline.add_user_points(prompt_points, prompt_labels)
-        self.pipeline.step(frame)
-        self._publish_current_objects(frame.timestamp, camera_info)
-
-        self._latest_frame_for_init = frame
-        self._latest_camera_info = camera_info
-        self.tracking_started = True
-        self.frame_count = 1
-
-        total_points = int(sum(len(group) for group in prompt_points))
-        print(
-            f"Started tracking with {total_points} prompt point(s) across {len(prompt_points)} object(s)."
-        )
-        return True
-
-    def _publish_current_objects(self, timestamp: float, camera_info):
+    def _publish_current_objects(self, timestamp: float):
         if self.pipeline is None or not getattr(self.pipeline, "objects", None):
             return
+        if self._latest_camera_info is None:
+            return
         camera_to_world = inverse_SE3(
-            np.asarray(camera_info.world_to_camera, dtype=np.float64)
+            np.asarray(self._latest_camera_info.world_to_camera, dtype=np.float64)
         )
         bbox_vectors = []
         mesh_vectors = []
@@ -398,191 +411,380 @@ class LcmTrackingRunner:
         self.publisher.submit(bbox_payload)
         self.mesh_pose_publisher.submit(mesh_payload)
 
-    def visualize_tracking_results(self, frame: Frame):
-        display_frame = cv2.cvtColor(frame.rgb.copy(), cv2.COLOR_RGB2BGR)
-        height, _ = display_frame.shape[:2]
+    def _show_status_screen(self, message: str):
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        lines = [
+            message,
+            "L-click +, R-click -, 'n' next obj, 's' start, 'r' reset",
+        ]
+        y = 180
+        for line in lines:
+            cv2.putText(
+                frame,
+                line,
+                (20, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2,
+            )
+            y += 40
+        cv2.imshow(self._window_name, frame)
+        cv2.waitKey(1)
 
+    def visualize_tracking_results(self, frame, objects, frame_id=None):
+        """Visualize tracking results on the frame"""
+        display_frame = frame.rgb.copy()
+        display_frame = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
+
+        height, width = display_frame.shape[:2]
+        camera_intrinsics = frame.intrinsics
+        fallback_ids = self._mask_fallback_object_ids()
+
+        # Draw segmentation masks if available
         if hasattr(frame, "mask") and frame.mask is not None:
-            mask_overlay = np.zeros((height, display_frame.shape[1], 3), dtype=np.uint8)
-            mask_overlay[..., 1] = 255
-            for idx in range(len(frame.mask)):
-                obj_mask = (frame.mask[idx, 0] > 0.0).cpu().numpy()
+            mask_overlay = np.zeros((height, width, 3), dtype=np.uint8)
+            mask_overlay[..., 1] = 255  # Green base
+
+            for i in range(len(frame.mask)):
+                obj_mask = frame.mask[i, 0] > 0.0
+                ## TODO: optimize this by removing the cpu().numpy()
+                obj_mask = obj_mask.cpu().numpy()
                 if np.any(obj_mask):
-                    hue = (idx + 3) / (len(frame.mask) + 3) * 255
+                    # Color each object differently
+                    hue = (i + 3) / (len(frame.mask) + 3) * 255
                     mask_overlay[obj_mask, 0] = hue
                     mask_overlay[obj_mask, 2] = 255
+
             mask_overlay = cv2.cvtColor(mask_overlay, cv2.COLOR_HSV2BGR)
             display_frame = cv2.addWeighted(display_frame, 1, mask_overlay, 0.5, 0)
 
-        if (
-            self._visualize_points
-            and self.pipeline is not None
-            and hasattr(self.pipeline, "track_table")
-            and self.pipeline.track_table is not None
-        ):
-            for idx, obj in enumerate(self.pipeline.objects):
-                if idx not in self.pipeline.track_table.obj2track_map:
-                    continue
-                track_idx = self.pipeline.track_table.obj2track_map[idx]
-                track_points = self.pipeline.track_table.track_2d[track_idx]
-                if self._points_vis_method == "uncertainty":
-                    colors = get_n_uncertainty_colors(
-                        self.pipeline.track_table.uncertainty[track_idx]
+        if self._visualize_points:
+            if self._points_vis_method == "uncertainty":
+
+                for i, obj in enumerate(objects):
+                    if i not in self.pipeline.track_table.obj2track_map:
+                        continue
+
+                    uncertainty_color = get_n_uncertainty_colors(
+                        self.pipeline.track_table.uncertainty[
+                            self.pipeline.track_table.obj2track_map[i]
+                        ]
                     )
-                    draw_points_on_image(display_frame, track_points, colors)
-                elif self._points_vis_method == "visible":
-                    colors = np.full((len(track_points), 3), (0, 0, 255), dtype=np.uint8)
-                    colors[self.pipeline.track_table.visible[track_idx]] = (0, 255, 0)
-                    draw_points_on_image(display_frame, track_points, colors)
-                elif self._points_vis_method == "visible_valid":
-                    colors = np.full((len(track_points), 3), (0, 0, 255), dtype=np.uint8)
-                    visible = self.pipeline.track_table.visible[track_idx]
-                    valid = self.pipeline.track_table.valid[track_idx]
-                    colors[visible & valid] = (0, 255, 0)
-                    draw_points_on_image(display_frame, track_points, colors)
-                else:
+                    draw_points_on_image(
+                        display_frame,
+                        self.pipeline.track_table.track_2d[
+                            self.pipeline.track_table.obj2track_map[i]
+                        ],
+                        uncertainty_color,
+                    )
+            elif self._points_vis_method == "visible":
+                for i, obj in enumerate(objects):
+                    if i not in self.pipeline.track_table.obj2track_map:
+                        continue
+
+                    # Generate N by 3 array with (0,255,0) for each row
+                    track_2d_points = self.pipeline.track_table.track_2d[
+                        self.pipeline.track_table.obj2track_map[i]
+                    ]
+                    N = len(track_2d_points)
+                    visible_color = np.full((N, 3), (0, 0, 255), dtype=np.uint8)
+                    visible_color[
+                        self.pipeline.track_table.visible[
+                            self.pipeline.track_table.obj2track_map[i]
+                        ]
+                    ] = (0, 255, 0)
+                    draw_points_on_image(
+                        display_frame,
+                        track_2d_points,
+                        visible_color,
+                    )
+            elif self._points_vis_method == "visible_uncertainty":
+                # Plot only visible points, colored by their uncertainty colors
+                for i, obj in enumerate(objects):
+                    if i not in self.pipeline.track_table.obj2track_map:
+                        continue
+
+                    track_idx = self.pipeline.track_table.obj2track_map[i]
+                    track_2d_points = self.pipeline.track_table.track_2d[track_idx]
                     visible_mask = self.pipeline.track_table.visible[track_idx]
+
                     if np.any(visible_mask):
-                        colors = get_n_uncertainty_colors(
+                        uncertainty_color = get_n_uncertainty_colors(
                             self.pipeline.track_table.uncertainty[track_idx]
                         )
+
                         draw_points_on_image(
                             display_frame,
-                            track_points[visible_mask],
-                            colors[visible_mask],
+                            track_2d_points[visible_mask],
+                            uncertainty_color[visible_mask],
                         )
+            elif self._points_vis_method == "frame_id":
+                # Color each point based on the frame id it was first seen (object.key_point_frames)
+                for i, obj in enumerate(objects):
+                    if i not in self.pipeline.track_table.obj2track_map:
+                        continue
 
-        for obj in getattr(self.pipeline, "objects", []):
-            if getattr(obj, "pose", None) is None:
-                continue
-            pose_in_cam, bbox_source, assume_pose_is_bbox_center = resolve_visualization_box(obj)
-            axis_pose = resolve_bbox_center_pose(
-                pose_in_cam=pose_in_cam,
-                bbox_source=bbox_source,
-                assume_pose_is_bbox_center=assume_pose_is_bbox_center,
-            )
-            if bbox_source is not None:
-                pose_draw, bbox_min_max_local, bbox_corners_local = _resolve_pose_and_bbox(
-                    pose_in_cam=pose_in_cam,
-                    bbox_source=bbox_source,
-                    bbox_frame="mesh",
-                    assume_pose_is_bbox_center=assume_pose_is_bbox_center,
+                    track_idx = self.pipeline.track_table.obj2track_map[i]
+                    track_2d_points = self.pipeline.track_table.track_2d[track_idx]
+                    visible_mask = self.pipeline.track_table.visible[track_idx]
+
+                    # Only proceed if there are visible points
+                    if not np.any(visible_mask):
+                        continue
+                    if obj.key_point_frames.shape[0] == 0:
+                        continue
+                    # Align per-object track order with object's key point order
+                    # Assume key_point_frames order corresponds to obj2track_map order
+                    num_tracks_for_obj = len(track_idx)
+                    kp_frames_for_obj = obj.key_point_frames[
+                        :num_tracks_for_obj
+                    ].astype(np.int32)
+
+                    # Frame ids for visible points; replace unknown -1 with current frame id if available
+                    frame_ids = kp_frames_for_obj[visible_mask]
+                    if frame_id is not None:
+                        frame_ids = frame_ids.copy()
+                        frame_ids[frame_ids == -1] = int(frame_id)
+
+                    # Use cached, distinctive colors per frame id
+                    colors_bgr = self._colors_for_frame_ids(frame_ids)
+
+                    # Draw only visible points for this object, using aligned colors
+                    draw_points_on_image(
+                        display_frame,
+                        track_2d_points[visible_mask],
+                        colors_bgr,
+                    )
+
+        # Draw pose information
+        for i, obj in enumerate(objects):
+            if obj.pose is not None:
+                pose = obj.pose @ obj.init_pose
+                half = 0.5 * np.asarray(obj.bbox.extent, dtype=float)
+                bbox_min_max_local = np.vstack([-half, +half])  # (2,3)
+
+                # Orange box while the pose is coming from the SAM mask fallback
+                # rather than from point-track registration.
+                line_color = (0, 165, 255) if i in fallback_ids else (0, 255, 0)
+                display_frame = draw_posed_3d_box(
+                    camera_intrinsics,
+                    display_frame,
+                    pose,
+                    bbox_min_max_local,
+                    line_color=line_color,
                 )
-                if bbox_corners_local is not None:
-                    display_frame = draw_oriented_3d_box(
-                        frame.intrinsics, display_frame, pose_draw, bbox_corners_local
-                    )
-                elif bbox_min_max_local is not None:
-                    display_frame = draw_posed_3d_box(
-                        frame.intrinsics, display_frame, pose_draw, bbox_min_max_local
-                    )
-            display_frame = draw_xyz_axis(
-                image=display_frame, ob_in_cam=axis_pose, K=frame.intrinsics
+                display_frame = draw_xyz_axis(
+                    image=display_frame, ob_in_cam=pose, K=camera_intrinsics
+                )
+
+        if fallback_ids:
+            cv2.putText(
+                display_frame,
+                "SAM mask fallback: obj "
+                + ",".join(str(i) for i in sorted(fallback_ids)),
+                (10, height - 90),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 165, 255),
+                2,
             )
+
+        # Save image if flag is enabled and frame_id is provided
+        if self._save_images and frame_id is not None:
+            image_filename = self._output_image_dir / f"frame_{frame_id:06d}.png"
+            cv2.imwrite(str(image_filename), display_frame)
 
         return display_frame
 
     def run(self):
+        """Main tracking loop"""
         self.subscriber.start()
         self.publisher.start()
         self.mesh_pose_publisher.start()
 
         try:
             while True:
-                self._latest_camera_info = self.subscriber.get_latest_camera_info()
+                self._latest_camera_info = (
+                    self.subscriber.get_latest_camera_info() or self._latest_camera_info
+                )
+
                 if not self.tracking_started:
+                    # Get frames for point collection visualization
                     rgbd_packet = self.subscriber.peek_latest_rgbd()
+
                     if rgbd_packet is None:
                         self._show_status_screen("Waiting for LCM RGBD...")
                         key = cv2.waitKey(1) & 0xFF
-                    elif self._latest_camera_info is None:
-                        frame = cv2.cvtColor(self._normalize_rgb(rgbd_packet.rgb_image), cv2.COLOR_RGB2BGR)
-                        self._draw_prompt_collection_overlay(frame)
+                        if not self._handle_key(key):
+                            break
+                        continue
+
+                    # Convert to display format (BGR)
+                    rgb = self._normalize_rgb(rgbd_packet.rgb_image)
+                    display_frame = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+                    # Recompute the SAM2 preview mask only when the point set changed.
+                    if self._preview_dirty:
+                        try:
+                            self._preview_masks = self.pipeline.preview_user_masks(
+                                rgb, self.object_points, self.object_labels
+                            )
+                        except Exception as exc:  # preview is best-effort
+                            print(f"[preview] SAM2 preview failed: {exc}")
+                            self._preview_masks = None
+                        self._preview_dirty = False
+
+                    # Overlay the SAM2 mask preview for the clicked points
+                    display_frame = self._draw_mask_overlay(
+                        display_frame, self._preview_masks
+                    )
+
+                    # Show collected points, colored per object
+                    total_points = 0
+                    for obj_idx, (pts, lbls) in enumerate(
+                        zip(self.object_points, self.object_labels)
+                    ):
+                        obj_color = self._obj_palette[obj_idx % len(self._obj_palette)]
+                        for point, label in zip(pts, lbls):
+                            total_points += 1
+                            px, py = int(point[0]), int(point[1])
+                            if label == 1:
+                                # positive: filled circle in the object's color
+                                cv2.circle(display_frame, (px, py), 5, obj_color, -1)
+                            else:
+                                # negative: red cross
+                                cv2.drawMarker(
+                                    display_frame,
+                                    (px, py),
+                                    (0, 0, 255),
+                                    cv2.MARKER_TILTED_CROSS,
+                                    12,
+                                    2,
+                                )
+
+                    # Show instructions + status
+                    cv2.putText(
+                        display_frame,
+                        "L-click +, R-click -, 'n' next obj, 's' start, 'r' reset",
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (255, 255, 255),
+                        2,
+                    )
+                    num_objects = sum(1 for pts in self.object_points if pts)
+                    cv2.putText(
+                        display_frame,
+                        f"Object {self.current_obj} | objects: {num_objects} | "
+                        f"points: {total_points}",
+                        (10, 58),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        self._obj_palette[self.current_obj % len(self._obj_palette)],
+                        2,
+                    )
+                    if self._latest_camera_info is None:
                         cv2.putText(
-                            frame,
+                            display_frame,
                             "Waiting for LCM camera info...",
-                            (10, frame.shape[0] - 20),
+                            (10, display_frame.shape[0] - 20),
                             cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7,
+                            0.6,
                             (255, 255, 255),
                             2,
                         )
-                        cv2.imshow(self._window_name, frame)
-                        key = cv2.waitKey(1) & 0xFF
-                    else:
-                        frame = cv2.cvtColor(self._normalize_rgb(rgbd_packet.rgb_image), cv2.COLOR_RGB2BGR)
-                        self._draw_prompt_collection_overlay(frame)
-                        cv2.imshow(self._window_name, frame)
-                        key = cv2.waitKey(1) & 0xFF
+
+                    # Save image if flag is enabled (for point collection phase)
+                    if self._save_images:
+                        image_filename = (
+                            self._output_image_dir
+                            / f"point_collection_{self.frame_count:06d}.png"
+                        )
+                        cv2.imwrite(str(image_filename), display_frame)
+
                 else:
+                    # Track the live stream rather than a backlog.
                     if self._drop_stale_frames:
                         rgbd_packet = self.subscriber.pop_latest_rgbd()
                     else:
                         rgbd_packet = self.subscriber.pop_oldest_rgbd()
-                    if rgbd_packet is None:
-                        key = cv2.waitKey(1) & 0xFF
-                    else:
-                        camera_info = (
-                            self._latest_camera_info
-                            if self._latest_camera_info is not None
-                            else self.subscriber.get_latest_camera_info()
-                        )
-                        if camera_info is None:
-                            key = cv2.waitKey(1) & 0xFF
-                            continue
-                        frame = self._build_frame(rgbd_packet, camera_info, self.frame_count)
-                        self.pipeline.step(frame)
-                        self._publish_current_objects(frame.timestamp, camera_info)
-                        display_frame = self.visualize_tracking_results(frame)
-                        cv2.putText(
-                            display_frame,
-                            f"Frame: {self.frame_count}",
-                            (10, display_frame.shape[0] - 60),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7,
-                            (255, 255, 255),
-                            2,
-                        )
-                        cv2.putText(
-                            display_frame,
-                            f"Objects: {len(getattr(self.pipeline, 'objects', []))}",
-                            (10, display_frame.shape[0] - 30),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7,
-                            (255, 255, 255),
-                            2,
-                        )
-                        cv2.imshow(self._window_name, display_frame)
-                        if self._save_images:
-                            image_path = self._output_image_dir / f"frame_{self.frame_count:06d}.png"
-                            cv2.imwrite(str(image_path), display_frame)
-                        self.frame_count += 1
-                        key = cv2.waitKey(1) & 0xFF
 
-                if key == ord("q"):
+                    # Create frame for pipeline
+                    frame = (
+                        None
+                        if rgbd_packet is None
+                        else self.create_frame_from_lcm(
+                            self.frame_count, rgbd_packet=rgbd_packet
+                        )
+                    )
+                    if frame is None:
+                        key = cv2.waitKey(1) & 0xFF
+                        if not self._handle_key(key):
+                            break
+                        continue
+
+                    # Run pipeline step
+                    self.pipeline.step(frame)
+                    self._publish_current_objects(frame.timestamp)
+
+                    # Visualize results
+                    display_frame = self.visualize_tracking_results(
+                        frame, self.pipeline.objects, self.frame_count
+                    )
+
+                    # Show tracking info
+                    height, _ = display_frame.shape[:2]
+                    cv2.putText(
+                        display_frame,
+                        f"Frame: {self.frame_count}",
+                        (10, height - 60),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (255, 255, 255),
+                        2,
+                    )
+                    cv2.putText(
+                        display_frame,
+                        f"Objects: {len(self.current_poses) if self.current_poses is not None else 0}",
+                        (10, height - 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (255, 255, 255),
+                        2,
+                    )
+
+                    self.frame_count += 1
+
+                # Display the frame
+                cv2.imshow(self._window_name, display_frame)
+
+                # Handle keyboard input
+                key = cv2.waitKey(1) & 0xFF
+                if not self._handle_key(key):
                     break
-                if key == ord("c"):
-                    self.reset_points()
-                elif key == ord("s") and not self.tracking_started:
-                    self._finalize_current_object()
-                elif key == ord("r") and not self.tracking_started:
-                    if self.start_tracking():
-                        print("Pipeline tracking started!")
-                    else:
-                        print("Failed to start pipeline tracking!")
-                elif (
-                    key == ord("b")
-                    and self.tracking_started
-                    and self._bbox_estimation_mode == "manual"
-                ):
-                    if self.pipeline is None or not hasattr(self.pipeline, "update_object_bboxes"):
-                        print("Manual bbox estimation is not available in this pipeline.")
-                    else:
-                        updated = self.pipeline.update_object_bboxes(force=True)
-                        print(f"Manual bbox estimation updated {updated} object(s).")
-                time.sleep(0.001)
+
+        except KeyboardInterrupt:
+            print("Interrupted by user")
+
         finally:
+            # Cleanup
             self.subscriber.stop()
             self.publisher.stop()
             self.mesh_pose_publisher.stop()
             cv2.destroyAllWindows()
+
+    def _handle_key(self, key) -> bool:
+        """Apply one keypress. Returns False when the loop should exit."""
+        if key == ord("q"):
+            return False
+        if key == ord("s") and not self.tracking_started:
+            if self.start_tracking():
+                print("Pipeline tracking started!")
+            else:
+                print("Failed to start pipeline tracking!")
+        elif key == ord("n") and not self.tracking_started:
+            self.next_object()
+        elif key == ord("r"):
+            self.reset_points()
+        return True

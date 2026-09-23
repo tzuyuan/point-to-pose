@@ -137,9 +137,6 @@ class ModularPipeline:
             use_mask_depth=bool(
                 self.pipeline_cfg.get("mask_pose_fallback_use_mask_depth", True)
             ),
-            depth_blend=float(
-                self.pipeline_cfg.get("mask_pose_fallback_depth_blend", 0.5)
-            ),
             min_mask_area=int(
                 self.pipeline_cfg.get("mask_pose_fallback_min_mask_area", 64)
             ),
@@ -150,12 +147,6 @@ class ModularPipeline:
                 self.pipeline_cfg.get("mask_pose_fallback_max_mask_pixels", 4096)
             ),
             gain=float(self.pipeline_cfg.get("mask_pose_fallback_gain", 1.0)),
-            max_translation_step=float(
-                self.pipeline_cfg.get(
-                    "mask_pose_fallback_max_translation_step",
-                    self.max_rel_translation,
-                )
-            ),
             clear_lost_on_apply=bool(
                 self.pipeline_cfg.get("mask_pose_fallback_clear_lost_on_apply", True)
             ),
@@ -228,7 +219,7 @@ class ModularPipeline:
     def initialize_first_frame(self, frame):
 
         # TODO: make this a class
-        if self.depth_estimator_type == "depth_anything":
+        if self.use_depth_estimate and self.depth_estimator_type == "depth_anything":
             # local import to avoid import-time CUDA/BLAS side-effects
             from third_party.depth_anything_v2_metric.dpt import DepthAnythingV2
 
@@ -241,7 +232,7 @@ class ModularPipeline:
             )
             m.load_state_dict(state)
             self.depth_estimator = m.to(self._device).eval()
-        elif self.depth_estimator_type == "promptda":
+        elif self.use_depth_estimate and self.depth_estimator_type == "promptda":
             from promptda.promptda import PromptDA
 
             self.depth_estimator = (
@@ -1079,6 +1070,8 @@ class ModularPipeline:
         return dt, ddeg
 
     def __del__(self):
-        for f in self.pose_log_files:
+        # __init__ can abort before pose_log_files exists (e.g. a missing
+        # checkpoint), and the AttributeError from __del__ then masks it.
+        for f in getattr(self, "pose_log_files", ()):
             if f:
                 f.close()

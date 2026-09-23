@@ -49,12 +49,10 @@ def _manager(**kwargs) -> MaskPoseFallbackManager:
         "use_on_jump_reject": True,
         "center_mode": "bbox",
         "use_mask_depth": True,
-        "depth_blend": 1.0,
         "min_mask_area": 4,
         "min_depth_samples": 4,
         "max_mask_pixels": 256,
         "gain": 1.0,
-        "max_translation_step": 1.0,
         "clear_lost_on_apply": True,
         "min_depth": 0.1,
         "max_depth": 2.0,
@@ -172,7 +170,7 @@ def test_mask_pose_fallback_triggers_on_rejected_pose_jump():
     )
 
 
-def test_mask_pose_fallback_clamps_translation_to_max_step():
+def test_mask_pose_fallback_moves_the_full_distance_in_one_frame():
     obj = _DummyObject()
     obj.lost = True
     # Mask center 200 px right of the principal point => 2.0 m at 1 m depth.
@@ -189,11 +187,12 @@ def test_mask_pose_fallback_clamps_translation_to_max_step():
     }
     result.mean_residuals[0] = 1e-2
 
-    _manager(max_translation_step=0.1).apply(frame, result, [obj])
+    _manager().apply(frame, result, [obj])
 
     assert result.mask_fallback_triggered[0] is True
+    # No per-frame step limit: the whole 2 m lateral correction lands at once.
     assert np.allclose(
-        result.obj_poses[0][:3, 3], np.array([0.1, 0.0, 1.0], dtype=float), atol=1e-6
+        result.obj_poses[0][:3, 3], np.array([2.0, 0.0, 1.0], dtype=float), atol=1e-6
     )
 
 
@@ -318,3 +317,51 @@ def test_mask_pose_fallback_leaves_frame_to_map_rel_pose_unset():
     )
     # ... but no relative-pose constraint is fabricated.
     assert result.rel_poses[0] is None
+
+
+def test_mask_pose_fallback_respects_non_identity_init_pose():
+    """The object center, not obj.pose's translation, is what gets corrected.
+
+    With a real init_pose (the bbox pose estimated on the first frame) obj.pose
+    is the frame-0 -> frame-i transform, so its translation is nowhere near the
+    object center. The correction must be applied to the center and mapped back
+    through init_pose, not written into obj.pose's translation directly.
+    """
+    obj = _DummyObject()
+    obj.lost = True
+    obj.bbox = None
+    obj.init_bbox = None
+    # Object sits 1 m in front of the camera; obj.pose is (near) identity and
+    # init_pose carries the whole 1 m offset, as the pipeline sets it up.
+    obj.pose = np.eye(4, dtype=float)
+    obj.init_pose = np.eye(4, dtype=float)
+    obj.init_pose[:3, 3] = np.array([0.0, 0.0, 1.0], dtype=float)
+
+    # Mask centered 2 px right of the principal point => a 2 cm correction at
+    # 1 m depth with fx = 100, well inside the 10 cm step limit.
+    mask = _rect_mask(317, 328, 235, 246)
+    frame = _DummyFrame(mask=mask, depth=np.ones((480, 640), dtype=np.float32))
+
+    result = FrontEndResult(frame_id=1)
+    result.obj_poses[0] = obj.pose.copy()
+    result.valid_indices[0] = np.array([0], dtype=int)
+    result.reg_stats[0] = {
+        "valid_idx": np.array([0], dtype=int),
+        "inliers": np.array([True], dtype=bool),
+        "pose_jump_guard_info": {"rejected": False},
+    }
+    result.mean_residuals[0] = 1e-2
+
+    _manager().apply(frame, result, [obj])
+
+    assert result.mask_fallback_triggered[0] is True
+    pose_new = result.obj_poses[0]
+    center_new = (pose_new @ obj.init_pose)[:3, 3]
+    center_prev = (np.eye(4) @ obj.init_pose)[:3, 3]
+
+    # Depth is preserved (mask depth == previous depth) and only the 2 cm
+    # lateral correction is applied to the center.
+    assert np.isclose(center_new[2], 1.0, atol=1e-6), f"depth changed: {center_new}"
+    assert np.linalg.norm(center_new - center_prev) < 0.03
+    # Only the lateral correction moved; rotation is untouched.
+    assert np.allclose(pose_new[:3, :3], np.eye(3), atol=1e-9)

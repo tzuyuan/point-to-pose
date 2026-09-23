@@ -1,7 +1,7 @@
-# Point2Pose over LCM.
+# Point2Pose over LCM, with TAPIR run on a mask-centred crop (tapir_crop).
 #
 #   Terminal 1:  python examples/lcm_tracking/realsense_lcm_publisher.py --config configs/pipeline/lcm_tracking.yaml
-#   Terminal 2:  python examples/lcm_tracking/point2pose_lcm_tracking.py  --config configs/pipeline/lcm_tracking.yaml
+#   Terminal 2:  python examples/lcm_tracking/point2pose_lcm_tracking.py  --config configs/pipeline/lcm_tracking_crop.yaml
 #
 # Terminal 2 opens a window on the incoming LCM stream with the same controls as
 # the RealSense demo: left click adds a positive prompt point, right click a
@@ -9,8 +9,9 @@
 # 'q' quits. The SAM2 mask preview is overlaid live while you click. Poses are
 # published on the lcm.* channels below from the first tracked frame onward.
 #
-# Derived from configs/pipeline/pipeline_test2.yaml (the RealSense demo config);
-# the pipeline/register/tracker settings are deliberately kept in sync with it.
+# Derived from configs/pipeline/lcm_tracking.yaml; identical except the `tracker`
+# block, which uses the mask-centred crop tracker. Set crop_debug: true to print
+# the crop window per frame (this runner does not draw it).
 
 # Camera settings for examples/lcm_tracking/realsense_lcm_publisher.py, which
 # turns a RealSense into an LCM RGBD source. Ignored by the tracker itself: it
@@ -190,54 +191,26 @@ segmenter:
     device: cuda
 
 tracker:
-  type: tapir
+  # TAPIR on a mask-centred crop (point2pose/modules/tracker/tapir_crop_tracker.py).
+  # Crops a fixed-size window around the SAM mask union each frame and runs
+  # TAPIR on the crop, so the object fills the resized input. NOTE: TAPIR's cost
+  # is dominated by the per-point refinement, not the pixel count, so the crop
+  # by itself does not reduce compute; it sharpens tracks on small/distant
+  # objects and allows the smaller 128x128 resize below without losing detail.
+  # Swap `type` back to `tapir` (see lcm_tracking.yaml) for the stock path.
+  type: tapir_crop
   params:
+    crop_size: auto            # or an int / [w, h] in full-image pixels
+    crop_pad_factor: 1.5       # auto: window side = max(mask extent) * factor
+    crop_min_size: 64
+    crop_recenter_thres_px: 8  # move the window only when the mask centre drifts > this
+    crop_center_mode: bbox     # bbox | centroid
+    crop_debug: true
     resize_height: 256
     resize_width: 256
-    # PIPs refinement iterations (upstream tapnet default: 4). Note: this key
-    # was ignored before num_pips_iter was wired into TapirTracker, so all
-    # earlier runs effectively used 4.
     num_pips_iter: 1
     device: cuda
     checkpoint_path: /home/manipulator/git/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
- 
-  
-  # type: cotracker3_online
-  # params:
-  #   img_height: 480
-  #   img_width: 640
-  #   resize_height: 480
-  #   resize_width: 640
-  #   device: cuda
-  #   window_len: 16
-  #   v2: False  # keep False unless you specifically use v2 weights
-  #   checkpoint_path: /home/manipulator/git/co-tracker-realtime/checkpoints/scaled_online.pth
-
-  # TAPNext++ (causal per-frame SSM tracker; see README "TAPNext++")
-  # type: tapnext
-  # params:
-  #   device: cuda
-  #   input_resolution: 256   # 512 with the tapnextpp_512.ckpt checkpoint
-  #   visible_threshold: 0.5
-  #   half_precision: true
-  #   checkpoint_path: /home/manipulator/git/point-to-pose/checkpoints/tapnext/tapnextpp_ckpt.pt
-
-  # Track-On2 (online tracker with memory + global re-detection; see README)
-  # type: trackon
-  # params:
-  #   device: cuda
-  #   vit_backbone: dinov2_s      # dinov3_s_plus needs gated HF access
-  #   visible_threshold: 0.8      # authors' delta_v
-  #   inference_memory_size: 72
-  #   checkpoint_path: /home/manipulator/git/point-to-pose/checkpoints/trackon/trackon2_dinov2_checkpoint.pt
-
-  # LiteTracker (causal CoTracker3 variant, reuses scaled_online.pth; see README)
-  # type: litetracker
-  # params:
-  #   device: cuda
-  #   window_len: 16
-  #   bf16: true
-  #   checkpoint_path: /home/manipulator/git/co-tracker-realtime/checkpoints/scaled_online.pth
 
 sampler: 
   type: super_point_balanced

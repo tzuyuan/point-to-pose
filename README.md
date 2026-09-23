@@ -346,18 +346,18 @@ python examples/lcm_tracking/point2pose_lcm_tracking.py \
 
 Run both from the repository root — some checkpoint paths are resolved relative to the working directory.
 
-Terminal 2 opens a window on the incoming stream and waits for prompts. Controls differ slightly from the RealSense demo:
+Terminal 2 opens a window on the incoming stream and waits for prompts. The prompting UI, the controls and the tracking visualization are the same as the [RealSense demo](examples/realsense_tracking/realsense_tracking.py) — the SAM2 mask preview is overlaid live as you click, so you can see what you selected before starting:
 
 | Key / mouse | Action |
 |---|---|
 | **Left click** | Add a *positive* prompt point to the current object |
 | **Right click** | Add a *negative* prompt point |
-| **`s`** | Finish this object, start prompting the **next** one |
-| **`r`** | **Run** — start tracking with the collected prompts |
-| **`c`** | Clear all prompts and reset the pipeline |
+| **`n`** | Finish this object, start prompting the **next** one |
+| **`s`** | **Start** tracking with the collected prompts |
+| **`r`** | Reset all prompts and the pipeline |
 | **`q`** | Quit |
 
-Poses are published from the first tracked frame onward.
+Poses are published from the first tracked frame onward. While an object's pose is coming from the mask fallback rather than from point-track registration, its box is drawn in orange and the frame is labelled `SAM mask fallback`.
 
 ### Consuming the poses
 
@@ -451,7 +451,7 @@ A frame counts as weak if *any* of these hold (`pipeline.params.mask_pose_fallba
 | The pose-jump guard rejected this frame | `use_on_jump_reject` |
 | The object is flagged lost | `use_on_lost` |
 
-The correction is deliberately conservative: `gain` scales how far toward the mask estimate to move, `max_translation_step` caps the per-frame jump, and `depth_blend` trades off the previous depth against the mask's median depth (mask depth picks up the occluder whenever the mask bleeds past the object, so `0.5` is the default rather than `1.0`). `center_mode: bbox` uses the mask's bounding-box center, which is more stable under partial occlusion than the `centroid`.
+The correction is deliberately conservative: `gain` scales how far toward the mask estimate to move, and the depth comes from the median depth inside the mask (falling back to the previous depth when too few mask pixels have valid depth). `center_mode: bbox` uses the mask's bounding-box center, which is more stable under partial occlusion than the `centroid`.
 
 Enable it with `mask_pose_fallback_enable: true`; [configs/pipeline/lcm_tracking.yaml](configs/pipeline/lcm_tracking.yaml) has the full annotated block. To tune the thresholds before letting it act, set `mask_pose_fallback_compute_only: true` — every frame then reports what the fallback *would* have done, in `FrontEndResult.mask_fallback_stats`, without changing the pose. `mask_pose_fallback_debug: true` prints each application.
 

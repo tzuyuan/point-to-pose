@@ -1,6 +1,7 @@
 import warnings
 
 from .tapir_tracker import TapirTracker
+from .tapir_crop_tracker import TapirCropTracker
 from .cotracker import CoTrackerRealtimeTracker
 from .cotracker_offline import CoTrackerOfflineTracker
 

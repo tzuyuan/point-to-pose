@@ -1,16 +1,17 @@
-# Point2Pose over LCM.
+# Point2Pose over LCM, plus a SAM2-only tracked OBSTACLE.
 #
-#   Terminal 1:  python examples/lcm_tracking/realsense_lcm_publisher.py --config configs/pipeline/lcm_tracking.yaml
-#   Terminal 2:  python examples/lcm_tracking/point2pose_lcm_tracking.py  --config configs/pipeline/lcm_tracking.yaml
+#   Terminal 1:  python examples/lcm_tracking/realsense_lcm_publisher.py --config configs/pipeline/lcm_obstacle_tracking_crop.yaml
+#   Terminal 2:  python examples/lcm_tracking/point2pose_lcm_obstacle_tracking.py --config configs/pipeline/lcm_obstacle_tracking_crop.yaml
 #
-# Terminal 2 opens a window on the incoming LCM stream with the same controls as
-# the RealSense demo: left click adds a positive prompt point, right click a
-# negative one, 'n' starts the next object, 's' starts tracking, 'r' resets,
-# 'q' quits. The SAM2 mask preview is overlaid live while you click. Poses are
-# published on the lcm.* channels below from the first tracked frame onward.
+# Same controls as lcm_tracking.yaml (left click +, right click -, 'n' next,
+# 's' start, 'r' reset, 'q' quit) with one addition: 'o' toggles between
+# prompting OBJECTS (6D pose via the full pipeline) and prompting the OBSTACLE.
+# The obstacle is segmented by its own SAM2 predictor only - no point tracks, no
+# registration - and its mask + depth are turned into a sphere that is published
+# on lcm.obstacle_pose_channel. The object pose channels are unchanged.
 #
-# Derived from configs/pipeline/pipeline_test2.yaml (the RealSense demo config);
-# the pipeline/register/tracker settings are deliberately kept in sync with it.
+# Derived from configs/pipeline/lcm_obstacle_tracking.yaml; identical except the
+# `tracker` block, which uses the mask-centred crop tracker (tapir_crop).
 
 # Camera settings for examples/lcm_tracking/realsense_lcm_publisher.py, which
 # turns a RealSense into an LCM RGBD source. Ignored by the tracker itself: it
@@ -34,12 +35,15 @@ realsense:
 # on each pose channel, with entries named obj_0, obj_1, ...
 #   obj_pose_bb2world_channel:   [x y z qw qx qy qz sx sy sz]  oriented box, extents sorted desc
 #   obj_pose_mesh2world_channel: [x y z qw qx qy qz]           object/mesh frame
-# Both are expressed in the world frame implied by camera_info_t.extrinsic.
+#   obstacle_pose_channel:       [x y z r]                     sphere center + radius,
+#                                entries named obstacle_0, obstacle_1, ...
+# All are expressed in the world frame implied by camera_info_t.extrinsic.
 lcm:
   rgbd_channel: d455_1
   camera_info_channel: d455_1_info
   obj_pose_bb2world_channel: hw_obj_pose
   obj_pose_mesh2world_channel: hw_obj_mesh_pose
+  obstacle_pose_channel: hw_obstacle_pose
   # Subscriber poll rate; the publisher coalesces to the newest pose per tick.
   sub_poll_hz: 500.0
   pub_hz: 60.0
@@ -48,9 +52,52 @@ lcm:
   # the previous step was still running.
   drop_stale_frames: true
   max_frame_drain: 8
-  window_name: Point2Pose LCM Tracker
+  window_name: Point2Pose LCM Tracker + Obstacle
   verbose: false
 
+
+# SAM2-only obstacle tracking (see point2pose/io/lcm/obstacle_tracker.py).
+# Per frame: SAM2 mask -> 2D center -> median depth inside the mask -> back-
+# projected to the camera -> sphere center + radius -> world frame.
+obstacle:
+  # fixed:    publish radius_m every frame (use when the obstacle size is known).
+  # estimate: radius from the mask's pixel diameter at the measured depth,
+  #           clipped to [radius_min_m, radius_max_m].
+  radius_mode: fixed
+  radius_m: 0.05
+  radius_min_m: 0.01
+  radius_max_m: 0.5
+  # Depth measures the sphere's visible FRONT surface. Push the center
+  # `center_offset_factor * radius` further along the viewing ray so it sits at
+  # the actual sphere center. The median depth over the visible disk of a sphere
+  # lies R/sqrt(2) ~= 0.707 R in front of the center, hence the default factor.
+  center_offset_by_radius: true
+  center_offset_factor: 0.7071
+  # bbox = center of the mask's bounding box; centroid = mean mask pixel.
+  center_mode: bbox
+  min_mask_area: 64
+  min_depth_samples: 16
+  max_mask_pixels: 4096
+  # Depth range for valid mask pixels (defaults to pipeline.params min/max_depth).
+  min_depth: 0.1
+  max_depth: 10
+  # EMA on center/radius; 1.0 = no smoothing.
+  smoothing_alpha: 1.0
+  # Keep publishing the last estimate for up to max_lost_frames after the mask
+  # disappears; after that the obstacle row is dropped from the message.
+  publish_when_lost: true
+  max_lost_frames: 30
+  # SAM2 model for the obstacle. It is a SECOND predictor instance (the object
+  # pipeline keeps its own), so this costs one extra SAM2 forward per frame and
+  # one extra copy of the weights on the GPU. Point it at a smaller checkpoint
+  # (e.g. sam2.1_hiera_small) if memory or frame rate is tight. Omit this block
+  # to reuse the top-level `segmenter` settings.
+  segmenter:
+    type: sam2
+    params:
+      model_cfg: configs/sam2.1/sam2.1_hiera_l.yaml
+      checkpoint: /home/manipulator/git/point-to-pose/checkpoints/sam2.1/sam2.1_hiera_large.pt
+      device: cuda
 
 pipeline:
   type: modular
@@ -190,54 +237,26 @@ segmenter:
     device: cuda
 
 tracker:
-  type: tapir
+  # TAPIR on a mask-centred crop (point2pose/modules/tracker/tapir_crop_tracker.py).
+  # Crops a fixed-size window around the SAM mask union each frame and runs
+  # TAPIR on the crop, so the object fills the resized input. NOTE: TAPIR's cost
+  # is dominated by the per-point refinement, not the pixel count, so the crop
+  # by itself does not reduce compute; it sharpens tracks on small/distant
+  # objects and allows the smaller 128x128 resize below without losing detail.
+  # Swap `type` back to `tapir` (see lcm_obstacle_tracking.yaml) for the stock path.
+  type: tapir_crop
   params:
+    crop_size: auto            # or an int / [w, h] in full-image pixels
+    crop_pad_factor: 1.5       # auto: window side = max(mask extent) * factor
+    crop_min_size: 64
+    crop_recenter_thres_px: 8  # move the window only when the mask centre drifts > this
+    crop_center_mode: bbox     # bbox | centroid
+    crop_debug: true
     resize_height: 256
     resize_width: 256
-    # PIPs refinement iterations (upstream tapnet default: 4). Note: this key
-    # was ignored before num_pips_iter was wired into TapirTracker, so all
-    # earlier runs effectively used 4.
     num_pips_iter: 1
     device: cuda
     checkpoint_path: /home/manipulator/git/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
- 
-  
-  # type: cotracker3_online
-  # params:
-  #   img_height: 480
-  #   img_width: 640
-  #   resize_height: 480
-  #   resize_width: 640
-  #   device: cuda
-  #   window_len: 16
-  #   v2: False  # keep False unless you specifically use v2 weights
-  #   checkpoint_path: /home/manipulator/git/co-tracker-realtime/checkpoints/scaled_online.pth
-
-  # TAPNext++ (causal per-frame SSM tracker; see README "TAPNext++")
-  # type: tapnext
-  # params:
-  #   device: cuda
-  #   input_resolution: 256   # 512 with the tapnextpp_512.ckpt checkpoint
-  #   visible_threshold: 0.5
-  #   half_precision: true
-  #   checkpoint_path: /home/manipulator/git/point-to-pose/checkpoints/tapnext/tapnextpp_ckpt.pt
-
-  # Track-On2 (online tracker with memory + global re-detection; see README)
-  # type: trackon
-  # params:
-  #   device: cuda
-  #   vit_backbone: dinov2_s      # dinov3_s_plus needs gated HF access
-  #   visible_threshold: 0.8      # authors' delta_v
-  #   inference_memory_size: 72
-  #   checkpoint_path: /home/manipulator/git/point-to-pose/checkpoints/trackon/trackon2_dinov2_checkpoint.pt
-
-  # LiteTracker (causal CoTracker3 variant, reuses scaled_online.pth; see README)
-  # type: litetracker
-  # params:
-  #   device: cuda
-  #   window_len: 16
-  #   bf16: true
-  #   checkpoint_path: /home/manipulator/git/co-tracker-realtime/checkpoints/scaled_online.pth
 
 sampler: 
   type: super_point_balanced

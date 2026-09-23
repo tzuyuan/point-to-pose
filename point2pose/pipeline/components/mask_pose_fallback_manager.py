@@ -29,12 +29,10 @@ class MaskPoseFallbackManager:
         use_on_jump_reject: bool,
         center_mode: str,
         use_mask_depth: bool,
-        depth_blend: float,
         min_mask_area: int,
         min_depth_samples: int,
         max_mask_pixels: int,
         gain: float,
-        max_translation_step: float,
         clear_lost_on_apply: bool,
         min_depth: float,
         max_depth: float,
@@ -51,12 +49,10 @@ class MaskPoseFallbackManager:
         self.use_on_jump_reject = bool(use_on_jump_reject)
         self.center_mode = str(center_mode).strip().lower()
         self.use_mask_depth = bool(use_mask_depth)
-        self.depth_blend = float(np.clip(depth_blend, 0.0, 1.0))
         self.min_mask_area = max(int(min_mask_area), 1)
         self.min_depth_samples = max(int(min_depth_samples), 1)
         self.max_mask_pixels = max(int(max_mask_pixels), self.min_depth_samples)
         self.gain = float(np.clip(gain, 0.0, 1.0))
-        self.max_translation_step = max(float(max_translation_step), 0.0)
         self.clear_lost_on_apply = bool(clear_lost_on_apply)
         self.min_depth = max(float(min_depth), 1e-6)
         self.max_depth = max(float(max_depth), self.min_depth)
@@ -203,6 +199,7 @@ class MaskPoseFallbackManager:
         target_center_cam = prev_center_cam + self.gain * (
             target_center_cam - prev_center_cam
         )
+
         stats["target_center_cam"] = target_center_cam.copy()
 
         pose_new = base_pose.copy()
@@ -211,23 +208,15 @@ class MaskPoseFallbackManager:
                 target_center_cam - pose_new[:3, :3] @ center_local.reshape(3)
             )
         else:
-            pose_new[:3, 3] = target_center_cam.copy()
-
-        translation_delta = pose_new[:3, 3] - base_pose[:3, 3]
-        step_norm = float(np.linalg.norm(translation_delta))
-        if self.max_translation_step > 0.0 and step_norm > self.max_translation_step:
-            translation_delta *= self.max_translation_step / step_norm
-            pose_new[:3, 3] = base_pose[:3, 3] + translation_delta
-
-        if center_mode == "center_pose_via_init":
             init_pose = np.asarray(getattr(obj, "init_pose", np.eye(4)), dtype=float)
             if init_pose.shape != (4, 4):
                 stats["reason"] = "invalid_init_pose"
                 return fe_result.obj_poses.get(obj_id), stats
             center_pose_new = center_pose_prev.copy()
-            center_pose_new[:3, 3] = pose_new[:3, 3].copy()
+            center_pose_new[:3, 3] = target_center_cam.copy()
             pose_new = center_pose_new @ inverse_SE3(init_pose)
-            translation_delta = pose_new[:3, 3] - base_pose[:3, 3]
+
+        translation_delta = pose_new[:3, 3] - base_pose[:3, 3]
 
         if self.compute_only:
             stats["applied"] = False
@@ -377,8 +366,7 @@ class MaskPoseFallbackManager:
         if not np.isfinite(mask_depth) or mask_depth <= 0.0:
             return float(prev_depth), "prev_center", int(depth_vals.size)
 
-        blended_depth = (1.0 - self.depth_blend) * float(prev_depth) + self.depth_blend * mask_depth
-        return float(blended_depth), "mask_depth", int(depth_vals.size)
+        return mask_depth, "mask_depth", int(depth_vals.size)
 
     def _resolve_center_pose(
         self, obj, base_pose: np.ndarray
