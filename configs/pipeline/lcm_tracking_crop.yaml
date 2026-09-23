@@ -51,6 +51,16 @@ lcm:
   max_frame_drain: 8
   window_name: Point2Pose LCM Tracker
   verbose: false
+  # Print a per-frame [timing] table (sensor->rx | rx->pop | frame | step |
+  # publish | vis | show || AGE@show | loop) plus rx-thread stats. Debug only.
+  comm_debug: false
+  comm_debug_every: 1
+  # Cap LCM's own per-subscription queue (default 30 msgs = 1 s of frames).
+  # 0 = leave default. Set to 1 so a starved handler thread never delivers
+  # stale frames; watch "lcm-backlog hits" in the [timing] output.
+  sub_queue_capacity: 1
+  # Print "[age] frame N: now - rgb timestamp" per frame and overlay it in the window.
+  print_frame_age: false
 
 
 pipeline:
@@ -186,8 +196,10 @@ register:
 segmenter:
   type: sam2
   params:
-    model_cfg: configs/sam2.1/sam2.1_hiera_l.yaml
-    checkpoint: /home/manipulator/git/point-to-pose/checkpoints/sam2.1/sam2.1_hiera_large.pt
+    # model_cfg: configs/sam2.1/sam2.1_hiera_l.yaml
+    # checkpoint: /home/manipulator/git/point-to-pose/checkpoints/sam2.1/sam2.1_hiera_large.pt
+    model_cfg: configs/sam2.1/sam2.1_hiera_t.yaml
+    checkpoint: /home/manipulator/git/point-to-pose/checkpoints/sam2.1/sam2.1_hiera_tiny.pt
     device: cuda
 
 tracker:
@@ -205,16 +217,20 @@ tracker:
     crop_min_size: 64
     crop_recenter_thres_px: 8  # move the window only when the mask centre drifts > this
     crop_center_mode: bbox     # bbox | centroid
-    crop_debug: true
+    crop_debug: false
     resize_height: 256
     resize_width: 256
     num_pips_iter: 1
+    # Points per refinement chunk; 0 = all at once. Benchmarked on the 4090:
+    # 760 pts x 1 pips iter is 53 ms at 64 vs 11-14 ms at 1024.
+    query_chunk_size: 1024
     device: cuda
     checkpoint_path: /home/manipulator/git/point-to-pose/checkpoints/tapir/causal_bootstapir_checkpoint.pt
 
 sampler: 
   type: super_point_balanced
   params:
+    # num_points: 20
     num_points: 20
     density_per_kpx: -1
     fps_oversample_factor: 3
@@ -233,7 +249,7 @@ sampler:
 
     super_point_max_num_keypoints: 512
 
-    debug_level: 2
+    debug_level: 0
     debug_dir: /home/manipulator/git/point-to-pose/debug/sampler
     debug_save_superpoint: false
 
@@ -294,6 +310,8 @@ global_optimizer:
 visualization:
   params:
     visualize_points: true
+    # Draw the posed 3D box and xyz axis per object.
+    visualize_bbox: true
     # uncertainty, visible, visible_uncertainty, frame_id
     points_vis_method: frame_id
     save_images: false

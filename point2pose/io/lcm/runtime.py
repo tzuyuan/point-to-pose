@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+import time
 import importlib
 import queue
 import threading
@@ -31,8 +32,13 @@ class RgbdLcmSubscriber:
         max_frame_drain: int = 8,
         lcm_factory: Callable[[], object] | None = None,
         verbose: bool = False,
+        sub_queue_capacity: int = 0,
     ):
         self.rgbd_channel = str(rgbd_channel)
+        # LCM keeps its own per-subscription queue (default 30 messages) *before*
+        # our handler runs. If the handler thread is starved, that queue fills
+        # with old frames and they are delivered oldest-first. >0 caps it.
+        self.sub_queue_capacity = int(sub_queue_capacity)
         self.camera_info_channel = (
             str(camera_info_channel)
             if camera_info_channel
@@ -50,12 +56,27 @@ class RgbdLcmSubscriber:
         self._latest_camera_info: CameraInfoPacket | None = None
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run, name="RgbdLcmSubscriber")
+        # Communication stats (guarded by self._lock).
+        self._rx_count = 0
+        self._rx_dropped = 0  # frames discarded before anyone consumed them
+        self._rx_last_latency = float("nan")  # recv_time - msg.timestamp, seconds
+        self._rx_last_decode_s = float("nan")
+        self._rx_last_time = float("nan")
+        self._rx_last_gap = float("nan")  # inter-arrival time, seconds
+        # Handler-thread diagnostics: how long handle_timeout() waited before a
+        # message arrived (~0 repeatedly => LCM queue backlog being drained), and
+        # the max latency seen since the last stats snapshot.
+        self._rx_backlog_hits = 0
+        self._rx_max_latency_since = 0.0
+        self._rx_count_since = 0
 
     def start(self):
         if self._thread.is_alive():
             return
         self._lcm = self._lcm_factory()
-        self._lcm.subscribe(self.rgbd_channel, self._handle_rgbd)
+        sub = self._lcm.subscribe(self.rgbd_channel, self._handle_rgbd)
+        if self.sub_queue_capacity > 0 and hasattr(sub, "set_queue_capacity"):
+            sub.set_queue_capacity(self.sub_queue_capacity)
         self._lcm.subscribe(self.camera_info_channel, self._handle_camera_info)
         self._stop_event.clear()
         self._thread.start()
@@ -68,9 +89,15 @@ class RgbdLcmSubscriber:
     def _run(self):
         timeout_ms = max(1, int(round(1000.0 / self.sub_poll_hz)))
         while not self._stop_event.is_set():
-            self._lcm.handle_timeout(timeout_ms)
+            t0 = time.time()
+            handled = self._lcm.handle_timeout(timeout_ms)
+            if handled and (time.time() - t0) < 0.5e-3:
+                # Message was already waiting inside LCM: we are behind.
+                with self._lock:
+                    self._rx_backlog_hits += 1
 
     def _handle_rgbd(self, _channel: str, data: bytes):
+        t_rx = time.time()
         msg = rgbd_t.decode(data)
         rgb_image = unpack_image_from_bytes(
             msg.rgb_image,
@@ -95,11 +122,26 @@ class RgbdLcmSubscriber:
             depth_channel_type=int(msg.depth_channel_type),
             rgb_image=np.array(rgb_image, copy=True),
             depth_image=np.array(depth_image, copy=True),
+            recv_time=t_rx,
         )
+        t_done = time.time()
         with self._lock:
             if self.drop_stale_frames:
+                self._rx_dropped += len(self._rgbd_packets)
                 self._rgbd_packets.clear()
+            elif len(self._rgbd_packets) == self._rgbd_packets.maxlen:
+                self._rx_dropped += 1  # deque(maxlen) evicts the oldest
             self._rgbd_packets.append(packet)
+            self._rx_count += 1
+            self._rx_count_since += 1
+            self._rx_last_latency = t_rx - packet.timestamp
+            self._rx_max_latency_since = max(
+                self._rx_max_latency_since, self._rx_last_latency
+            )
+            self._rx_last_decode_s = t_done - t_rx
+            if self._rx_last_time == self._rx_last_time:  # not nan
+                self._rx_last_gap = t_rx - self._rx_last_time
+            self._rx_last_time = t_rx
 
     def _handle_camera_info(self, _channel: str, data: bytes):
         msg = camera_info_t.decode(data)
@@ -139,8 +181,33 @@ class RgbdLcmSubscriber:
             if not self._rgbd_packets:
                 return None
             packet = self._rgbd_packets[-1].copy()
+            self._rx_dropped += len(self._rgbd_packets) - 1
             self._rgbd_packets.clear()
             return packet
+
+    def comm_stats(self, reset_window: bool = False) -> dict:
+        """Snapshot of receive-side communication counters (seconds).
+
+        `rx_since`/`rx_max_latency_since`/`rx_backlog_hits` accumulate since the
+        last call with reset_window=True.
+        """
+        with self._lock:
+            out = {
+                "rx_count": self._rx_count,
+                "rx_dropped": self._rx_dropped,
+                "rx_latency_s": self._rx_last_latency,
+                "rx_decode_s": self._rx_last_decode_s,
+                "rx_gap_s": self._rx_last_gap,
+                "queued": len(self._rgbd_packets),
+                "rx_since": self._rx_count_since,
+                "rx_max_latency_since_s": self._rx_max_latency_since,
+                "rx_backlog_hits": self._rx_backlog_hits,
+            }
+            if reset_window:
+                self._rx_count_since = 0
+                self._rx_max_latency_since = 0.0
+                self._rx_backlog_hits = 0
+            return out
 
     def pop_oldest_rgbd(self) -> RGBDFramePacket | None:
         with self._lock:

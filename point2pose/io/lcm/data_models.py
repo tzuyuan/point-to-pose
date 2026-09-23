@@ -15,10 +15,14 @@ class RGBDFramePacket:
     depth_channel_type: int
     rgb_image: np.ndarray
     depth_image: np.ndarray
+    # Local wall-clock time when the packet was decoded by the subscriber
+    # (0.0 when unknown). Used for communication-delay debugging.
+    recv_time: float = 0.0
 
     def copy(self) -> "RGBDFramePacket":
         return RGBDFramePacket(
             timestamp=float(self.timestamp),
+            recv_time=float(self.recv_time),
             height=int(self.height),
             width=int(self.width),
             num_rgb_channels=int(self.num_rgb_channels),

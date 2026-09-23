@@ -49,6 +49,11 @@ class TapirTracker(Tracker):
 
         # Number of PIPs refinement iterations; 4 is the upstream tapnet default.
         self._num_pips_iter = config.get("num_pips_iter", 4)
+        # Query points are refined in chunks of this many. The upstream demo
+        # value 64 was tuned for memory on small GPUs; on a 4090 with ~760 live
+        # tracks it is 4-5x slower than one big chunk (12 sequential passes).
+        # 0 = all points in one chunk.
+        self._query_chunk_size = int(config.get("query_chunk_size", 1024))
 
         checkpoint_path = config.get(
             "checkpoint_path", "causal_bootstapir_checkpoint.pt"
@@ -311,7 +316,11 @@ class TapirTracker(Tracker):
             feature_grids=feature_grids,
             query_features=query_features,
             query_points_in_video=None,
-            query_chunk_size=64,
+            query_chunk_size=(
+                self._query_chunk_size
+                if self._query_chunk_size > 0
+                else int(query_features.lowres[0].shape[1])
+            ),
             causal_context=causal_context,
             get_causal_context=True,
         )

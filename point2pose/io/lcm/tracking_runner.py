@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import cv2
@@ -15,6 +16,16 @@ from point2pose.io.lcm.pose_export import (
 )
 from point2pose.io.lcm.runtime import NamedVecListLcmPublisher, RgbdLcmSubscriber
 from point2pose.utils.transform import inverse_SE3
+
+
+def _cuda_sync():
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    except Exception:
+        pass
 from point2pose.utils.visualization import (
     draw_points_on_image,
     draw_posed_3d_box,
@@ -55,8 +66,23 @@ class LcmTrackingRunner:
         self._drop_stale_frames = bool(self._lcm_cfg.get("drop_stale_frames", True))
         self._max_frame_drain = max(1, int(self._lcm_cfg.get("max_frame_drain", 8)))
         self._verbose = bool(self._lcm_cfg.get("verbose", False))
+        # Communication-delay debugging: print one timing line per tracked frame
+        # (and a periodic receive summary while collecting points).
+        self._comm_debug = bool(self._lcm_cfg.get("comm_debug", False))
+        self._comm_debug_every = max(1, int(self._lcm_cfg.get("comm_debug_every", 1)))
+        self._comm_last_report = 0.0
 
         self._visualize_points = self.cfg.visualization.params.visualize_points
+        # Draw the posed 3D box + xyz axis per object (set false to see only masks).
+        self._visualize_bbox = bool(
+            self.cfg.visualization.params.get("visualize_bbox", True)
+        )
+        # Print (and overlay) the age of each processed frame: process time now
+        # minus the rgb timestamp from the sensor.
+        self._print_frame_age = bool(self._lcm_cfg.get("print_frame_age", False))
+        self._sub_queue_capacity = int(self._lcm_cfg.get("sub_queue_capacity", 0))
+        self._timing = {}  # stage timestamps of the current loop iteration
+        self._t_loop_prev = None
         self._points_vis_method = self.cfg.visualization.params.points_vis_method
         self._save_images = self.cfg.visualization.params.save_images
         self._output_image_dir = Path(self.cfg.visualization.params.output_image_dir)
@@ -76,6 +102,7 @@ class LcmTrackingRunner:
             drop_stale_frames=self._drop_stale_frames,
             max_frame_drain=self._max_frame_drain,
             verbose=self._verbose,
+            sub_queue_capacity=self._sub_queue_capacity,
         )
         self.publisher = NamedVecListLcmPublisher(
             channel=self._obj_pose_channel,
@@ -411,6 +438,82 @@ class LcmTrackingRunner:
         self.publisher.submit(bbox_payload)
         self.mesh_pose_publisher.submit(mesh_payload)
 
+    def _print_comm_summary(self, rgbd_packet):
+        st = self.subscriber.comm_stats()
+        now = time.time()
+        print(
+            "[comm] rx={rx} dropped={dr} queued={q} | "
+            "sensor->rx {lat:6.1f} ms | decode {dec:5.1f} ms | "
+            "inter-arrival {gap:6.1f} ms | newest age {age:6.1f} ms".format(
+                rx=st["rx_count"],
+                dr=st["rx_dropped"],
+                q=st["queued"],
+                lat=1e3 * st["rx_latency_s"],
+                dec=1e3 * st["rx_decode_s"],
+                gap=1e3 * st["rx_gap_s"],
+                age=1e3 * (now - rgbd_packet.timestamp),
+            ),
+            flush=True,
+        )
+
+    def _print_timing_table(self, fid: int):
+        """Per-frame timeline of one loop iteration, in ms.
+
+        sensor->rx   sensor stamp -> decoded in the LCM handler thread (wire + any
+                     starvation of that thread).  Compare with the probe: if the
+                     probe shows ~2 ms and this shows more, the handler thread is
+                     being starved by this process (GIL) or LCM queue backlog.
+        rx->pop      sat in our deque waiting for the main loop.
+        frame        create_frame_from_lcm (copies, normalisation).
+        step         pipeline.step incl. CUDA sync.
+        publish      pose export + submit.
+        vis          visualize_tracking_results (mask .cpu(), drawing).
+        show         cv2.imshow + waitKey(1).
+        AGE@show     now - rgb timestamp when the image hits the screen; this is
+                     the delay you see in the window.
+        loop         previous show -> this show (1/loop = effective fps).
+        """
+        T = self._timing
+        st = self.subscriber.comm_stats(reset_window=True)
+        ms = lambda a, b: 1e3 * (T[b] - T[a])  # noqa: E731
+        loop_ms = (
+            1e3 * (T["show"] - self._t_loop_prev) if self._t_loop_prev else float("nan")
+        )
+        self._t_loop_prev = T["show"]
+        mt = getattr(self.pipeline, "last_module_times", None) or {}
+        mods = " ".join(f"{k[:5]}={1e3 * v:.0f}" for k, v in mt.items() if v >= 0.0005)
+        print(
+            "[timing] f{fid:<5d}"
+            " sensor->rx {a:6.1f} | rx->pop {b:6.1f} | frame {c:5.1f} | step {d:6.1f}"
+            " | publish {e:4.1f} | vis {f:5.1f} | show {g:5.1f} || AGE@show {age:6.1f}"
+            " | loop {loop:6.1f} ms".format(
+                fid=fid,
+                a=1e3 * (T["rx"] - T["sensor"]),
+                b=1e3 * (T["pop"] - T["rx"]),
+                c=ms("pop", "frame"),
+                d=ms("frame", "step"),
+                e=ms("step", "publish"),
+                f=ms("publish", "vis"),
+                g=ms("vis", "show"),
+                age=1e3 * (T["show"] - T["sensor"]),
+                loop=loop_ms,
+            ),
+            flush=True,
+        )
+        print(
+            "         rx-thread: got {n} msgs since last, max sensor->rx {mx:6.1f} ms,"
+            " lcm-backlog hits {bl}, dropped total {dr}, queued {q}"
+            "{mods}".format(
+                n=st["rx_since"],
+                mx=1e3 * st["rx_max_latency_since_s"],
+                bl=st["rx_backlog_hits"],
+                dr=st["rx_dropped"],
+                q=st["queued"],
+                mods=(" | step modules(ms): " + mods) if mods else "",
+            ),
+            flush=True,
+        )
+
     def _show_status_screen(self, message: str):
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
         lines = [
@@ -559,7 +662,7 @@ class LcmTrackingRunner:
 
         # Draw pose information
         for i, obj in enumerate(objects):
-            if obj.pose is not None:
+            if self._visualize_bbox and obj.pose is not None:
                 pose = obj.pose @ obj.init_pose
                 half = 0.5 * np.asarray(obj.bbox.extent, dtype=float)
                 bbox_min_max_local = np.vstack([-half, +half])  # (2,3)
@@ -619,6 +722,10 @@ class LcmTrackingRunner:
                         if not self._handle_key(key):
                             break
                         continue
+
+                    if self._comm_debug and time.time() - self._comm_last_report > 1.0:
+                        self._comm_last_report = time.time()
+                        self._print_comm_summary(rgbd_packet)
 
                     # Convert to display format (BGR)
                     rgb = self._normalize_rgb(rgbd_packet.rgb_image)
@@ -705,10 +812,14 @@ class LcmTrackingRunner:
 
                 else:
                     # Track the live stream rather than a backlog.
+                    T = self._timing
+                    T.clear()
+                    T["loop_start"] = time.time()
                     if self._drop_stale_frames:
                         rgbd_packet = self.subscriber.pop_latest_rgbd()
                     else:
                         rgbd_packet = self.subscriber.pop_oldest_rgbd()
+                    T["pop"] = time.time()
 
                     # Create frame for pipeline
                     frame = (
@@ -723,15 +834,30 @@ class LcmTrackingRunner:
                         if not self._handle_key(key):
                             break
                         continue
+                    T["frame"] = time.time()
+                    T["sensor"] = float(rgbd_packet.timestamp)
+                    T["rx"] = float(rgbd_packet.recv_time) or T["pop"]
 
                     # Run pipeline step
                     self.pipeline.step(frame)
+                    if self._comm_debug:
+                        _cuda_sync()  # torch work is async; make 'step' honest
+                    T["step"] = time.time()
                     self._publish_current_objects(frame.timestamp)
+                    T["publish"] = time.time()
+                    if self._print_frame_age:
+                        print(
+                            f"[age] frame {self.frame_count}: now - rgb timestamp = "
+                            f"{1e3 * (T['publish'] - T['sensor']):.1f} ms",
+                            flush=True,
+                        )
 
                     # Visualize results
                     display_frame = self.visualize_tracking_results(
                         frame, self.pipeline.objects, self.frame_count
                     )
+                    T["vis"] = time.time()
+                    frame_age_ms = 1e3 * (T["vis"] - T["sensor"])
 
                     # Show tracking info
                     height, _ = display_frame.shape[:2]
@@ -753,6 +879,16 @@ class LcmTrackingRunner:
                         (255, 255, 255),
                         2,
                     )
+                    if self._print_frame_age:
+                        cv2.putText(
+                            display_frame,
+                            f"Age: {frame_age_ms:.0f} ms",
+                            (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7,
+                            (0, 255, 255),
+                            2,
+                        )
 
                     self.frame_count += 1
 
@@ -761,6 +897,13 @@ class LcmTrackingRunner:
 
                 # Handle keyboard input
                 key = cv2.waitKey(1) & 0xFF
+                if self.tracking_started and self._timing:
+                    self._timing["show"] = time.time()
+                    if (
+                        self._comm_debug
+                        and (self.frame_count - 1) % self._comm_debug_every == 0
+                    ):
+                        self._print_timing_table(self.frame_count - 1)
                 if not self._handle_key(key):
                     break
 

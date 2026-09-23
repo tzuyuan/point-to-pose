@@ -1,5 +1,6 @@
 import time
 import os
+from datetime import datetime
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -136,6 +137,12 @@ class FrontEnd:
 
         # -------------- debug related --------------
         self.debug_level = self.pipeline_cfg.get("debug_level", 0)
+        # Synchronize CUDA around the segmenter/tracker timers. Without this the
+        # segmenter time is only kernel-launch time and its GPU work lands in
+        # the tracker's number. Cost is negligible (the tracker syncs anyway).
+        self.timing_cuda_sync = bool(
+            self.pipeline_cfg.get("timing_cuda_sync", True)
+        ) and torch.cuda.is_available()
         self.debug_dir = self.pipeline_cfg.get("debug_dir", None)
 
         if self.debug_level > 0 and self.debug_dir is not None:
@@ -235,10 +242,14 @@ class FrontEnd:
         ##########################################################
         ##                     segmenter                        ##
         ##########################################################
+        if self.timing_cuda_sync:
+            torch.cuda.synchronize()
         t_start = time.time()
         if self.use_segmenter:
             _, mask_logits = self.segmenter.segment(frame.rgb)
             frame.mask = mask_logits  # mask is a torch tensor on gpu
+        if self.timing_cuda_sync:
+            torch.cuda.synchronize()
         fe_timings["segmenter"] = time.time() - t_start
 
         ##########################################################
@@ -246,9 +257,12 @@ class FrontEnd:
         ##########################################################
         t_start = time.time()
         tracks, uncertainties, visibles = self.tracker.track_once(frame)
+        if self.timing_cuda_sync:
+            torch.cuda.synchronize()
         fe_timings["tracker"] = time.time() - t_start
 
-        print(f"number of tracks: {len(tracks)}")
+        if self.debug_level > 0:
+            print(f"number of tracks: {len(tracks)}")
 
         # if frame.id == 261:
         #     print("tracks: ", tracks)
@@ -605,8 +619,10 @@ class FrontEnd:
         timing_str = " | ".join(
             [f"{k}: {v*1000:.2f}ms" for k, v in fe_timings.items() if v > 0]
         )
+        now = datetime.now()
+        wall = f"{now:%H:%M:%S}.{now.microsecond // 1000:03d}"
         print(
-            f"[FrontEnd] Frame {frame.id} timing: {timing_str} | Total: {total_fe_time*1000:.2f}ms"
+            f"[FrontEnd] {wall} Frame {frame.id} timing: {timing_str} | Total: {total_fe_time*1000:.2f}ms"
         )
 
         return result

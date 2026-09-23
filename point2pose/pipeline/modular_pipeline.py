@@ -662,16 +662,20 @@ class ModularPipeline:
         module_times["logging"] = time.time() - t0
 
         iter_total_time = time.time() - iter_start_time
-        print(
-            f"Frame {frame.id}: "
-            f"frontend={module_times['frontend']:.4f}s, "
-            f"track_table={module_times['track_table']:.4f}s, "
-            f"local_opt={module_times['local_opt']:.4f}s, "
-            f"keyframe={module_times['keyframe']:.4f}s, "
-            f"global_opt={module_times['global_opt']:.4f}s, "
-            f"logging={module_times['logging']:.4f}s, "
-            f"total={iter_total_time:.4f}s"
-        )
+        # Exposed for external timing logs (e.g. the LCM runner's [timing] table).
+        self.last_module_times = dict(module_times)
+        self.last_iter_total_time = iter_total_time
+        if self.debug_level > 0:
+            print(
+                f"Frame {frame.id}: "
+                f"frontend={module_times['frontend']:.4f}s, "
+                f"track_table={module_times['track_table']:.4f}s, "
+                f"local_opt={module_times['local_opt']:.4f}s, "
+                f"keyframe={module_times['keyframe']:.4f}s, "
+                f"global_opt={module_times['global_opt']:.4f}s, "
+                f"logging={module_times['logging']:.4f}s, "
+                f"total={iter_total_time:.4f}s"
+            )
 
         # Return poses
         out_pose = np.tile(np.eye(4), (self.num_obj, 1, 1))
